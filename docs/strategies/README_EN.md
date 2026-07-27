@@ -17,7 +17,7 @@ Strategy outputs are experimental signals and must not be used as the basis for 
 
 ## 2. Independent Strategies
 
-The settings page directly selects one active strategy suite. Basic Strategies, Z-ge, Li Daxiao, Sector Tide, and Preset Text are peer, mutually exclusive suites. Each suite independently owns its candidate scope, scoring, entry, exit, sizing, and model-prompt rules. Inactive suites do not enter the current new-position scan or decision context.
+The settings page directly selects one active strategy suite. Basic Strategies, Z-ge, Li Daxiao, Sector Tide, NiuOne Method, and Preset Text are peer, mutually exclusive suites. Each suite independently owns its candidate scope, scoring, entry, exit, sizing, and model-prompt rules. Inactive suites do not enter the current new-position scan or decision context.
 
 Switching suites does not rewrite historical position attribution. The active suite controls new BUYs only; each existing position dynamically loads its original exit discipline from the `strategy_mark` captured at entry. Every scan-and-decision cycle refreshes and evaluates all open positions with local exit rules before processing current-suite candidates or model judgment. SELL/HOLD checks continue when the candidate list is empty or the daily loss budget has fired; that budget pauses new BUYs only. Preset Text uses the basic scan only as a raw candidate pool and applies the text rules as the independent decision policy. Empty text creates no new simulated positions and only performs risk checks on existing holdings.
 
@@ -45,6 +45,7 @@ Automatic exits are discrete scheduled checks, not broker-native conditional ord
 | Z-ge | Shaofu B1, B2 confirmation, B3 continuation, Super B1, exit risk controls | Trend- and timing-oriented rule experiments |
 | Li Daxiao | Undervalued blue chips, bottom formation, contrarian sentiment, deleveraging defense | Value- and defense-oriented rule experiments |
 | Sector Tide | Main-theme leader, early rotation, freeze recovery | Market regime, industry rotation, and within-sector relative strength |
+| NiuOne Method | NiuOne Leader, NiuOne Pullback, NiuOne Emerging | Infers and tracks market mainlines from multi-stock strength resonance |
 
 ### 3.1 Basic Strategies
 
@@ -126,7 +127,21 @@ An industry needs at least three valid members, and each stock needs at least 55
 
 The entry-score thresholds for Main-theme Leader, Early Rotation, and Freeze Recovery are 8.0, 8.2, and 8.5; their minimum within-industry strength percentiles are 80, 70, and 70. Candidate-cache records must carry the market regime, industry tide, Dragon-Tiger snapshot date/availability/capped adjustment, US-session date/risk tone/sector mapping, news label/summary/fetch time, structural stop, gap reserve, effective loss distance, and all applicable risk budgets. The execution layer recalculates risk using the live simulated fill price and shared registered parameters; it does not trust model-supplied risk numbers.
 
-The primary implementation files are `app/strategies/scoring/sector_tide.py`, `app/strategies/sector_tide_risk.py`, and `app/trading/practice_trader.py`. Run `python3 -m unittest -v tests.test_sector_tide_strategy` for the focused regression suite and `./scripts/validate.sh` for full validation.
+The primary implementation files are `app/strategies/scoring/sector_tide.py`, `app/strategies/sector_tide_risk.py`, and `app/trading/practice_trader.py`. Run `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_sector_tide_strategy.py' -v` for the focused regression suite and `./scripts/validate.sh` for full validation.
+
+### 3.5 NiuOne Method
+
+The NiuOne Method first scores every stock in the same full, quote-valid cross section, then aggregates strong stocks by industry as an auditable theme proxy. Stock strength combines 20-day and 5-day relative strength, volume participation, relative turnover amount, EMA20/EMA50 alignment, and 20-day highs. Turnover amount is a capital-participation signal only: it is neither an eligibility gate nor an input to position caps. Industry is a deterministic proxy, not an assertion that similarly named stocks share a concept.
+
+Theme scores combine strong-stock strength, breadth, leadership depth, capital participation, persistence across scans, and bounded Dragon-Tiger/news confirmation. Contribution weights use stock strength and square-root turnover; effective strong-stock count is `1 / Σ(weight²)`. A single dominant stock is penalized and cannot confirm a mainline. The result may explicitly be `mainline.mode=none`.
+
+Theme states progress through `candidate`, `emerging`, `mainline`, `diverging`, `fading`, and `inactive`. Normal upgrades require repeated scan confirmation. A first scan can confirm only an exceptional theme with score ≥84, at least four strong stocks, and effective count ≥3. Normal mainline quality requires score ≥75, at least three strong stocks, and effective count ≥2.4.
+
+- **NiuOne Leader** requires a confirmed mainline and a top-20% core stock with a breakout or first low-volume EMA20 pullback. Threshold 8.0; absolute cap 30%.
+- **NiuOne Pullback** requires a mainline/diverging theme with score ≥70 and a top-30% stock reclaiming or holding EMA20. It rejects gains above 4% or extensions above 1 ATR. Threshold 8.2; cap 25%.
+- **NiuOne Emerging** requires an emerging theme with at least two strong stocks and a core breakout/reclaim. It rejects gains above 7% or extensions above 1.5 ATR. Threshold 8.4; cap 15%, with no same-day add.
+
+Offensive/rotation/recovery per-trade NAV risk is 1.50%/1.00%/0.60%; suite open-risk limits are 4.50%/3.00%/1.80%, theme-risk limits 3.00%/2.00%/1.20%, total exposure 70%/55%/35%, and theme exposure 55%/40%/25%. Defensive state sets them to zero. The suite has a hard five-position limit, while market and pre-lunch dynamic controls normally tighten it to three. Structural-stop, gap, execution, two-name-per-theme, 2R partial-exit, and 2 ATR trailing checks are enforced locally. Dragon-Tiger and three-day news are bounded confirmation only: positive context cannot manufacture a mainline or override an entry blocker, while explicit negative evidence remains active. Primary files are `app/strategies/scoring/niuone.py`, `app/strategies/niuone_risk.py`, and `app/trading/practice_trader.py`. Run `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_niuone_strategy.py' -v` for focused regressions and `./scripts/validate.sh` for full validation.
 
 The names above are used only to label rule experiments in this project. They do not indicate that the original authors participated in, approved, or endorsed this project. When redistributing related descriptions, retain the references to `zettaranc-skill` and `li-daxiao-skill`.
 
@@ -158,7 +173,7 @@ Related settings:
 | `DASHBOARD_MAX_TOTAL_POSITION_PCT` | Reference percentage for total simulated exposure |
 | `DASHBOARD_MIN_CASH_RESERVE_PCT` | Reference percentage for simulated cash reserves |
 
-Percentage settings are primarily model context and research discipline by default. Suites with registered hard limits, including Z-ge and Sector Tide, enforce the stricter of the relevant global total-exposure/cash limits and their suite limits in the simulation layer. Whether or not a setting is hard-blocked in simulation, it must not be treated as a safeguard for a real brokerage account.
+Percentage settings are primarily model context and research discipline by default. Suites with registered hard limits recheck their own limits in the simulation layer. NiuOne single-name exposure is governed by its independent risk budget and registered 30%/25%/15% caps, rather than being reduced to the default 10% single-name reference. Global total exposure, dynamic market exposure, and cash-reserve limits still apply whenever they are stricter. These controls must not be treated as safeguards for a real brokerage account.
 
 ## 5. Configuration
 
@@ -166,10 +181,12 @@ Prefer maintaining the active independent strategy, text rules, and simulation d
 
 | Setting | Description |
 |---|---|
-| `DASHBOARD_ACTIVE_STRATEGY` | Active independent strategy: `base`, `zettaranc`, `li_daxiao_bottom`, `sector_tide`, or `preset_text` |
+| `DASHBOARD_ACTIVE_STRATEGY` | Active independent strategy: `base`, `zettaranc`, `li_daxiao_bottom`, `sector_tide`, `niuone`, or `preset_text` |
 | `DASHBOARD_PRESET_STRATEGY_TEXT` | Custom preset text rules |
-| `DASHBOARD_STOCK_UNIVERSE` | Comma-separated scopes: `st`, `chi_next`, `star_market`, and `main_board`; defaults to main board only |
+| `DASHBOARD_STOCK_UNIVERSE` | Final-candidate and new-BUY scope: `st`, `chi_next`, `star_market`, and `main_board`; defaults to Main Board; NiuOne's full reference universe does not expand it |
 | `DASHBOARD_TRADE_DISCIPLINE_TEXT` | Additional simulation discipline |
+
+When NiuOne is active, the scanner uses every supported non-ST Shanghai/Shenzhen A-share (Main Board, ChiNext, and STAR Market) as its market and mainline reference universe. It fetches the complete quote set and sends every reference stock into uncapped K-line analysis, with no prefilter based on turnover amount, daily return, or limit-up-like movement. Final displayed candidates and new BUYs remain strictly limited by `DASHBOARD_STOCK_UNIVERSE` and require only a usable simulated-execution price. Existing positions may still execute stop-loss, take-profit, and other SELL controls after falling outside the setting, so changing the universe cannot trap a position. ST names enter final trading only when explicitly selected. Beijing Stock Exchange names remain excluded because the current quote, board-limit, and trading-permission models do not support them yet.
 
 Local configuration is stored in `.local-data/dashboard.env` by default. This file may contain model keys and administrative credentials and must not be committed to Git or copied into public contexts.
 

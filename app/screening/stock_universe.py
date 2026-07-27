@@ -9,6 +9,7 @@ from collections.abc import Iterable
 STOCK_UNIVERSE_ENV = "DASHBOARD_STOCK_UNIVERSE"
 DEFAULT_STOCK_UNIVERSE = "main_board"
 STOCK_UNIVERSE_ORDER = ("st", "chi_next", "star_market", "main_board")
+FULL_SUPPORTED_NON_ST_UNIVERSE = ("chi_next", "star_market", "main_board")
 STOCK_UNIVERSE_OPTIONS = (
     {
         "id": "st",

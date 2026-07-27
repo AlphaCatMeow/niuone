@@ -35,6 +35,7 @@ def with_strategy_profile(strategy_name: str, payload: dict[str, Any]) -> dict[s
     score = float(payload.get("score") or 0)
     threshold = float(profile.get("entry_threshold", 8.0))
     priority = int(profile.get("priority", 50))
+    payload["strategy_id"] = strategy_name
     payload["score"] = round(score, 1)
     payload["entry_threshold"] = threshold
     payload["strategy_priority"] = priority
@@ -53,7 +54,8 @@ def strategy_hard_blockers(strategy_name: str, payload: dict[str, Any]) -> list[
     blockers: list[str] = []
     dist = safe_float(payload.get("distance_pct"))
     is_sector_tide = strategy_name in {"tide_leader", "tide_rotation", "tide_recovery"}
-    if not is_sector_tide and dist is not None and dist > COMMON_MAX_BBI_DISTANCE_PCT:
+    is_niuone = strategy_name in {"niu_leader", "niu_pullback", "niu_emerging"}
+    if not is_sector_tide and not is_niuone and dist is not None and dist > COMMON_MAX_BBI_DISTANCE_PCT:
         blockers.append(f"距BBI>{COMMON_MAX_BBI_DISTANCE_PCT}%")
 
     risk_flags = set(str(x) for x in (payload.get("risk_flags") or []))
@@ -138,7 +140,7 @@ def strategy_hard_blockers(strategy_name: str, payload: dict[str, Any]) -> list[
         vol = safe_float(payload.get("volatility_20d_pct"))
         if vol is not None and vol > 3.8:
             blockers.append("底部波动过高")
-    elif is_sector_tide:
+    elif is_sector_tide or is_niuone:
         if not payload.get("market_allows_buys") or payload.get("market_hard_stop"):
             blockers.append("市场风控禁止新开仓")
         if not payload.get("sector_data_eligible"):
@@ -156,7 +158,54 @@ def strategy_hard_blockers(strategy_name: str, payload: dict[str, Any]) -> list[
         acceleration = safe_float(payload.get("sector_rank_acceleration")) or 0.0
         extension = safe_float(payload.get("extension_atr"))
         change = safe_float(payload.get("change_pct"))
-        if strategy_name == "tide_leader":
+        if strategy_name == "niu_leader":
+            if regime not in {"offensive", "rotation"}:
+                blockers.append("牛牛领航仅用于进攻/轮动行情")
+            if status != "mainline":
+                blockers.append("主题尚未确认为市场主线")
+            if not payload.get("mainline_selected"):
+                blockers.append("主题未进入当前主线/双主线")
+            if payload.get("single_stock_dominated"):
+                blockers.append("单只强股不足以确认主线")
+            if not payload.get("stock_strong") or rank < 80:
+                blockers.append("个股不是主线核心强股")
+            if not (payload.get("breakout") or payload.get("pullback")):
+                blockers.append("未形成突破/首次缩量回踩")
+            if extension is not None and extension > 1.6:
+                blockers.append("距EMA20超过1.6ATR")
+        elif strategy_name == "niu_pullback":
+            if regime not in {"offensive", "rotation", "recovery"}:
+                blockers.append("市场状态不允许主线回踩")
+            if status not in {"mainline", "diverging"} or (safe_float(payload.get("mainline_score")) or 0) < 70:
+                blockers.append("主线强度不足")
+            if status == "mainline" and not payload.get("mainline_selected"):
+                blockers.append("主题未进入当前主线/双主线")
+            if rank < 70:
+                blockers.append("个股未进入主线前30%")
+            if not (payload.get("pullback") or payload.get("reclaim")):
+                blockers.append("未出现EMA20承接/收复")
+            if change is not None and change > 4:
+                blockers.append("回踩战法单日涨幅>4%")
+            if extension is not None and extension > 1:
+                blockers.append("回踩战法距EMA20超过1ATR")
+        elif strategy_name == "niu_emerging":
+            if regime not in {"offensive", "rotation", "recovery"}:
+                blockers.append("市场状态不允许启动观察仓")
+            if status != "emerging":
+                blockers.append("主题不是待确认新主线")
+            if int(safe_float(payload.get("strong_stock_count")) or 0) < 2:
+                blockers.append("少于两只强势股共同确认")
+            if payload.get("single_stock_dominated"):
+                blockers.append("单只强股主导，启动证据不足")
+            if not payload.get("stock_strong") or rank < 80:
+                blockers.append("个股不是新主线核心强股")
+            if not (payload.get("breakout") or payload.get("reclaim")):
+                blockers.append("启动买点未确认")
+            if change is not None and change > 7:
+                blockers.append("启动战法单日涨幅>7%")
+            if extension is not None and extension > 1.5:
+                blockers.append("启动战法距EMA20超过1.5ATR")
+        elif strategy_name == "tide_leader":
             if regime not in {"offensive", "rotation"}:
                 blockers.append("主线领航仅用于进攻/轮动行情")
             if status != "leading":

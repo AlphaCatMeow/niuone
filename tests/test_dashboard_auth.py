@@ -4620,6 +4620,16 @@ process.stdout.write(JSON.stringify({{
         self.assertIn('默认 4096 tokens；按所选接口映射为兼容的输出长度参数', ADMIN_FRONTEND)
         self.assertIn('默认 128000 tokens；填写后保存为数字 tokens', ADMIN_FRONTEND)
 
+    def test_full_market_scan_timeout_default_has_headroom(self):
+        item = next(
+            item
+            for item in dashboard.ENV_CONFIG_SCHEMA
+            if item['name'] == 'DASHBOARD_B1_SCAN_TIMEOUT_SECONDS'
+        )
+
+        self.assertEqual(dashboard.B1_SCAN_TIMEOUT_SECONDS, 480)
+        self.assertEqual(item['default'], '480')
+
     def test_business_settings_are_local_to_dashboard_env(self):
         original_env_file = dashboard.DASHBOARD_ENV_FILE
         original_schedule_times = dashboard.PRACTICE_SCHEDULE_TIMES

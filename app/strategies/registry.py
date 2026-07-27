@@ -26,7 +26,7 @@ STRATEGY_SOURCE_OPTIONS: tuple[dict[str, str], ...] = (
     {
         "id": STRATEGY_SOURCE_BUILTIN,
         "label": "内置策略",
-        "desc": "在基础策略、Z哥、李大霄、板块潮汐中选择一个参与选股和买卖决策",
+        "desc": "在基础策略、Z哥、李大霄、板块潮汐、牛牛战法中选择一个参与选股和买卖决策",
         "color": "#60a5fa",
     },
     {
@@ -196,6 +196,66 @@ STRATEGY_DEFINITIONS: dict[str, dict[str, Any]] = {
             "risk_reward_rank": 1,
         },
     },
+    "niu_leader": {
+        "label": "牛牛领航",
+        "color": "#8b5cf6",
+        "desc": "已确认市场主线中的核心强势股突破或首次缩量回踩",
+        "family": "persona",
+        "persona": "niuone",
+        "scorer": "score_niu_leader",
+        "display_order": 66,
+        "position_limit_pct": 30.0,
+        "aliases": ["牛牛战法", "牛牛领航", "niu_leader"],
+        "profile": {
+            "priority": 91,
+            "entry_threshold": 8.0,
+            "score_basis": "主线确认/强股共振/核心地位/买点质量",
+            "position_hint": "按有效损失距离动态定仓，单票绝对上限30%",
+            "time_stop": "5个交易日未创新高或主线连续转弱退出",
+            "certainty_rank": 1,
+            "risk_reward_rank": 2,
+        },
+    },
+    "niu_pullback": {
+        "label": "牛牛回踩",
+        "color": "#a78bfa",
+        "desc": "确认主线分歧时参与核心股EMA20附近的缩量承接或收复",
+        "family": "persona",
+        "persona": "niuone",
+        "scorer": "score_niu_pullback",
+        "display_order": 68,
+        "position_limit_pct": 25.0,
+        "aliases": ["牛牛回踩", "niu_pullback"],
+        "profile": {
+            "priority": 84,
+            "entry_threshold": 8.2,
+            "score_basis": "主线仍在/核心股分歧承接/拒绝追高",
+            "position_hint": "按轮动风险预算动态定仓，单票绝对上限25%",
+            "time_stop": "3个交易日未恢复强势或主线确认退潮退出",
+            "certainty_rank": 2,
+            "risk_reward_rank": 1,
+        },
+    },
+    "niu_emerging": {
+        "label": "牛牛启动",
+        "color": "#c084fc",
+        "desc": "多只强势股共同指向的新主线，以小仓等待二次确认",
+        "family": "persona",
+        "persona": "niuone",
+        "scorer": "score_niu_emerging",
+        "display_order": 69,
+        "position_limit_pct": 15.0,
+        "aliases": ["牛牛启动", "niu_emerging"],
+        "profile": {
+            "priority": 76,
+            "entry_threshold": 8.4,
+            "score_basis": "新主线启动/至少双强股确认/小仓验证",
+            "position_hint": "观察仓，单票绝对上限15%，次日确认后才允许加仓",
+            "time_stop": "T+2未升级为确认主线则退出",
+            "certainty_rank": 3,
+            "risk_reward_rank": 1,
+        },
+    },
     "super_b1": {
         "label": "超级B1",
         "color": "#fb7185",
@@ -328,6 +388,13 @@ STRATEGY_SUITES: dict[str, dict[str, Any]] = {
         "desc": "市场状态、行业轮动、隔夜美股映射、个股消息与板块内领涨",
         "color": "#06b6d4",
         "strategy_ids": strategy_ids_for_persona("sector_tide"),
+    },
+    "niuone": {
+        "id": "niuone",
+        "label": "牛牛战法",
+        "desc": "从强势股共振识别市场主线，确认后参与领航、回踩和启动买点",
+        "color": "#8b5cf6",
+        "strategy_ids": strategy_ids_for_persona("niuone"),
     },
 }
 
@@ -483,9 +550,13 @@ def default_trade_discipline_text(
     adaptive_position_mult: float = 1.0,
     zettaranc_enabled: bool = True,
     sector_tide_enabled: bool = False,
+    niuone_enabled: bool = False,
 ) -> str:
     position_limit_desc = str(position_limit_desc or "无固定百分比硬限制")
     position_rule = (
+        "- 牛牛战法由动态风险预算决定仓位：进攻/轮动/修复的单笔风险预算分别为权益1.50%/1.00%/0.60%，策略内组合未实现止损风险≤4.50%/3.00%/1.80%，总仓≤70%/55%/35%，主题敞口≤55%/40%/25%；防守禁止新仓。领航/回踩/启动的30%/25%/15%仅是单票绝对天花板，同一主题最多2只、同时最多5只。"
+        if niuone_enabled
+        else
         "- 板块潮汐由动态风险预算决定仓位：进攻/轮动/修复的单笔风险预算分别为权益0.30%/0.20%/0.10%，策略内组合未实现止损风险≤1.50%/0.80%/0.30%，总仓≤45%/30%/15%，行业敞口≤12%/10%/6%；防守禁止新仓。主线/轮动/修复的8%/6%/4%仅是单票绝对天花板，同一行业最多2只。"
         if sector_tide_enabled
         else
@@ -494,6 +565,9 @@ def default_trade_discipline_text(
         else "- 仓位不按固定百分比硬卡：首次建仓、加仓、减仓比例由评分、风险标记、盘面级别和账户状态决定；集中持仓必须在reason说明依据。"
     )
     execution_rule = (
+        "- 每条 BUY/SELL 必须给出100股整数倍 shares；牛牛战法执行层按“结构止损距离+近60日向下跳空P95与0.5ATR孰高+0.20%费用滑点”计算有效损失距离，再复核单笔、策略组合、主题风险预算和动态仓位上限；任何一项超限都直接拦截且不自动缩量。"
+        if niuone_enabled
+        else
         "- 每条 BUY/SELL 必须给出100股整数倍 shares；板块潮汐执行层按“结构止损距离+近60日向下跳空P95与0.5ATR孰高+0.20%费用滑点”计算有效损失距离，再复核单笔、策略组合、行业风险预算和动态仓位上限；任何一项超限都直接拦截且不自动缩量。"
         if sector_tide_enabled
         else
@@ -502,6 +576,9 @@ def default_trade_discipline_text(
         else "- 每条 BUY/SELL 的仓位大小由你决定：必须给出100股整数倍 shares；仓位大小一律按“参考价或成交价 × shares ÷ 当前总权益 × 100%”定义，并在 reason 里写明这个百分比依据；执行层不会替你补默认仓位或自动缩量，现金不足、动态盘面暂停买入或超过可卖数量会直接拦截。"
     )
     risk_rule = (
+        "- 牛牛战法退出：结构止损；主题fading/inactive或主线分数<55连续两次；市场硬停止且主线转弱；领航5日/回踩3日/启动T+2不延续；达到2R先减半，余仓峰值-2ATR跟踪"
+        if niuone_enabled
+        else
         "- 板块潮汐退出：结构止损；行业分数<55连续两次；复合风险硬停止且行业转弱；主线5日/轮动3日/修复T+2不延续；达到2R先减半，余仓峰值-2ATR跟踪"
         if sector_tide_enabled
         else
@@ -510,11 +587,14 @@ def default_trade_discipline_text(
         else "- 系统底线风控：持仓超25日退出；其他止损止盈按当前激活策略和既有持仓标记执行"
     )
     registered_position_rule = (
+        "- 牛牛战法动态风险预算、总仓/主题敞口、最多5只持仓和30%/25%/15%绝对上限是执行层硬限制，不是参考值。"
+        if niuone_enabled
+        else
         "- 板块潮汐动态风险预算、总仓/行业敞口和8%/6%/4%绝对上限是执行层硬限制，不是参考值。"
         if sector_tide_enabled
         else f"- 注册策略仓位纪律只作为参考：{position_limit_desc}。"
     )
-    generic_exit_rules = [] if sector_tide_enabled else [
+    generic_exit_rules = [] if sector_tide_enabled or niuone_enabled else [
         "- 移动止损：盈利>5%后进入回撤保护，回到成本附近自动退出",
         "- 信号恶化退出：持有>10天仍未站回BBI且盈利不足，或持有>12天仍亏>3%，自动离场",
     ]

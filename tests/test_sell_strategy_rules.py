@@ -519,8 +519,10 @@ class SellStrategyRuleTests(unittest.TestCase):
         original_execution_time = trader.is_a_share_execution_time
         original_quote = trader.execution_quote
         saved_universe = os.environ.get(trader.STOCK_UNIVERSE_ENV)
+        saved_active = os.environ.get(trader.ACTIVE_STRATEGY_ENV)
         try:
             os.environ[trader.STOCK_UNIVERSE_ENV] = "main_board"
+            os.environ[trader.ACTIVE_STRATEGY_ENV] = "zettaranc"
             trader.is_a_share_execution_time = lambda dt=None: (True, "连续竞价交易时段")
             trader.execution_quote = lambda code: {"price": 10.0, "name": "创业测试", "source": "test"}
             state = {"cash": 100000.0, "positions": {}, "trade_log": []}
@@ -554,6 +556,10 @@ class SellStrategyRuleTests(unittest.TestCase):
                 os.environ.pop(trader.STOCK_UNIVERSE_ENV, None)
             else:
                 os.environ[trader.STOCK_UNIVERSE_ENV] = saved_universe
+            if saved_active is None:
+                os.environ.pop(trader.ACTIVE_STRATEGY_ENV, None)
+            else:
+                os.environ[trader.ACTIVE_STRATEGY_ENV] = saved_active
 
         self.assertEqual(executed, [])
         self.assertEqual(state["positions"], {})
@@ -561,8 +567,10 @@ class SellStrategyRuleTests(unittest.TestCase):
 
     def test_stock_universe_allows_st_across_supported_boards(self):
         saved_universe = os.environ.get(trader.STOCK_UNIVERSE_ENV)
+        saved_active = os.environ.get(trader.ACTIVE_STRATEGY_ENV)
         try:
             os.environ[trader.STOCK_UNIVERSE_ENV] = "st"
+            os.environ[trader.ACTIVE_STRATEGY_ENV] = "zettaranc"
             self.assertTrue(trader.candidate_in_stock_universe({"code": "300001", "name": "*ST测试"}))
             self.assertFalse(trader.candidate_in_stock_universe({"code": "300001", "name": "创业测试"}))
         finally:
@@ -570,6 +578,10 @@ class SellStrategyRuleTests(unittest.TestCase):
                 os.environ.pop(trader.STOCK_UNIVERSE_ENV, None)
             else:
                 os.environ[trader.STOCK_UNIVERSE_ENV] = saved_universe
+            if saved_active is None:
+                os.environ.pop(trader.ACTIVE_STRATEGY_ENV, None)
+            else:
+                os.environ[trader.ACTIVE_STRATEGY_ENV] = saved_active
 
     def test_execute_actions_blocks_new_buy_when_position_count_limit_reached(self):
         original_execution_time = trader.is_a_share_execution_time

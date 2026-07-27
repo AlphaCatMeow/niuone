@@ -28,6 +28,7 @@ class StrategyPackageTests(unittest.TestCase):
             "zettaranc": ("Z哥评分基准", ("基础策略：", "李大霄")),
             "li_daxiao_bottom": ("李大霄", ("Z哥评分基准", "基础策略：")),
             "sector_tide": ("板块潮汐（市场→行业→个股", ("Z哥评分基准", "基础策略：", "李大霄")),
+            "niuone": ("牛牛战法（强势股→主题共振", ("板块潮汐（市场→行业→个股", "Z哥评分基准", "基础策略：", "李大霄")),
         }
         for suite, (included, excluded) in cases.items():
             sections = build_strategy_prompt_sections(
@@ -41,6 +42,52 @@ class StrategyPackageTests(unittest.TestCase):
             self.assertIn(included, active)
             for text in excluded:
                 self.assertNotIn(text, active)
+
+    def test_niuone_prompt_matches_execution_risk_budget_and_position_caps(self):
+        active = build_strategy_prompt_sections(
+            "niuone",
+            "",
+            registry.enabled_strategy_ids(strategy_suite_raw="niuone"),
+            b3_exit_hhmm="09:37",
+            time_exit_hhmm="14:45",
+        )["active_strategy_section"]
+
+        self.assertIn("30%是单票绝对上限", active)
+        self.assertIn("25%是单票绝对上限", active)
+        self.assertIn("15%是单票绝对上限", active)
+        self.assertIn("单笔权益风险≤1.50%/1.00%/0.60%", active)
+        self.assertIn("总仓≤70%/55%/35%", active)
+        self.assertIn("主题敞口≤55%/40%/25%", active)
+        self.assertIn("策略同时最多持有5只", active)
+        self.assertNotIn("单笔权益风险≤0.25%/0.18%/0.10%", active)
+        self.assertNotIn("总仓≤40%/28%/15%", active)
+
+    def test_niuone_custom_discipline_appends_current_execution_limits(self):
+        saved = {
+            trader.ACTIVE_STRATEGY_ENV: os.environ.get(trader.ACTIVE_STRATEGY_ENV),
+            trader.STRATEGY_SOURCE_ENV: os.environ.get(trader.STRATEGY_SOURCE_ENV),
+            trader.PERSONA_STRATEGY_ENV: os.environ.get(trader.PERSONA_STRATEGY_ENV),
+            trader.TRADE_DISCIPLINE_TEXT_ENV: os.environ.get(trader.TRADE_DISCIPLINE_TEXT_ENV),
+        }
+        try:
+            os.environ[trader.ACTIVE_STRATEGY_ENV] = "niuone"
+            os.environ[trader.STRATEGY_SOURCE_ENV] = "builtin"
+            os.environ[trader.PERSONA_STRATEGY_ENV] = "niuone"
+            os.environ[trader.TRADE_DISCIPLINE_TEXT_ENV] = "自定义牛牛纪律"
+
+            discipline = trader.current_trade_discipline_text("")
+        finally:
+            for name, value in saved.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+
+        self.assertIn("单笔权益风险分别≤1.50%/1.00%/0.60%", discipline)
+        self.assertIn("总仓≤70%/55%/35%", discipline)
+        self.assertIn("领航/回踩/启动单票30%/25%/15%", discipline)
+        self.assertIn("同时最多持有5只", discipline)
+        self.assertNotIn("单笔权益风险分别≤0.25%/0.18%/0.10%", discipline)
 
     def test_position_exit_prompt_uses_held_strategy_marks_not_active_suite(self):
         active = build_strategy_prompt_sections(
@@ -61,6 +108,14 @@ class StrategyPackageTests(unittest.TestCase):
         self.assertIn("Z哥历史持仓退出纪律", exits)
         self.assertIn("strategy_mark=B2确认", exits)
         self.assertNotIn("板块潮汐历史持仓退出纪律", exits)
+
+        niuone_exits = build_position_exit_prompt_section(
+            {"niu_leader"},
+            b3_exit_hhmm="09:37",
+            time_exit_hhmm="14:45",
+        )
+        self.assertIn("牛牛战法历史持仓退出纪律", niuone_exits)
+        self.assertIn("strategy_mark=牛牛领航", niuone_exits)
 
     def test_legacy_registry_is_a_compatibility_view(self):
         self.assertIs(legacy_registry.STRATEGY_DEFINITIONS, registry.STRATEGY_DEFINITIONS)

@@ -242,7 +242,7 @@ TRUSTED_PROXY_CIDRS = tuple(
 )
 MAX_POST_BODY_BYTES = int(os.environ.get("DASHBOARD_MAX_POST_BODY_BYTES", str(256 * 1024)) or str(256 * 1024))
 B1_CACHE_MAX_AGE = 720
-B1_SCAN_TIMEOUT_SECONDS = int(os.environ.get("DASHBOARD_B1_SCAN_TIMEOUT_SECONDS", "360") or "360")
+B1_SCAN_TIMEOUT_SECONDS = int(os.environ.get("DASHBOARD_B1_SCAN_TIMEOUT_SECONDS", "480") or "480")
 PRACTICE_SCHEDULE_TIMES_ENV = "DASHBOARD_PRACTICE_SCHEDULE_TIMES"
 LEGACY_B1_SCHEDULE_TIMES_ENV = "DASHBOARD_B1_SCHEDULE_TIMES"
 DEFAULT_PRACTICE_SCHEDULE_TIMES = "09:25,10:00,10:30,11:00,11:20,13:00,13:30,14:00,14:30,14:50"
@@ -480,14 +480,14 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
 
     {"name": "DASHBOARD_B1_SCHEDULE_ENABLED", "label": "启用实战定时运行", "group": "任务调度", "kind": "bool", "default": "1", "effect": "restart"},
     {"name": PRACTICE_SCHEDULE_TIMES_ENV, "label": "实战盘面总结、选股及交易时间点", "group": "选股与买卖设置", "kind": "time_list", "default": DEFAULT_PRACTICE_SCHEDULE_TIMES, "effect": "runtime"},
-    {"name": STOCK_UNIVERSE_ENV, "label": "选股范围", "group": "选股与买卖设置", "kind": "stock_universe", "default": DEFAULT_STOCK_UNIVERSE, "effect": "runtime"},
+    {"name": STOCK_UNIVERSE_ENV, "label": "选股范围（限制最终候选与新买入）", "group": "选股与买卖设置", "kind": "stock_universe", "default": DEFAULT_STOCK_UNIVERSE, "effect": "runtime"},
     {"name": "DASHBOARD_DISPLAY_CANDIDATE_LIMIT", "label": "候选池展示数量", "group": "选股与买卖设置", "kind": "int", "default": "10", "effect": "runtime"},
     {"name": "DASHBOARD_TRADE_CANDIDATE_LIMIT", "label": "买卖决策候选数量", "group": "选股与买卖设置", "kind": "int", "default": "10", "effect": "runtime"},
     {"name": "DASHBOARD_B3_EXIT_TIME", "label": "B3开盘离场检查时间", "group": "选股与买卖设置", "kind": "time", "default": "09:37", "effect": "runtime"},
     {"name": "DASHBOARD_TIME_EXIT_TIME", "label": "尾盘离场检查时间", "group": "选股与买卖设置", "kind": "time", "default": "14:45", "effect": "runtime"},
     {"name": ACTIVE_STRATEGY_ENV, "label": "当前独立策略", "group": "选股与交易策略", "kind": "strategy_suite", "default": default_enabled_persona_strategies_value(), "effect": "runtime"},
     {"name": PRESET_STRATEGY_TEXT_ENV, "label": "预设文字策略", "group": "选股与交易策略", "kind": "preset_strategy_text", "default": "", "effect": "runtime"},
-    {"name": "DASHBOARD_B1_SCAN_TIMEOUT_SECONDS", "label": "实战选股扫描超时秒数", "group": "任务调度", "kind": "int", "default": "360", "effect": "restart"},
+    {"name": "DASHBOARD_B1_SCAN_TIMEOUT_SECONDS", "label": "实战选股扫描超时秒数", "group": "任务调度", "kind": "int", "default": "480", "effect": "restart"},
     {"name": "DASHBOARD_B1_SCAN_WORKERS", "label": "实战选股并发数", "group": "任务调度", "kind": "int", "default": "6", "effect": "restart"},
     {"name": "DASHBOARD_MANUAL_SCAN_REUSE_SECONDS", "label": "手动选股复用候选秒数", "group": "任务调度", "kind": "int", "default": "0", "effect": "restart"},
     {"name": "DASHBOARD_B1_SCHEDULE_CATCHUP_MINUTES", "label": "实战选股漏触发补跑窗口分钟", "group": "任务调度", "kind": "int", "default": "35", "effect": "restart"},
@@ -1329,6 +1329,8 @@ def normalize_b1_payload_for_trader(b1_payload: dict[str, Any]) -> dict[str, Any
         payload["market_snapshot"] = b1_payload.get("market_snapshot")
     if isinstance(b1_payload.get("sector_tide_context"), dict):
         payload["sector_tide_context"] = b1_payload.get("sector_tide_context")
+    if isinstance(b1_payload.get("niuone_context"), dict):
+        payload["niuone_context"] = b1_payload.get("niuone_context")
     if isinstance(b1_payload.get("market_summary"), dict):
         payload["market_summary"] = b1_payload.get("market_summary")
     if isinstance(b1_payload.get("market_decision_context"), dict):
@@ -1403,15 +1405,19 @@ def refresh_b1_candidate_cache_from_current_pool() -> dict[str, Any]:
         zettaranc_refresh = bool(
             set(active_scorers).intersection(getattr(scanner, "ZETTARANC_STRATEGY_IDS", ()))
         )
-        if zettaranc_refresh:
+        niuone_refresh = bool(
+            set(active_scorers).intersection(getattr(scanner, "NIUONE_STRATEGY_IDS", ()))
+        )
+        if zettaranc_refresh or niuone_refresh:
             scanner.annotate_candidate_industries(base_items, max_workers=8)
         keys_by_code = {str(item.get("code") or ""): _tencent_key_for_code(str(item.get("code") or "")) for item in base_items}
         quote_map = scanner.tencent_batch_quote(list(keys_by_code.values()))
-        scoring_context = (
-            dict(parsed.get("sector_tide_context") or {})
-            if isinstance(parsed.get("sector_tide_context"), dict)
-            else {}
-        )
+        if niuone_refresh and isinstance(parsed.get("niuone_context"), dict):
+            scoring_context = dict(parsed.get("niuone_context") or {})
+        elif isinstance(parsed.get("sector_tide_context"), dict):
+            scoring_context = dict(parsed.get("sector_tide_context") or {})
+        else:
+            scoring_context = {}
         if zettaranc_refresh:
             scoring_context["industry_money_flow"] = scanner.fetch_sector_tide_money_flow()
         refreshed: list[dict[str, Any]] = []
@@ -1480,6 +1486,24 @@ def refresh_b1_candidate_cache_from_current_pool() -> dict[str, Any]:
                 "market_allows_buys": best.get("market_allows_buys"),
                 "sector_status": best.get("sector_status"),
                 "sector_score": best.get("sector_score"),
+                "theme_basis": best.get("theme_basis"),
+                "mainline_state": best.get("mainline_state"),
+                "mainline_raw_state": best.get("mainline_raw_state"),
+                "mainline_score": best.get("mainline_score"),
+                "mainline_mode": best.get("mainline_mode"),
+                "mainline_primary": best.get("mainline_primary"),
+                "mainline_secondary": best.get("mainline_secondary"),
+                "mainline_selected": best.get("mainline_selected"),
+                "mainline_confirmation_count": best.get("mainline_confirmation_count"),
+                "mainline_state_streak": best.get("mainline_state_streak"),
+                "mainline_score_change": best.get("mainline_score_change"),
+                "strong_stock_count": best.get("strong_stock_count"),
+                "effective_strong_count": best.get("effective_strong_count"),
+                "leader_concentration": best.get("leader_concentration"),
+                "single_stock_dominated": best.get("single_stock_dominated"),
+                "stock_role": best.get("stock_role"),
+                "stock_strong": best.get("stock_strong"),
+                "stock_strong_score": best.get("stock_strong_score"),
                 "stock_sector_rank": best.get("stock_sector_rank"),
                 "stock_market_rank": best.get("stock_market_rank"),
                 "score_before_industry_flow": best.get("score_before_industry_flow"),
@@ -3810,7 +3834,7 @@ ADMIN_GROUP_NOTES = {
     "交易通知": "模拟买入或卖出成交落盘后推送。从下拉框按需添加渠道并分块配置；每个渠道可独立启用或关闭，关闭会保留配置，移除并保存后才会清除配置。Webhook、Bot Token 和签名密钥只保存、不回显。",
     "选股与买卖设置": "配置主板、创业板、科创板和 ST 选股范围、候选数量，并维护北京时间 HH:MM 的选股、决策及离场时间。",
     "综合决策参考": "为买卖决策汇总指数、板块、资金流向、热门股票等参考数据。缓存秒数控制数据复用周期，单类参考数据上限可设置为 1～8。",
-    "选股与交易策略": "选择一套独立策略；基础策略、Z哥、李大霄、板块潮汐和预设文字策略的候选、买入、卖出、仓位与 Prompt 规则互不混用。",
+    "选股与交易策略": "选择一套独立策略；基础策略、Z哥、李大霄、板块潮汐、牛牛战法和预设文字策略的候选、买入、卖出、仓位与 Prompt 规则互不混用。",
     "盘面监控生产时间点": "直接填写北京时间 HH:MM；隔夜美股总结默认交易日 08:00 生成，A 股盘面监控在交易时段触发；长度默认：上下文 128000 tokens，最大输出 4096 tokens。",
     "行情与资金流设置": "统一管理公开快照、指数刷新和行业资金流动画。播放速度、每侧行业数量、采样间隔及上午/下午采样窗口均支持运行时保存后生效；时间使用北京时间 HH:MM，默认 09:25～11:31、13:00～15:01。",
 }

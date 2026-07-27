@@ -8,6 +8,9 @@ export const PRACTICE_STRATEGY_META = {
   tide_leader: { label: '主线领航', color: '#06b6d4' },
   tide_rotation: { label: '轮动初升', color: '#14b8a6' },
   tide_recovery: { label: '冰点修复', color: '#22d3ee' },
+  niu_leader: { label: '牛牛领航', color: '#8b5cf6' },
+  niu_pullback: { label: '牛牛回踩', color: '#a78bfa' },
+  niu_emerging: { label: '牛牛启动', color: '#c084fc' },
 }
 
 export const PRACTICE_STOCK_BOARD_LABELS = {
@@ -22,6 +25,12 @@ export const PRACTICE_TIDE_STATUS_LABELS = {
   improving: '改善',
   weakening: '转弱',
   lagging: '落后',
+  candidate: '候选',
+  emerging: '启动',
+  mainline: '主线',
+  diverging: '分歧',
+  fading: '退潮',
+  inactive: '失效',
 }
 
 export function formatPracticeNumber(value, digits = 2) {

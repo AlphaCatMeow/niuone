@@ -85,7 +85,25 @@ def build_position_exit_prompt_section(
 - 主线5日、轮动3日、修复T+2未延续时退出；达到2R先减半，余仓按峰值减2ATR跟踪。
 - 当前激活策略发生变化不得改写这些持仓的入场策略、止损锚点或退出时间窗。""")
 
-    covered = zettaranc_ids | sector_tide_ids
+    niuone_ids = {
+        strategy_id
+        for strategy_id in known_ids
+        if STRATEGY_DEFINITIONS.get(strategy_id, {}).get("persona") == "niuone"
+    }
+    if niuone_ids:
+        labels = "、".join(
+            str(STRATEGY_DEFINITIONS[strategy_id].get("label") or strategy_id)
+            for strategy_id in sorted(
+                niuone_ids,
+                key=lambda item: int(STRATEGY_DEFINITIONS[item].get("display_order", 999)),
+            )
+        )
+        sections.append(f"""牛牛战法历史持仓退出纪律（仅适用于 strategy_mark={labels}）：
+- 跌破入场结构止损退出；主题进入fading/inactive或主线分数低于55连续两次退出；市场硬停止且主线转弱时退出。
+- 领航5日、回踩3日、启动T+2未延续时退出；达到2R先减半，余仓按峰值减2ATR跟踪。
+- 主线识别允许结果为“无主线”；当前激活策略发生变化不得改写这些持仓的止损、主题状态或退出时间窗。""")
+
+    covered = zettaranc_ids | sector_tide_ids | niuone_ids
     other_ids = known_ids - covered
     if other_ids:
         labels = "、".join(
@@ -135,7 +153,7 @@ def build_strategy_prompt_sections(
     ):
         if (
             definition.get("family") != "persona"
-            or definition.get("persona") in {"zettaranc", "sector_tide"}
+            or definition.get("persona") in {"zettaranc", "sector_tide", "niuone"}
             or strategy_id not in active_strategy_ids
         ):
             continue
@@ -184,6 +202,20 @@ Z哥卖出风控（属于Z哥体系）：
 7. 退出服从潮退：行业分数<55连续两次退出；市场复合风险硬停止且行业转弱时减仓/退出。主线5日、轮动3日、修复T+2未延续退出。盈利达到2R先减半，余仓按峰值-2ATR跟踪，不使用固定8%/12%止盈。
 8. 行业资金流缺失时只允许使用量能参与度替代，并明确标记数据源；不得把缺失资金流当成净流入。
 9. 外部确认只做限幅覆盖：读取已完成的隔夜美股盘面及明确A股行业映射，并对首轮前5候选读取近3日个股消息面。正向外盘/消息不能把落后行业、追高或硬过滤候选变成买点；隔夜防守、负行业映射和明确利空必须降权并写入风险。""" if sector_tide_enabled else ""
+    niuone_enabled = any(
+        STRATEGY_DEFINITIONS.get(strategy_id, {}).get("persona") == "niuone"
+        for strategy_id in active_strategy_ids
+    )
+    niuone_strategy_section = """牛牛战法（强势股→主题共振→市场主线→个股买点）：
+1. 主线不是涨幅榜第一名：必须由多只强势股在20/5日相对强度、成交参与、趋势和新高上共同确认；单只股票独强会触发集中度惩罚，不能确认主线。
+2. 主题状态按candidate→emerging→mainline→diverging→fading/inactive迁移，并允许“当前无明确主线”；没有mainline时不得用牛牛领航强行开仓。
+3. 牛牛领航：只做进攻/轮动行情的已确认主线，个股必须为主线核心前20%，只买有效突破或首次EMA20缩量回踩；30%是单票绝对上限。
+4. 牛牛回踩：主线仍为mainline/diverging且分数≥70，个股在前30%，只做EMA20承接或重新收复；单日涨幅>4%或距EMA20>1ATR不追；25%是单票绝对上限。
+5. 牛牛启动：主题必须处emerging，至少两只强势股共同确认，核心股突破/收复才用观察仓；单日涨幅>7%或距EMA20>1.5ATR不追；15%是单票绝对上限，次日确认后才允许加仓。
+6. 进攻/轮动/修复的单笔权益风险≤1.50%/1.00%/0.60%，策略内组合未实现止损风险≤4.50%/3.00%/1.80%，单主题风险≤3.00%/2.00%/1.20%，总仓≤70%/55%/35%，主题敞口≤55%/40%/25%，同一主题最多2只、策略同时最多持有5只；防守禁止新仓。
+7. 有效损失距离=结构止损距离+max(近60日向下跳空P95, 0.5ATR占比)+0.20%费用滑点；执行层按风险预算反推仓位，不能自动缩量绕过模型给出的超限shares。
+8. 龙虎榜和近3日消息只作限幅确认：正面消息不能制造主线或把追高变成买点，明确利空必须降权；行业暂作为可审计的主题代理，不能把名称相近当作确定概念归因。
+9. 退出服从主线退潮：主题连续转弱、市场硬停止+主题转弱、时间窗未兑现、结构止损、2R减半与2ATR跟踪均由本地执行层复核。""" if niuone_enabled else ""
     if strategy_suite == STRATEGY_SOURCE_PRESET_TEXT:
         persona_strategy_section = ""
     else:
@@ -193,6 +225,7 @@ Z哥卖出风控（属于Z哥体系）：
             section
             for section in (
                 preset_strategy_section,
+                niuone_strategy_section,
                 sector_tide_strategy_section,
                 zettaranc_strategy_section,
                 base_strategy_section,
@@ -211,6 +244,7 @@ Z哥卖出风控（属于Z哥体系）：
         "zettaranc_strategy_section": zettaranc_strategy_section,
         "base_strategy_section": base_strategy_section,
         "sector_tide_strategy_section": sector_tide_strategy_section,
+        "niuone_strategy_section": niuone_strategy_section,
         "persona_strategy_section": persona_strategy_section,
         "preset_strategy_section": preset_strategy_section,
     }

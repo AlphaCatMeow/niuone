@@ -35,6 +35,8 @@
 """
 import concurrent.futures
 import http.client
+import importlib
+import io
 import json
 import os
 import re
@@ -47,7 +49,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime
 from pathlib import Path
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from core.model_api import build_model_request, request_model
@@ -58,11 +60,14 @@ from market_data.news_precheck import (
 )
 from screening.stock_universe import (
     DEFAULT_STOCK_UNIVERSE,
+    FULL_SUPPORTED_NON_ST_UNIVERSE,
     STOCK_UNIVERSE_ENV,
     friendly_stock_universe,
     normalize_stock_universe,
     selected_stock_universe,
+    stock_board,
     stock_in_universe,
+    stock_name_is_st,
     stock_universe_metadata,
 )
 from strategies.registry import (
@@ -87,10 +92,12 @@ from strategies.scoring import (
     LI_DAXIAO_MAX_DAILY_CHASE_PCT,
     LI_DAXIAO_MAX_TURNOVER,
     LI_DAXIAO_MIN_AMOUNT,
+    NIUONE_STRATEGY_IDS,
     SECTOR_TIDE_STRATEGY_IDS,
     STRATEGY_SCORERS,
     ZETTARANC_STRATEGY_IDS,
     analyze_enriched_rows,
+    build_niuone_context,
     build_sector_tide_context,
     candle_amplitude_pct,
     candle_body_pct,
@@ -146,6 +153,22 @@ DISPLAY_CANDIDATE_LIMIT = 16
 DISPLAY_HEAD_LIMIT = 8
 TRADE_CANDIDATE_LIMIT = 8
 SECTOR_TIDE_NEWS_PRECHECK_LIMIT = 5
+HIGH_LIQUIDITY_MIN_AMOUNT = 8e8
+MAX_TRADE_ANALYSIS_COUNT = 500
+SW_STOCK_CLASSIFICATION_URL = (
+    "https://www.swsresearch.com/swindex/pdf/SwClass2021/StockClassifyUse_stock.xls"
+)
+SW_INDUSTRY_TAXONOMY_URL = "https://webapi.cninfo.com.cn/api/stock/p_public0002"
+SW_INDUSTRY_HTTP_TIMEOUT_SECONDS = 10
+SW_INDUSTRY_HTTP_MAX_ATTEMPTS = 2
+THS_INDUSTRY_DETAIL_URL = "https://q.10jqka.com.cn/thshy/detail/code/{code}/page/{page}/"
+THS_INDUSTRY_INDEX_CODE = "881272"
+THS_INDUSTRY_PAGE_LIMIT = 20
+THS_INDUSTRY_WORKERS = 4
+THS_INDUSTRY_MIN_REQUEST_INTERVAL_SECONDS = 0.18
+THS_INDUSTRY_LOGIN_RETRY_ATTEMPTS = 3
+STOCK_INDUSTRY_BULK_CACHE_MIN_COVERAGE = 0.85
+NIUONE_INDUSTRY_FALLBACK_LOOKUP_LIMIT = 128
 _LOCAL_SITE_PACKAGES_READY = False
 _STOCK_INDUSTRY_MEMORY_CACHE: dict[str, str] | None = None
 _MARGIN_DETAIL_CACHE: dict[tuple[str, str], Any] = {}
@@ -256,6 +279,30 @@ def active_strategy_score_profiles() -> dict[str, dict[str, Any]]:
 
 def configured_stock_universe() -> tuple[str, ...]:
     return selected_stock_universe(dashboard_env_value(STOCK_UNIVERSE_ENV))
+
+
+def scan_stock_universes(
+    scorers: Mapping[str, Any],
+    configured_universe: object | None = None,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Return independent trade and market-reference universes for one scan."""
+    trade_universe = selected_stock_universe(
+        configured_stock_universe() if configured_universe is None else configured_universe
+    )
+    niuone_enabled = bool(NIUONE_STRATEGY_IDS.intersection(scorers))
+    reference_universe = FULL_SUPPORTED_NON_ST_UNIVERSE if niuone_enabled else trade_universe
+    return trade_universe, reference_universe
+
+
+def merge_stock_code_pools(*pools: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Merge stock pools by code while retaining deterministic ordering."""
+    merged: dict[str, str] = {}
+    for pool in pools:
+        for code, name in pool:
+            normalized_code = normalize_stock_code(code)
+            if normalized_code:
+                merged[normalized_code] = str(name or "").strip()
+    return sorted(merged.items())
 
 
 def candidate_in_configured_stock_universe(candidate: dict[str, Any]) -> bool:
@@ -399,7 +446,7 @@ def build_market_snapshot(
     """
     rows: list[dict[str, float]] = []
     quote_times: list[str] = []
-    for quote in (quotes or {}).values():
+    for symbol, quote in (quotes or {}).items():
         if not isinstance(quote, dict):
             continue
         price = safe_float(quote.get("price"))
@@ -410,6 +457,13 @@ def build_market_snapshot(
         rows.append({
             "change_pct": change_pct,
             "amount": max(0.0, safe_float(quote.get("amount")) or 0.0),
+            "limit_pct": (
+                4.8
+                if stock_name_is_st(quote.get("name"))
+                else 19.8
+                if stock_board(symbol) in {"chi_next", "star_market"}
+                else 9.8
+            ),
         })
         raw_quote_time = re.sub(r"\D", "", str(quote.get("quote_time") or ""))
         if len(raw_quote_time) >= 14:
@@ -438,12 +492,48 @@ def build_market_snapshot(
         "up": up,
         "down": down,
         "flat": flat,
-        "limit_up": sum(1 for pct in changes if pct >= 9.8),
-        "limit_down": sum(1 for pct in changes if pct <= -9.8),
+        "limit_up": sum(1 for row in rows if row["change_pct"] >= row["limit_pct"]),
+        "limit_down": sum(1 for row in rows if row["change_pct"] <= -row["limit_pct"]),
         "average_change_pct": round(statistics.mean(changes), 3) if changes else None,
         "median_change_pct": round(statistics.median(changes), 3) if changes else None,
         "total_amount": round(sum(row["amount"] for row in rows), 2),
     }
+
+
+def filter_high_liquidity_candidates(
+    candidates: list[tuple[str, str]],
+    tencent_keys: Mapping[str, str],
+    quotes: Mapping[str, dict[str, Any]],
+    *,
+    limit: int | None = None,
+) -> list[tuple[str, str, dict[str, Any]]]:
+    """Return valid high-liquidity stocks, optionally capped after amount ranking."""
+    selected: list[tuple[str, str, dict[str, Any]]] = []
+    for code, name in candidates:
+        quote = quotes.get(tencent_keys.get(code, ""), {})
+        price = safe_float(quote.get("price"))
+        amount = safe_float(quote.get("amount")) or 0.0
+        if price is None or price <= 0 or amount < HIGH_LIQUIDITY_MIN_AMOUNT:
+            continue
+        selected.append((code, name, quote))
+    selected.sort(key=lambda item: safe_float(item[2].get("amount")) or 0.0, reverse=True)
+    return selected if limit is None else selected[:max(0, int(limit))]
+
+
+def filter_niuone_reference_candidates(
+    candidates: list[tuple[str, str]],
+    tencent_keys: Mapping[str, str],
+    quotes: Mapping[str, dict[str, Any]],
+) -> list[tuple[str, str, dict[str, Any]]]:
+    """Return every stock with a usable quote, without liquidity/move gates."""
+    selected: list[tuple[str, str, dict[str, Any]]] = []
+    for code, name in candidates:
+        quote = quotes.get(tencent_keys.get(code, ""), {})
+        price = safe_float(quote.get("price"))
+        if price is None or price <= 0:
+            continue
+        selected.append((code, name, quote))
+    return selected
 
 
 CORE_INDEX_SYMBOLS = {
@@ -580,6 +670,16 @@ def load_previous_sector_tide_market() -> dict[str, Any] | None:
     context = payload.get("sector_tide_context") if isinstance(payload, dict) else None
     market = context.get("market") if isinstance(context, dict) else None
     return market if isinstance(market, dict) else None
+
+
+def load_previous_niuone_context() -> dict[str, Any] | None:
+    """Load the prior 牛牛战法 state used for mainline confirmation."""
+    try:
+        payload = json.loads(MULTI_STRATEGY_CACHE.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    context = payload.get("niuone_context") if isinstance(payload, dict) else None
+    return context if isinstance(context, dict) else None
 
 
 def fetch_industry_money_flow() -> dict[str, Any]:
@@ -719,7 +819,7 @@ def fetch_sector_tide_news_precheck(
     config: NewsPrecheckConfig | None = None,
     fetcher: Callable[..., list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
-    """Fetch bounded structured news for the first-pass Sector Tide shortlist."""
+    """Fetch bounded structured news for a first-pass dynamic-strategy shortlist."""
     selected = [item for item in candidates[:SECTOR_TIDE_NEWS_PRECHECK_LIMIT] if isinstance(item, dict)]
     if not selected:
         return {"configured": False, "available": False, "records": [], "error": "empty_shortlist"}
@@ -1108,6 +1208,255 @@ def save_stock_industry_cache(cache: dict[str, str]) -> None:
         print(f"[WARN] stock industry cache save failed: {type(exc).__name__}", file=sys.stderr)
 
 
+def _bounded_requests_get(
+    requests_module: Any,
+    url: str,
+    *,
+    headers: Mapping[str, str] | None = None,
+    params: Mapping[str, str] | None = None,
+    timeout: int = SW_INDUSTRY_HTTP_TIMEOUT_SECONDS,
+    max_attempts: int = SW_INDUSTRY_HTTP_MAX_ATTEMPTS,
+) -> Any:
+    """GET one bounded external resource with a small retry budget."""
+    last_error: Exception | None = None
+    for attempt in range(max(1, int(max_attempts or 1))):
+        try:
+            response = requests_module.get(
+                url,
+                headers=dict(headers or {}),
+                params=dict(params or {}),
+                timeout=max(1, int(timeout)),
+            )
+            raise_for_status = getattr(response, "raise_for_status", None)
+            if callable(raise_for_status):
+                raise_for_status()
+            return response
+        except Exception as exc:
+            last_error = exc
+            if attempt + 1 < max_attempts:
+                time.sleep(0.4 * (attempt + 1))
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("industry data request failed")
+
+
+def load_sw_stock_industry_map(
+    codes: set[str] | list[str] | tuple[str, ...],
+    *,
+    ak_module: Any | None = None,
+) -> dict[str, str]:
+    """Load a consistent SW level-2 industry map in two bounded requests.
+
+    The all-market NiuOne scan must not fan out thousands of per-stock industry
+    calls.  SW publishes one classification workbook, while CNInfo publishes
+    the matching taxonomy.  Joining both locally keeps the scan bounded and
+    gives every stock in the same run one consistent classification standard.
+    """
+    targets = {normalize_stock_code(code) for code in codes}
+    targets.discard("")
+    if not targets:
+        return {}
+
+    _add_local_runtime_site_packages()
+    if ak_module is None:
+        import akshare as ak_module
+    import pandas as pd
+
+    taxonomy_module = importlib.import_module(
+        ak_module.stock_industry_category_cninfo.__module__
+    )
+    javascript = taxonomy_module.py_mini_racer.MiniRacer()
+    javascript.eval(taxonomy_module._get_file_content_ths("cninfo.js"))
+    enckey = javascript.call("getResCode1")
+    taxonomy_response = _bounded_requests_get(
+        taxonomy_module.requests,
+        SW_INDUSTRY_TAXONOMY_URL,
+        params={"indcode": "", "indtype": "008003", "format": "json"},
+        headers={
+            "Accept": "*/*",
+            "Accept-Enckey": str(enckey),
+            "Origin": "https://webapi.cninfo.com.cn",
+            "Referer": "https://webapi.cninfo.com.cn/",
+            "User-Agent": UA,
+            "X-Requested-With": "XMLHttpRequest",
+        },
+    )
+    taxonomy_payload = taxonomy_response.json()
+    taxonomy_rows = taxonomy_payload.get("records") if isinstance(taxonomy_payload, dict) else []
+    taxonomy: dict[str, tuple[bool, str]] = {}
+    for row in taxonomy_rows or []:
+        if not isinstance(row, Mapping):
+            continue
+        category_code = re.sub(r"^S", "", str(row.get("SORTCODE") or "").strip())
+        industry = normalize_industry_name(row.get("SORTNAME"))
+        if not category_code or not industry:
+            continue
+        active = not str(row.get("F002D") or "").strip()
+        if active or category_code not in taxonomy:
+            taxonomy[category_code] = (active, industry)
+
+    workbook_module = importlib.import_module(
+        ak_module.stock_industry_clf_hist_sw.__module__
+    )
+    workbook_response = _bounded_requests_get(
+        workbook_module.requests,
+        SW_STOCK_CLASSIFICATION_URL,
+        headers=getattr(workbook_module, "headers", {}),
+    )
+    frame = pd.read_excel(
+        io.BytesIO(workbook_response.content),
+        dtype={"股票代码": "str", "行业代码": "str"},
+    )
+    required_columns = {"股票代码", "行业代码", "计入日期", "更新日期"}
+    if not required_columns.issubset(frame.columns):
+        raise ValueError("unexpected SW industry workbook columns")
+
+    current: dict[str, tuple[tuple[int, int, int], str]] = {}
+    for row_index, row in frame.iterrows():
+        code = normalize_stock_code(row.get("股票代码"))
+        if code not in targets:
+            continue
+        industry_code = re.sub(r"\.0$", "", str(row.get("行业代码") or "").strip())
+        if not industry_code:
+            continue
+        start_date = pd.to_datetime(row.get("计入日期"), errors="coerce")
+        update_date = pd.to_datetime(row.get("更新日期"), errors="coerce")
+        rank = (
+            int(start_date.value) if not pd.isna(start_date) else -1,
+            int(update_date.value) if not pd.isna(update_date) else -1,
+            int(row_index),
+        )
+        existing = current.get(code)
+        if existing is None or rank > existing[0]:
+            current[code] = (rank, industry_code)
+
+    result: dict[str, str] = {}
+    for code, (_rank, industry_code) in current.items():
+        # SW level 2 is a useful theme proxy: broad enough to show resonance,
+        # but more actionable than grouping the whole market into 31 sectors.
+        industry = (
+            taxonomy.get(industry_code[:4])
+            or taxonomy.get(industry_code[:2])
+            or taxonomy.get(industry_code)
+        )
+        normalized = normalize_industry_name(industry[1] if industry else "")
+        if normalized:
+            result[code] = normalized
+    return result
+
+
+def load_ths_stock_industry_map(
+    codes: set[str] | list[str] | tuple[str, ...],
+    *,
+    ak_module: Any | None = None,
+) -> dict[str, str]:
+    """Build one all-market industry map from bounded THS industry pages."""
+    targets = {normalize_stock_code(code) for code in codes}
+    targets.discard("")
+    if not targets:
+        return {}
+
+    _add_local_runtime_site_packages()
+    if ak_module is None:
+        import akshare as ak_module
+    ths_module = importlib.import_module(ak_module.stock_board_industry_name_ths.__module__)
+    javascript = ths_module.py_mini_racer.MiniRacer()
+    javascript.eval(ths_module._get_file_content_ths("ths.js"))
+    cookie = javascript.call("v")
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/89.0.4389.90 Safari/537.36"
+        ),
+        "Cookie": f"v={cookie}",
+    }
+    request_lock = threading.Lock()
+    last_request_at = [0.0]
+
+    def fetch_page(industry_code: str, page: int) -> str:
+        for attempt in range(THS_INDUSTRY_LOGIN_RETRY_ATTEMPTS):
+            with request_lock:
+                elapsed = time.monotonic() - last_request_at[0]
+                delay = THS_INDUSTRY_MIN_REQUEST_INTERVAL_SECONDS - elapsed
+                if delay > 0:
+                    time.sleep(delay)
+                response = _bounded_requests_get(
+                    ths_module.requests,
+                    THS_INDUSTRY_DETAIL_URL.format(code=industry_code, page=page),
+                    headers=headers,
+                )
+                last_request_at[0] = time.monotonic()
+            if "account/login" not in str(getattr(response, "url", "")):
+                return response.content.decode("gb18030", "ignore")
+            if attempt + 1 < THS_INDUSTRY_LOGIN_RETRY_ATTEMPTS:
+                time.sleep(attempt + 1)
+        raise RuntimeError("THS industry page redirected to login")
+
+    index_html = fetch_page(THS_INDUSTRY_INDEX_CODE, 1)
+    industries: list[tuple[str, str]] = []
+    seen_industries: set[str] = set()
+    for industry_code, raw_name in re.findall(
+        r"/thshy/detail/code/(\d+)/[^>]*>([^<]+)</a>",
+        index_html,
+    ):
+        industry = normalize_industry_name(raw_name)
+        if industry_code in seen_industries or not industry:
+            continue
+        seen_industries.add(industry_code)
+        industries.append((industry_code, industry))
+    if not industries:
+        raise ValueError("THS industry index contained no industries")
+
+    def fetch_industry(industry_item: tuple[str, str]) -> tuple[str, set[str], str]:
+        industry_code, industry = industry_item
+        members: set[str] = set()
+        page_total = 1
+        for page in range(1, THS_INDUSTRY_PAGE_LIMIT + 1):
+            try:
+                html = fetch_page(industry_code, page)
+            except Exception as exc:
+                return industry, members, type(exc).__name__
+            members.update(
+                code for code in re.findall(r"stockpage\.10jqka\.com\.cn/(\d{6})", html)
+                if code in targets
+            )
+            page_match = re.search(r'class="page_info">\s*\d+/(\d+)', html)
+            page_total = max(1, int(page_match.group(1))) if page_match else 1
+            if page >= page_total:
+                break
+            time.sleep(0.12)
+        return industry, members, ""
+
+    result: dict[str, str] = {}
+    failures: list[str] = []
+    workers = min(THS_INDUSTRY_WORKERS, len(industries))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        for industry, members, error in pool.map(fetch_industry, industries):
+            for code in members:
+                result.setdefault(code, industry)
+            if error:
+                failures.append(f"{industry}:{error}")
+    if failures:
+        print(
+            f"[WARN] THS bulk industry lookup was partial: {len(failures)}/{len(industries)} industries",
+            file=sys.stderr,
+        )
+    return result
+
+
+def load_bulk_stock_industry_map(codes: set[str]) -> dict[str, str]:
+    """Prefer the compact SW download and fall back to bounded THS pages."""
+    try:
+        return load_sw_stock_industry_map(codes)
+    except Exception as exc:
+        print(
+            f"[WARN] SW bulk industry lookup failed: {type(exc).__name__}; trying THS",
+            file=sys.stderr,
+        )
+    return load_ths_stock_industry_map(codes)
+
+
 def lookup_stock_industry(code: str, ak_module: Any | None = None) -> str:
     code = normalize_stock_code(code)
     if not code:
@@ -1139,6 +1488,8 @@ def lookup_stock_industry(code: str, ak_module: Any | None = None) -> str:
 def annotate_candidate_industries(
     *groups: list[dict[str, Any]],
     lookup: Callable[[str], str | None] | None = None,
+    bulk_lookup: Callable[[set[str]], Mapping[str, str]] | None = None,
+    max_fallback_lookups: int | None = None,
     max_workers: int = 1,
 ) -> None:
     """Attach industry/sector labels to candidate rows without making them required."""
@@ -1171,17 +1522,45 @@ def annotate_candidate_industries(
 
     if lookup is None and missing_by_code:
         cache = load_stock_industry_cache()
+        cache_changed = False
+        cached_count = sum(1 for code in missing_by_code if cache.get(code))
+        cache_coverage = cached_count / len(missing_by_code) if missing_by_code else 1.0
+
+        if (
+            bulk_lookup is not None
+            and cache_coverage < STOCK_INDUSTRY_BULK_CACHE_MIN_COVERAGE
+        ):
+            try:
+                bulk = bulk_lookup(set(missing_by_code))
+            except Exception as exc:
+                print(
+                    f"[WARN] bulk stock industry lookup failed: {type(exc).__name__}",
+                    file=sys.stderr,
+                )
+                bulk = {}
+            for code, industry in (bulk or {}).items():
+                normalized_code = normalize_stock_code(code)
+                normalized_industry = normalize_industry_name(industry)
+                if normalized_code in missing_by_code and normalized_industry:
+                    cache[normalized_code] = normalized_industry
+                    cache_changed = True
+                    fill_code(normalized_code, normalized_industry)
+
         for code in list(missing_by_code):
             fill_code(code, cache.get(code, ""))
 
         if missing_by_code:
-            cache_changed = False
             missing_codes = list(missing_by_code)
+            skipped_count = 0
+            if max_fallback_lookups is not None:
+                lookup_limit = max(0, int(max_fallback_lookups))
+                skipped_count = max(0, len(missing_codes) - lookup_limit)
+                missing_codes = missing_codes[:lookup_limit]
             resolved: dict[str, str] = {}
-            workers = max(1, min(int(max_workers or 1), 12, len(missing_codes)))
+            workers = max(1, min(int(max_workers or 1), 12, len(missing_codes) or 1))
             if workers > 1 and not prepare_threaded_native_javascript_runtime():
                 workers = 1
-            if workers > 1:
+            if workers > 1 and missing_codes:
                 with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
                     future_by_code = {pool.submit(lookup_stock_industry, code): code for code in missing_codes}
                     for future in concurrent.futures.as_completed(future_by_code):
@@ -1190,7 +1569,7 @@ def annotate_candidate_industries(
                             resolved[code] = normalize_industry_name(future.result())
                         except Exception:
                             resolved[code] = ""
-            else:
+            elif missing_codes:
                 for code in missing_codes:
                     try:
                         resolved[code] = normalize_industry_name(lookup_stock_industry(code))
@@ -1202,8 +1581,13 @@ def annotate_candidate_industries(
                     cache[code] = industry
                     cache_changed = True
                     fill_code(code, industry)
-            if cache_changed:
-                save_stock_industry_cache(cache)
+            if skipped_count:
+                print(
+                    f"[WARN] skipped {skipped_count} per-stock industry fallbacks after bulk lookup",
+                    file=sys.stderr,
+                )
+        if cache_changed:
+            save_stock_industry_cache(cache)
         return
 
     failures: list[str] = []
@@ -1293,15 +1677,35 @@ def write_outputs(json_str: str, generated_at: str) -> None:
 
 def main():
     print("Step 1: Loading A-share code pool...", file=sys.stderr)
-    stock_universe = configured_stock_universe()
+    scorers = active_strategy_scorers()
+    sector_tide_enabled = bool(SECTOR_TIDE_STRATEGY_IDS.intersection(scorers))
+    niuone_enabled = bool(NIUONE_STRATEGY_IDS.intersection(scorers))
+    zettaranc_enabled = bool(ZETTARANC_STRATEGY_IDS.intersection(scorers))
+    configured_universe = configured_stock_universe()
+    stock_universe, reference_stock_universe = scan_stock_universes(scorers, configured_universe)
     candidates = load_a_share_code_pool(stock_universe)
+    if reference_stock_universe == stock_universe:
+        reference_candidates = candidates
+    else:
+        reference_candidates = load_a_share_code_pool(reference_stock_universe)
+    scan_candidates = merge_stock_code_pools(candidates, reference_candidates)
 
-    print(f"  Configured universe ({friendly_stock_universe(stock_universe)}): {len(candidates)} stocks", file=sys.stderr)
+    print(
+        f"  Configured trade universe ({friendly_stock_universe(stock_universe)}): "
+        f"{len(candidates)} stocks",
+        file=sys.stderr,
+    )
+    if niuone_enabled:
+        print(
+            f"  牛牛 reference universe ({friendly_stock_universe(reference_stock_universe)}、非ST): "
+            f"{len(reference_candidates)} stocks; final trades remain limited to configured universe",
+            file=sys.stderr,
+        )
 
     print("Step 2: Fetching real-time batch quotes...", file=sys.stderr)
     tencent_keys = {}
     all_keys = []
-    for code, name in candidates:
+    for code, name in scan_candidates:
         prefix = "sh" if code.startswith(("6", "9")) else "sz"
         tk = prefix + code
         tencent_keys[code] = tk
@@ -1316,36 +1720,57 @@ def main():
         q = tencent_batch_quote(batch, batch_label=f"{batch_number}/{batch_total}")
         quotes.update(q)
         time.sleep(0.05)
-    market_snapshot = build_market_snapshot(quotes, pool_count=len(all_keys), stock_universe=stock_universe)
+    reference_keys = {tencent_keys[code] for code, _name in reference_candidates}
+    reference_quotes = {key: quote for key, quote in quotes.items() if key in reference_keys}
+    market_snapshot = build_market_snapshot(
+        reference_quotes,
+        pool_count=len(reference_candidates),
+        stock_universe=reference_stock_universe,
+    )
     try:
         index_quotes = tencent_batch_quote(list(CORE_INDEX_SYMBOLS.values()))
         market_snapshot.update(build_index_risk_snapshot(index_quotes))
     except Exception:
         pass
 
-    # Filter by liquidity
-    liquid = []
-    for code, name in candidates:
-        tk = tencent_keys[code]
-        q = quotes.get(tk, {})
-        price = q.get("price")
-        amount = q.get("amount") or 0
-        if price is None or price <= 0:
-            continue
-        if amount < 8e8:
-            continue
-        liquid.append((code, name, q))
-
-    liquid.sort(key=lambda x: x[2].get("amount", 0), reverse=True)
-    top_n = min(500, len(liquid))
-    to_analyze = liquid[:top_n]
-    print(f"  High liquidity (成交额>8亿): {len(liquid)}, analyzing top {top_n}", file=sys.stderr)
+    if niuone_enabled:
+        to_analyze = filter_niuone_reference_candidates(
+            candidates,
+            tencent_keys,
+            quotes,
+        )
+        context_candidates = [
+            (code, name, quotes.get(tencent_keys.get(code, ""), {}))
+            for code, name in reference_candidates
+        ]
+    else:
+        liquid = filter_high_liquidity_candidates(candidates, tencent_keys, quotes)
+        to_analyze = liquid[:MAX_TRADE_ANALYSIS_COUNT]
+        context_candidates = to_analyze
+    if niuone_enabled:
+        print(
+            f"  牛牛 full-market deep analysis: {len(context_candidates)} stocks "
+            f"(no turnover/change filter); configured trade pool has "
+            f"{len(to_analyze)} stocks with usable quotes",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"  Trade-pool high liquidity (成交额>8亿): {len(liquid)}, "
+            f"analyzing top {len(to_analyze)}",
+            file=sys.stderr,
+        )
 
     try:
         scan_workers = int(dashboard_env_value("DASHBOARD_B1_SCAN_WORKERS") or "6")
     except (TypeError, ValueError):
         scan_workers = 6
-    scan_workers = max(1, min(16, scan_workers, len(to_analyze) or 1))
+    worker_target_count = max(
+        len(to_analyze),
+        len(context_candidates) if niuone_enabled else 0,
+        1,
+    )
+    scan_workers = max(1, min(16, scan_workers, worker_target_count))
     if scan_workers > 1 and not prepare_threaded_native_javascript_runtime():
         print("  Native JavaScript runtime unavailable; falling back to 1 worker", file=sys.stderr)
         scan_workers = 1
@@ -1353,41 +1778,53 @@ def main():
         f"Step 3: Multi-strategy scoring (registered strategy profiles, {scan_workers} workers)...",
         file=sys.stderr,
     )
-    scorers = active_strategy_scorers()
-    sector_tide_enabled = bool(SECTOR_TIDE_STRATEGY_IDS.intersection(scorers))
-    zettaranc_enabled = bool(ZETTARANC_STRATEGY_IDS.intersection(scorers))
     sector_tide_context: dict[str, Any] | None = None
+    niuone_context: dict[str, Any] | None = None
     strategy_context: dict[str, Any] | None = None
     prepared_by_code: dict[str, list[dict[str, Any]]] = {}
     industry_by_code: dict[str, str] = {}
     prepared_items: list[dict[str, Any]] = []
     sector_tide_flow_rows: dict[str, Any] = {"inflow": [], "outflow": []}
     previous_sector_tide_market: dict[str, Any] | None = None
+    previous_niuone_context: dict[str, Any] | None = None
     dragon_tiger_snapshot: dict[str, Any] | None = None
     overnight_us_snapshot: dict[str, Any] | None = None
 
     industry_members: list[dict[str, Any]] = []
-    if sector_tide_enabled or zettaranc_enabled:
+    if sector_tide_enabled or niuone_enabled or zettaranc_enabled:
         print("  Resolving candidate industries for strategy scoring...", file=sys.stderr)
         industry_members = [
             {"code": code, "name": name, "quote": q}
+            for code, name, q in context_candidates
+        ]
+        context_codes = {str(item["code"]) for item in industry_members}
+        trade_only_industry_members = [
+            {"code": code, "name": name, "quote": q}
             for code, name, q in to_analyze
+            if str(code) not in context_codes
         ]
         annotate_candidate_industries(
             industry_members,
+            trade_only_industry_members,
+            bulk_lookup=load_bulk_stock_industry_map if niuone_enabled else None,
+            max_fallback_lookups=(
+                NIUONE_INDUSTRY_FALLBACK_LOOKUP_LIMIT if niuone_enabled else None
+            ),
             max_workers=8 if scan_workers > 1 else 1,
         )
         industry_by_code = {
             str(item["code"]): normalize_industry_name(item.get("industry"))
-            for item in industry_members
+            for item in [*industry_members, *trade_only_industry_members]
         }
         sector_tide_flow_rows = fetch_sector_tide_money_flow()
         if zettaranc_enabled:
             strategy_context = {"industry_money_flow": sector_tide_flow_rows}
 
-    if sector_tide_enabled:
-        print("  Building shared market/sector tide context...", file=sys.stderr)
-        for index, item in enumerate(industry_members):
+    if sector_tide_enabled or niuone_enabled:
+        label = "market/sector tide" if sector_tide_enabled else "strong-stock mainline"
+        print(f"  Building shared {label} context...", file=sys.stderr)
+
+        def prepare_context_member(item: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]] | None]:
             code = str(item["code"])
             name = str(item["name"])
             industry = normalize_industry_name(item.get("industry"))
@@ -1399,46 +1836,93 @@ def main():
                 name=name,
                 industry=industry,
             )
-            if rows:
-                prepared_by_code[code] = rows
-                industry_by_code[code] = industry
-                prepared_items.append({
-                    "code": code,
-                    "name": name,
-                    "industry": industry,
-                    "quote": quote,
-                    "rows": rows,
-                })
-            if (index + 1) % 50 == 0:
-                print(f"  ... {index + 1}/{len(industry_members)} tide members prepared", file=sys.stderr)
-            time.sleep(0.02)
-        previous_sector_tide_market = load_previous_sector_tide_market()
+            return item, rows
+
+        if scan_workers > 1:
+            context_pool: Any = concurrent.futures.ThreadPoolExecutor(max_workers=scan_workers)
+            prepared_context = context_pool.map(prepare_context_member, industry_members)
+        else:
+            context_pool = None
+            prepared_context = map(prepare_context_member, industry_members)
+        try:
+            for index, (item, rows) in enumerate(prepared_context):
+                code = str(item["code"])
+                name = str(item["name"])
+                industry = normalize_industry_name(item.get("industry"))
+                quote = item.get("quote") if isinstance(item.get("quote"), dict) else {}
+                if rows:
+                    prepared_by_code[code] = rows
+                    industry_by_code[code] = industry
+                    prepared_items.append({
+                        "code": code,
+                        "name": name,
+                        "industry": industry,
+                        "quote": quote,
+                        "rows": rows,
+                    })
+                if (index + 1) % 100 == 0:
+                    print(
+                        f"  ... {index + 1}/{len(industry_members)} cross-sectional members prepared",
+                        file=sys.stderr,
+                    )
+        finally:
+            if context_pool is not None:
+                context_pool.shutdown(wait=True)
         dragon_tiger_snapshot = load_previous_sector_tide_dragon_tiger()
-        overnight_us_snapshot = load_sector_tide_overnight_us()
-        sector_tide_context = build_sector_tide_context(
-            prepared_items,
-            market_snapshot=market_snapshot,
-            flow_rows=sector_tide_flow_rows,
-            previous_market=previous_sector_tide_market,
-            dragon_tiger_snapshot=dragon_tiger_snapshot,
-            overnight_us_snapshot=overnight_us_snapshot,
-        )
-        sector_tide_context["industry_money_flow"] = sector_tide_flow_rows
-        strategy_context = sector_tide_context
-        market = sector_tide_context.get("market") or {}
-        dragon_tiger = sector_tide_context.get("dragon_tiger") or {}
-        overnight_us = sector_tide_context.get("overnight_us") or {}
-        print(
-            "  Tide context: "
-            f"market={market.get('state')} score={market.get('score')} "
-            f"sectors={sector_tide_context.get('sector_count')} "
-            f"coverage={sector_tide_context.get('data_coverage')} "
-            f"dragon_tiger={dragon_tiger.get('as_of_date') or 'unavailable'} "
-            f"matched={dragon_tiger.get('matched_stock_count', 0)} "
-            f"overnight_us={overnight_us.get('target_us_date') or 'unavailable'} "
-            f"tone={overnight_us.get('tone', 'neutral')}",
-            file=sys.stderr,
-        )
+        if sector_tide_enabled:
+            previous_sector_tide_market = load_previous_sector_tide_market()
+            overnight_us_snapshot = load_sector_tide_overnight_us()
+            sector_tide_context = build_sector_tide_context(
+                prepared_items,
+                market_snapshot=market_snapshot,
+                flow_rows=sector_tide_flow_rows,
+                previous_market=previous_sector_tide_market,
+                dragon_tiger_snapshot=dragon_tiger_snapshot,
+                overnight_us_snapshot=overnight_us_snapshot,
+            )
+            sector_tide_context["industry_money_flow"] = sector_tide_flow_rows
+            strategy_context = sector_tide_context
+            market = sector_tide_context.get("market") or {}
+            dragon_tiger = sector_tide_context.get("dragon_tiger") or {}
+            overnight_us = sector_tide_context.get("overnight_us") or {}
+            print(
+                "  Tide context: "
+                f"market={market.get('state')} score={market.get('score')} "
+                f"sectors={sector_tide_context.get('sector_count')} "
+                f"coverage={sector_tide_context.get('data_coverage')} "
+                f"dragon_tiger={dragon_tiger.get('as_of_date') or 'unavailable'} "
+                f"matched={dragon_tiger.get('matched_stock_count', 0)} "
+                f"overnight_us={overnight_us.get('target_us_date') or 'unavailable'} "
+                f"tone={overnight_us.get('tone', 'neutral')}",
+                file=sys.stderr,
+            )
+        else:
+            previous_niuone_context = load_previous_niuone_context()
+            niuone_context = build_niuone_context(
+                prepared_items,
+                market_snapshot=market_snapshot,
+                flow_rows=sector_tide_flow_rows,
+                previous_context=previous_niuone_context,
+                dragon_tiger_snapshot=dragon_tiger_snapshot,
+            )
+            niuone_context["industry_money_flow"] = sector_tide_flow_rows
+            niuone_context["reference_stock_universe"] = list(reference_stock_universe)
+            niuone_context["reference_stock_universe_label"] = friendly_stock_universe(reference_stock_universe)
+            niuone_context["reference_pool_count"] = len(reference_candidates)
+            niuone_context["reference_prefilter_count"] = len(context_candidates)
+            niuone_context["reference_analysis_count"] = len(context_candidates)
+            strategy_context = niuone_context
+            market = niuone_context.get("market") or {}
+            mainline = niuone_context.get("mainline") or {}
+            print(
+                "  牛牛主线 context: "
+                f"market={market.get('state')} score={market.get('score')} "
+                f"mode={mainline.get('mode')} primary={mainline.get('primary') or 'none'} "
+                f"themes={niuone_context.get('theme_count')} "
+                f"strong_stocks={niuone_context.get('strong_stock_count')} "
+                f"coverage={niuone_context.get('data_coverage')}",
+                file=sys.stderr,
+            )
 
     def analyze_candidate(candidate):
         code, name, q = candidate
@@ -1507,6 +1991,24 @@ def main():
             "market_allows_buys": best.get("market_allows_buys"),
             "sector_status": best.get("sector_status"),
             "sector_score": best.get("sector_score"),
+            "theme_basis": best.get("theme_basis"),
+            "mainline_state": best.get("mainline_state"),
+            "mainline_raw_state": best.get("mainline_raw_state"),
+            "mainline_score": best.get("mainline_score"),
+            "mainline_mode": best.get("mainline_mode"),
+            "mainline_primary": best.get("mainline_primary"),
+            "mainline_secondary": best.get("mainline_secondary"),
+            "mainline_selected": best.get("mainline_selected"),
+            "mainline_confirmation_count": best.get("mainline_confirmation_count"),
+            "mainline_state_streak": best.get("mainline_state_streak"),
+            "mainline_score_change": best.get("mainline_score_change"),
+            "strong_stock_count": best.get("strong_stock_count"),
+            "effective_strong_count": best.get("effective_strong_count"),
+            "leader_concentration": best.get("leader_concentration"),
+            "single_stock_dominated": best.get("single_stock_dominated"),
+            "stock_role": best.get("stock_role"),
+            "stock_strong": best.get("stock_strong"),
+            "stock_strong_score": best.get("stock_strong_score"),
             "sector_rank_acceleration": best.get("sector_rank_acceleration"),
             "sector_breadth20": best.get("sector_breadth20"),
             "stock_sector_rank": best.get("stock_sector_rank"),
@@ -1655,6 +2157,50 @@ def main():
             f"available={news_meta.get('available_stock_count', 0)}",
             file=sys.stderr,
         )
+    elif niuone_enabled and niuone_context is not None:
+        news_shortlist = [
+            item for item in results
+            if str(item.get("best_strategy") or "") in NIUONE_STRATEGY_IDS
+        ][:SECTOR_TIDE_NEWS_PRECHECK_LIMIT]
+        news_snapshot = fetch_sector_tide_news_precheck(news_shortlist)
+        niuone_context = build_niuone_context(
+            prepared_items,
+            market_snapshot=market_snapshot,
+            flow_rows=sector_tide_flow_rows,
+            previous_context=previous_niuone_context,
+            dragon_tiger_snapshot=dragon_tiger_snapshot,
+            news_snapshot=news_snapshot,
+        )
+        niuone_context["industry_money_flow"] = sector_tide_flow_rows
+        niuone_context["reference_stock_universe"] = list(reference_stock_universe)
+        niuone_context["reference_stock_universe_label"] = friendly_stock_universe(reference_stock_universe)
+        niuone_context["reference_pool_count"] = len(reference_candidates)
+        niuone_context["reference_prefilter_count"] = len(context_candidates)
+        niuone_context["reference_analysis_count"] = len(context_candidates)
+        strategy_context = niuone_context
+        record_codes = {
+            normalize_stock_code(record.get("code"))
+            for record in news_snapshot.get("records") or []
+            if isinstance(record, dict) and normalize_stock_code(record.get("code"))
+        }
+        source_by_code = {str(candidate[0]): candidate for candidate in to_analyze}
+        refreshed_by_code: dict[str, dict[str, Any]] = {}
+        for code in record_codes:
+            source = source_by_code.get(code)
+            refreshed = analyze_candidate(source) if source else None
+            if refreshed is not None:
+                refreshed_by_code[code] = refreshed
+        if refreshed_by_code:
+            results = [refreshed_by_code.get(str(item.get("code") or ""), item) for item in results]
+            results.sort(key=sort_key, reverse=True)
+        news_meta = niuone_context.get("news") or {}
+        print(
+            "  牛牛消息面预检: "
+            f"configured={news_meta.get('configured')} "
+            f"checked={news_meta.get('matched_stock_count', 0)} "
+            f"available={news_meta.get('available')}",
+            file=sys.stderr,
+        )
     display_candidates = select_display_candidates(results)
     trade_candidates = select_trade_candidates(results)
     annotate_candidate_industries(display_candidates, trade_candidates)
@@ -1682,8 +2228,15 @@ def main():
     
     output = {
         "generated_at": generated_at,
+        "configured_stock_universe": list(configured_universe),
+        "configured_stock_universe_label": friendly_stock_universe(configured_universe),
         "stock_universe": list(stock_universe),
         "stock_universe_label": friendly_stock_universe(stock_universe),
+        "reference_stock_universe": list(reference_stock_universe),
+        "reference_stock_universe_label": friendly_stock_universe(reference_stock_universe),
+        "reference_pool_count": len(reference_candidates),
+        "reference_prefilter_count": len(context_candidates),
+        "reference_analysis_count": len(context_candidates),
         "items": display_candidates,
         "candidates": display_candidates,
         "count": len(display_candidates),
@@ -1697,6 +2250,8 @@ def main():
     }
     if sector_tide_context is not None:
         output["sector_tide_context"] = sector_tide_context
+    if niuone_context is not None:
+        output["niuone_context"] = niuone_context
     if zettaranc_enabled:
         output["zettaranc_context"] = {
             "industry_money_flow": sector_tide_flow_rows,

@@ -53,6 +53,53 @@ class MultiStrategyRuleTests(unittest.TestCase):
         self.assertEqual(snapshot["quote_time"], "2026-07-10 10:00:04")
         self.assertEqual(snapshot["total_amount"], 1e9)
 
+    def test_market_snapshot_uses_board_specific_limit_thresholds(self):
+        snapshot = screen.build_market_snapshot({
+            "sh600001": {"name": "主板", "price": 11.0, "prev_close": 10.0, "change_pct": 10.0},
+            "sz300001": {"name": "创业十点", "price": 11.0, "prev_close": 10.0, "change_pct": 10.0},
+            "sz300002": {"name": "创业涨停", "price": 12.0, "prev_close": 10.0, "change_pct": 20.0},
+            "sh688001": {"name": "科创跌停", "price": 8.0, "prev_close": 10.0, "change_pct": -20.0},
+            "sh600002": {"name": "*ST测试", "price": 10.5, "prev_close": 10.0, "change_pct": 5.0},
+        }, stock_universe="st,chi_next,star_market,main_board")
+
+        self.assertEqual(snapshot["limit_up"], 3)
+        self.assertEqual(snapshot["limit_down"], 1)
+
+    def test_niuone_uses_full_reference_but_configured_trade_universe(self):
+        trade, reference = screen.scan_stock_universes(
+            {"niu_leader": object()},
+            "main_board",
+        )
+
+        self.assertEqual(trade, ("main_board",))
+        self.assertEqual(reference, ("chi_next", "star_market", "main_board"))
+
+        trade, reference = screen.scan_stock_universes(
+            {"shaofu_b1": object()},
+            "main_board,st",
+        )
+        self.assertEqual(reference, trade)
+
+    def test_niuone_trade_pool_filter_ignores_turnover_and_daily_move(self):
+        candidates = [
+            ("600001", "零成交额"),
+            ("300001", "下跌股票"),
+            ("688001", "缺少涨幅"),
+            ("600002", "无效价格"),
+            ("300002", "缺失行情"),
+        ]
+        keys = {code: ("sh" if code.startswith(("6", "9")) else "sz") + code for code, _ in candidates}
+        quotes = {
+            "sh600001": {"price": 10.0, "amount": 0.0, "change_pct": 0.0},
+            "sz300001": {"price": 10.0, "amount": 1.0, "change_pct": -9.0},
+            "sh688001": {"price": 10.0, "amount": 0.0},
+            "sh600002": {"price": 0.0, "amount": 9e8, "change_pct": 10.0},
+        }
+
+        selected = screen.filter_niuone_reference_candidates(candidates, keys, quotes)
+
+        self.assertEqual([item[0] for item in selected], ["600001", "300001", "688001"])
+
     @staticmethod
     def _tencent_quote_response():
         parts = [""] * 39
@@ -690,6 +737,41 @@ class MultiStrategyRuleTests(unittest.TestCase):
         self.assertEqual(display[0]["sector"], "银行")
         self.assertEqual(trade[0]["industry"], "银行")
         self.assertEqual(trade[0]["sector"], "银行")
+
+    def test_bulk_industry_lookup_prevents_unbounded_per_stock_fallbacks(self):
+        candidates = [
+            {"code": "600001", "name": "测试A"},
+            {"code": "600002", "name": "测试B"},
+            {"code": "600003", "name": "测试C"},
+        ]
+        original_cache = screen._STOCK_INDUSTRY_MEMORY_CACHE
+        original_lookup = screen.lookup_stock_industry
+        original_save = screen.save_stock_industry_cache
+        fallback_calls: list[str] = []
+        screen._STOCK_INDUSTRY_MEMORY_CACHE = {"600001": "旧行业"}
+
+        def fake_bulk(codes: set[str]):
+            self.assertEqual(codes, {"600001", "600002", "600003"})
+            return {"600001": "银行板块", "600002": "半导体行业"}
+
+        try:
+            screen.lookup_stock_industry = lambda code: fallback_calls.append(code) or "其他"
+            screen.save_stock_industry_cache = lambda _cache: None
+            screen.annotate_candidate_industries(
+                candidates,
+                bulk_lookup=fake_bulk,
+                max_fallback_lookups=0,
+                max_workers=4,
+            )
+        finally:
+            screen._STOCK_INDUSTRY_MEMORY_CACHE = original_cache
+            screen.lookup_stock_industry = original_lookup
+            screen.save_stock_industry_cache = original_save
+
+        self.assertEqual(candidates[0]["industry"], "银行")
+        self.assertEqual(candidates[1]["industry"], "半导体")
+        self.assertNotIn("industry", candidates[2])
+        self.assertEqual(fallback_calls, [])
 
     def test_threaded_industry_lookup_prewarms_native_javascript_runtime(self):
         candidates = [

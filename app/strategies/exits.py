@@ -90,6 +90,21 @@ def evaluate_strategy_time_exit(
                 f"冰点修复T+2未确认 ({hold_days}d，最高盈利{max_pnl_pct:.1f}%，现盈亏{pnl_pct:.1f}%)",
                 "tide_recovery_unconfirmed",
             )
+        if entry_strategy == "niu_leader" and hold_days >= 5 and max_pnl_pct < 3.0:
+            return _sell_signal(
+                f"牛牛领航5日未创新高 ({hold_days}d，最高盈利{max_pnl_pct:.1f}%，现盈亏{pnl_pct:.1f}%)",
+                "niu_leader_no_progress",
+            )
+        if entry_strategy == "niu_pullback" and hold_days >= 3 and max_pnl_pct < 2.0:
+            return _sell_signal(
+                f"牛牛回踩3日未恢复强势 ({hold_days}d，最高盈利{max_pnl_pct:.1f}%，现盈亏{pnl_pct:.1f}%)",
+                "niu_pullback_no_follow_through",
+            )
+        if entry_strategy == "niu_emerging" and hold_days >= 2 and max_pnl_pct < 1.5 and pnl_pct <= 0.5:
+            return _sell_signal(
+                f"牛牛启动T+2未升级为确认主线 ({hold_days}d，最高盈利{max_pnl_pct:.1f}%，现盈亏{pnl_pct:.1f}%)",
+                "niu_emerging_unconfirmed",
+            )
         if entry_strategy == "b2_confirm" and hold_days >= 2 and max_pnl_pct < 2.0 and pnl_pct <= 0.5:
             return _sell_signal(
                 f"B2确认未延续离场 ({hold_days}d {time_exit_hhmm}尾盘检查，最高盈利{max_pnl_pct:.1f}%，现盈亏{pnl_pct:.1f}%)",

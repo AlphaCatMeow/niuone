@@ -38,6 +38,13 @@ from .common import (
     with_strategy_profile,
 )
 from .li_daxiao import score_li_daxiao_bottom
+from .niuone import (
+    NIUONE_STRATEGY_IDS,
+    build_niuone_context,
+    score_niu_emerging,
+    score_niu_leader,
+    score_niu_pullback,
+)
 from .engine import StrategyScorer, analyze_enriched_rows
 from .sector_tide import (
     SECTOR_TIDE_STRATEGY_IDS,
@@ -69,6 +76,9 @@ _SCORER_BY_NAME: dict[str, Callable[[list[dict[str, Any]]], dict[str, Any] | Non
     "score_tide_leader": score_tide_leader,
     "score_tide_rotation": score_tide_rotation,
     "score_tide_recovery": score_tide_recovery,
+    "score_niu_leader": score_niu_leader,
+    "score_niu_pullback": score_niu_pullback,
+    "score_niu_emerging": score_niu_emerging,
 }
 
 STRATEGY_SCORERS: dict[str, Callable[[list[dict[str, Any]]], dict[str, Any] | None]] = {
@@ -87,6 +97,7 @@ __all__ = [
     "LI_DAXIAO_MAX_DAILY_CHASE_PCT",
     "LI_DAXIAO_MAX_TURNOVER",
     "LI_DAXIAO_MIN_AMOUNT",
+    "NIUONE_STRATEGY_IDS",
     "STRATEGY_SCORERS",
     "SECTOR_TIDE_STRATEGY_IDS",
     "ZETTARANC_INDUSTRY_FLOW_MAX_BONUS",
@@ -94,6 +105,7 @@ __all__ = [
     "StrategyScorer",
     "analyze_enriched_rows",
     "build_sector_tide_context",
+    "build_niuone_context",
     "candle_amplitude_pct",
     "candle_body_pct",
     "combine_z_yellow",
@@ -117,6 +129,9 @@ __all__ = [
     "score_b3_accelerate",
     "score_breakout",
     "score_li_daxiao_bottom",
+    "score_niu_emerging",
+    "score_niu_leader",
+    "score_niu_pullback",
     "score_tide_leader",
     "score_tide_rotation",
     "score_tide_recovery",

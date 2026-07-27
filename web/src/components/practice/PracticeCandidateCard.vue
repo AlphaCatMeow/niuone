@@ -18,6 +18,8 @@ const strategy = computed(() => props.strategyMeta[strategyName.value] || {
   color: '#94a3b8',
 })
 const tideStrategy = computed(() => ['tide_leader', 'tide_rotation', 'tide_recovery'].includes(strategyName.value))
+const niuoneStrategy = computed(() => ['niu_leader', 'niu_pullback', 'niu_emerging'].includes(strategyName.value))
+const dynamicStrategy = computed(() => tideStrategy.value || niuoneStrategy.value)
 const zettarancStrategy = computed(() => ['shaofu_b1', 'b2_confirm', 'b3_accelerate', 'super_b1'].includes(strategyName.value))
 const hardBlockers = computed(() => Array.isArray(props.item.hard_blockers) ? props.item.hard_blockers : [])
 const riskFlags = computed(() => Array.isArray(props.item.risk_flags) ? props.item.risk_flags : [])
@@ -73,8 +75,8 @@ const tradeDiscipline = computed(() => [props.item.position_hint, props.item.tim
         <div style="color:var(--text);font-size:14px;font-weight:600">{{ score }}/{{ item.score_total || 10 }} · 基准≥{{ threshold }}</div>
       </div>
       <div style="background:var(--panel2);border:1px solid var(--line);border-radius:7px;padding:8px 10px;flex:1;min-width:100px">
-        <div style="color:var(--muted);font-size:11px">{{ tideStrategy ? 'EMA20 / 距EMA20' : 'BBI / 距BBI' }}</div>
-        <div style="color:var(--text);font-size:14px;font-weight:600">{{ formatPracticeNumber(tideStrategy ? item.ema20 : item.bbi) }} / {{ distanceText }}</div>
+        <div style="color:var(--muted);font-size:11px">{{ dynamicStrategy ? 'EMA20 / 距EMA20' : 'BBI / 距BBI' }}</div>
+        <div style="color:var(--text);font-size:14px;font-weight:600">{{ formatPracticeNumber(dynamicStrategy ? item.ema20 : item.bbi) }} / {{ distanceText }}</div>
       </div>
       <div style="background:var(--panel2);border:1px solid var(--line);border-radius:7px;padding:8px 10px;flex:1;min-width:100px">
         <div style="color:var(--muted);font-size:11px">成交额</div>
@@ -88,6 +90,19 @@ const tradeDiscipline = computed(() => [props.item.position_hint, props.item.tim
         <span>板块内排名 {{ formatPracticeNumber(item.stock_sector_rank) }}</span>
         <span>结构止损 {{ formatPracticeNumber(item.stop_price) }} ({{ formatPracticeNumber(item.stop_distance_pct) }}%)</span>
         <span>跳空缓冲 {{ formatPracticeNumber(item.gap_buffer_pct) }}%</span>
+        <span>有效损失 {{ formatPracticeNumber(item.effective_loss_distance_pct) }}%</span>
+        <span>单笔预算 {{ formatPracticeNumber(item.per_trade_risk_budget_pct) }}%</span>
+        <span>动态仓位上限 {{ formatPracticeNumber(item.max_position_pct_by_risk) }}%</span>
+      </template>
+      <template v-else-if="niuoneStrategy">
+        <span>市场 {{ item.market_regime || '--' }} {{ formatPracticeNumber(item.market_score) }}</span>
+        <span>主线状态 {{ PRACTICE_TIDE_STATUS_LABELS[item.mainline_state] || item.mainline_state || '--' }} / {{ formatPracticeNumber(item.mainline_score) }}</span>
+        <span>主线模式 {{ item.mainline_mode || 'none' }} · 核心 {{ item.mainline_primary || '--' }}<template v-if="item.mainline_secondary"> / {{ item.mainline_secondary }}</template></span>
+        <span>强股 {{ item.strong_stock_count ?? '--' }} · 有效强股 {{ formatPracticeNumber(item.effective_strong_count) }}</span>
+        <span>龙头集中度 {{ formatPracticeNumber(Number(item.leader_concentration) * 100) }}%</span>
+        <span>个股 {{ item.stock_role || '--' }} · 强度 {{ formatPracticeNumber(item.stock_strong_score) }}</span>
+        <span>主线内排名 {{ formatPracticeNumber(item.stock_sector_rank) }}</span>
+        <span>结构止损 {{ formatPracticeNumber(item.stop_price) }} ({{ formatPracticeNumber(item.stop_distance_pct) }}%)</span>
         <span>有效损失 {{ formatPracticeNumber(item.effective_loss_distance_pct) }}%</span>
         <span>单笔预算 {{ formatPracticeNumber(item.per_trade_risk_budget_pct) }}%</span>
         <span>动态仓位上限 {{ formatPracticeNumber(item.max_position_pct_by_risk) }}%</span>
