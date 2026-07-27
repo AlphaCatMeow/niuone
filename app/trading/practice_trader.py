@@ -1435,6 +1435,28 @@ def refresh_position_intraday(state: dict[str, Any]) -> dict[str, Any]:
     return meta
 
 
+def _cached_today_sold_quotes(state: dict[str, Any], today: str) -> dict[str, dict[str, Any]]:
+    """Return only same-day quote fields from the persisted sold-card cache."""
+    quotes: dict[str, dict[str, Any]] = {}
+    for item in state.get("today_sold_stocks", []) or []:
+        if not isinstance(item, dict):
+            continue
+        if not str(item.get("last_sell_time") or "").startswith(today):
+            continue
+        code = normalize_code(item.get("code") or "")
+        if not code:
+            continue
+        quotes[code] = {
+            "code": code,
+            "name": item.get("name") or "",
+            "price": item.get("current_price"),
+            "change_pct": item.get("current_change_pct"),
+            "quote_time": item.get("quote_time") or "",
+            "source": item.get("quote_source") or "",
+        }
+    return quotes
+
+
 def enrich_portfolio(state: dict[str, Any]) -> dict[str, Any]:
     positions = state.get("positions") or {}
     total_mv = 0.0
@@ -1588,6 +1610,13 @@ def enrich_portfolio(state: dict[str, Any]) -> dict[str, Any]:
         if parse_ts(time_text) is not None and math.isfinite(equity):
             source_equity_times.append(time_text)
     source_last_equity_time = max(source_equity_times, default="")
+    today_sold_stocks = build_today_sold_stocks(state, today=today)
+    today_sold_quote_refresh = state.get("today_sold_quote_refresh") or {}
+    if (
+        not isinstance(today_sold_quote_refresh, dict)
+        or not str(today_sold_quote_refresh.get("quote_time") or "").startswith(today)
+    ):
+        today_sold_quote_refresh = {}
     return {
         "generated_at": now_ts(),
         "source_updated_at": str(state.get("updated_at") or ""),
@@ -1606,8 +1635,8 @@ def enrich_portfolio(state: dict[str, Any]) -> dict[str, Any]:
             item for item in state.get("pending_decisions", [])
             if isinstance(item, dict) and item.get("status") == "pending"
         ],
-        "today_sold_stocks": state.get("today_sold_stocks", []),
-        "today_sold_quote_refresh": state.get("today_sold_quote_refresh", {}),
+        "today_sold_stocks": today_sold_stocks,
+        "today_sold_quote_refresh": today_sold_quote_refresh,
         "equity_history": state.get("equity_history", [])[-EQUITY_HISTORY_LIMIT:],
         "last_b1_generated_at": state.get("last_b1_generated_at") or "",
         "last_decision_at": state.get("last_decision_at") or "",
@@ -1978,8 +2007,14 @@ def rebuild_intraday_equity_curve(
     return True
 
 
-def refresh_today_sold_stocks(state: dict[str, Any], today: str | None = None) -> list[dict[str, Any]]:
-    """Aggregate today's SELL trades and refresh quotes for post-sale tracking."""
+def build_today_sold_stocks(
+    state: dict[str, Any],
+    today: str | None = None,
+    *,
+    quote_map: dict[str, dict[str, Any]] | None = None,
+    quote_meta: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Build today's sold cards from the trade ledger without external I/O."""
     today = today or today_key()
     sold: dict[str, dict[str, Any]] = {}
     for trade in state.get("trade_log", []) or []:
@@ -2028,23 +2063,17 @@ def refresh_today_sold_stocks(state: dict[str, Any], today: str | None = None) -
             row["buy_strategies"].append(buy_strategy)
 
     if not sold:
-        state["today_sold_stocks"] = []
-        state["today_sold_quote_refresh"] = {"quote_time": now_ts(), "updated": 0}
         return []
 
-    quote_map: dict[str, dict[str, Any]] = {}
-    quote_meta: dict[str, Any] = {"quote_time": now_ts(), "updated": 0}
-    try:
-        quote_map, quote_meta = fetch_realtime_quotes(sorted(sold.keys()))
-    except Exception as exc:
-        quote_meta = {"quote_time": now_ts(), "updated": 0, "error": f"{type(exc).__name__}: {exc}"}
+    resolved_quote_map = quote_map if quote_map is not None else _cached_today_sold_quotes(state, today)
+    resolved_quote_meta = quote_meta if isinstance(quote_meta, dict) else {}
 
     rows: list[dict[str, Any]] = []
     for code, row in sold.items():
         shares = int(row["shares"] or 0)
         avg_sell_price = (float(row["sell_amount"]) / shares) if shares > 0 else 0.0
         cost_basis = float(row["net_proceeds"]) - float(row["realized_pnl"])
-        quote = quote_map.get(code) or {}
+        quote = resolved_quote_map.get(code) or {}
         current_price = quote.get("price") if isinstance(quote.get("price"), (int, float)) else None
         change_after_sell = ((float(current_price) / avg_sell_price - 1) * 100) if current_price and avg_sell_price > 0 else None
         after_sell_pnl = ((float(current_price) - avg_sell_price) * shares) if current_price and shares > 0 else None
@@ -2070,10 +2099,38 @@ def refresh_today_sold_stocks(state: dict[str, Any], today: str | None = None) -
             "exit_rules": row.get("exit_rules") or [],
             "buy_strategy": ",".join(row.get("buy_strategies") or []),
             "buy_strategies": row.get("buy_strategies") or [],
-            "quote_time": quote.get("quote_time") or quote_meta.get("quote_time") or "",
+            "quote_time": quote.get("quote_time") or resolved_quote_meta.get("quote_time") or "",
             "quote_source": quote.get("source") or "",
         })
     rows.sort(key=lambda item: item.get("last_sell_time") or "", reverse=True)
+    return rows
+
+
+def refresh_today_sold_stocks(state: dict[str, Any], today: str | None = None) -> list[dict[str, Any]]:
+    """Aggregate today's SELL trades and refresh quotes for post-sale tracking."""
+    today = today or today_key()
+    rows_without_quotes = build_today_sold_stocks(state, today=today, quote_map={})
+    if not rows_without_quotes:
+        state["today_sold_stocks"] = []
+        state["today_sold_quote_refresh"] = {"quote_time": now_ts(), "updated": 0}
+        return []
+
+    quote_map = _cached_today_sold_quotes(state, today)
+    quote_meta: dict[str, Any] = {"quote_time": now_ts(), "updated": 0}
+    try:
+        refreshed_quotes, quote_meta = fetch_realtime_quotes(
+            sorted(row["code"] for row in rows_without_quotes)
+        )
+        quote_map.update(refreshed_quotes)
+    except Exception as exc:
+        quote_meta = {"quote_time": now_ts(), "updated": 0, "error": f"{type(exc).__name__}: {exc}"}
+
+    rows = build_today_sold_stocks(
+        state,
+        today=today,
+        quote_map=quote_map,
+        quote_meta=quote_meta,
+    )
     state["today_sold_stocks"] = rows
     state["today_sold_quote_refresh"] = quote_meta
     return rows

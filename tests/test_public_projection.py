@@ -10,6 +10,7 @@ class PublicProjectionTests(unittest.TestCase):
         sections = build_public_sections(
             {
                 "generated_at": "2026-07-21 10:00:00",
+                "current_date": "2026-07-21",
                 "initial_cash": 1_000_000,
                 "cash": 400_000,
                 "total_equity": 1_030_000,
@@ -57,6 +58,7 @@ class PublicProjectionTests(unittest.TestCase):
         )
 
         self.assertEqual(sections["metadata"]["schema_version"], PUBLIC_SCHEMA_VERSION)
+        self.assertEqual(sections["metadata"]["current_date"], "2026-07-21")
         self.assertTrue(sections["metadata"]["degraded"])
         self.assertNotIn("generated_at", sections["metadata"])
         self.assertNotIn("last_error", sections["metadata"])

@@ -3240,6 +3240,88 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertEqual(rows[0]["buy_strategy"], "b2_confirm")
         self.assertEqual(rows[0]["buy_strategies"], ["b2_confirm"])
 
+    def test_portfolio_rebuilds_today_sold_stocks_from_trade_log(self):
+        original_today_key = trader.today_key
+        try:
+            trader.today_key = lambda: "2026-06-24"
+            state = {
+                "cash": 100_000.0,
+                "positions": {},
+                "trade_log": [
+                    {
+                        "time": "2026-06-23 14:30:00",
+                        "action": "SELL",
+                        "code": "600001",
+                        "shares": 100,
+                        "price": 9.0,
+                    },
+                    {
+                        "time": "2026-06-24 10:00:00",
+                        "action": "SELL",
+                        "code": "600000",
+                        "name": "测试股",
+                        "shares": 1000,
+                        "price": 10.0,
+                        "amount": 10000.0,
+                        "net_proceeds": 9990.0,
+                        "fee": 10.0,
+                        "pnl": 990.0,
+                        "reason": "止盈",
+                    },
+                ],
+                "today_sold_stocks": [
+                    {
+                        "code": "600001",
+                        "last_sell_time": "2026-06-23 14:30:00",
+                        "current_price": 9.5,
+                    }
+                ],
+                "today_sold_quote_refresh": {
+                    "quote_time": "2026-06-23 14:31:00",
+                    "updated": 1,
+                },
+            }
+
+            payload = trader.enrich_portfolio(state)
+        finally:
+            trader.today_key = original_today_key
+
+        self.assertEqual([row["code"] for row in payload["today_sold_stocks"]], ["600000"])
+        self.assertEqual(payload["today_sold_stocks"][0]["last_sell_time"], "2026-06-24 10:00:00")
+        self.assertIsNone(payload["today_sold_stocks"][0]["current_price"])
+        self.assertEqual(payload["today_sold_quote_refresh"], {})
+
+    def test_portfolio_clears_stale_today_sold_stocks_without_current_day_sells(self):
+        original_today_key = trader.today_key
+        try:
+            trader.today_key = lambda: "2026-06-24"
+            state = {
+                "cash": 100_000.0,
+                "positions": {},
+                "trade_log": [
+                    {
+                        "time": "2026-06-23 14:30:00",
+                        "action": "SELL",
+                        "code": "600001",
+                        "shares": 100,
+                        "price": 9.0,
+                    }
+                ],
+                "today_sold_stocks": [
+                    {
+                        "code": "600001",
+                        "last_sell_time": "2026-06-23 14:30:00",
+                        "current_price": 9.5,
+                    }
+                ],
+            }
+
+            payload = trader.enrich_portfolio(state)
+        finally:
+            trader.today_key = original_today_key
+
+        self.assertEqual(payload["today_sold_stocks"], [])
+
     def test_profit_giveback_triggers_after_peak(self):
         pos = {
             "qty": 1000,

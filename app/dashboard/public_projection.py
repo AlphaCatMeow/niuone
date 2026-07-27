@@ -246,6 +246,7 @@ def build_public_sections(
 
     metadata = {
         "schema_version": PUBLIC_SCHEMA_VERSION,
+        "current_date": _public_scalar(practice.get("current_date") or ""),
         "source_last_equity_time": _public_scalar(practice.get("source_last_equity_time") or ""),
         "snapshot_mode": _public_scalar(practice.get("snapshot_mode") or "fast"),
         "history_scope": _public_scalar(practice.get("equity_history_scope") or "latest_day"),
