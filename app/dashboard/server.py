@@ -55,12 +55,14 @@ from dashboard.apis.iwencai_service import (
     write_dragon_tiger_snapshot,
 )
 from dashboard.apis.industry_flow import (
+    DEFAULT_HISTORY_LIMIT as INDUSTRY_FLOW_HISTORY_LIMIT,
     DEFAULT_PLAYBACK_SPEED as INDUSTRY_FLOW_DEFAULT_PLAYBACK_SPEED,
     DEFAULT_SAMPLE_INTERVAL_SECONDS as INDUSTRY_FLOW_DEFAULT_SAMPLE_INTERVAL_SECONDS,
     DEFAULT_SIDE_LIMIT as INDUSTRY_FLOW_DEFAULT_SIDE_LIMIT,
     SAMPLING_WINDOWS as INDUSTRY_FLOW_DEFAULT_SAMPLING_WINDOWS,
     append_industry_flow_sample,
     build_industry_flow_payload,
+    compact_industry_flow_sample,
     is_industry_flow_session_timestamp,
     normalize_industry_flow_sampling_windows,
 )
@@ -2184,6 +2186,84 @@ def _empty_industry_flow_history(day: str) -> dict[str, Any]:
     }
 
 
+def _industry_flow_history_recovery_file() -> Path:
+    suffix = INDUSTRY_FLOW_HISTORY_FILE.suffix or ".json"
+    return INDUSTRY_FLOW_HISTORY_FILE.with_name(
+        f"{INDUSTRY_FLOW_HISTORY_FILE.stem}.recovery{suffix}"
+    )
+
+
+def _industry_flow_history_for_day(
+    day: str,
+    *histories: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Merge durable real samples for one display day without trusting metadata."""
+
+    by_time: dict[str, dict[str, Any]] = {}
+    for history in histories:
+        if not isinstance(history, dict):
+            continue
+        for raw in history.get("samples") or []:
+            compact = compact_industry_flow_sample(
+                raw if isinstance(raw, dict) else None
+            )
+            if compact is None or compact["generated_at"][:10] != day:
+                continue
+            by_time[compact["generated_at"]] = compact
+    samples = [by_time[key] for key in sorted(by_time)][-INDUSTRY_FLOW_HISTORY_LIMIT:]
+    return {
+        "schema_version": 1,
+        "date": day,
+        "interval_seconds": INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS,
+        "samples": samples,
+    }
+
+
+def _back_up_industry_flow_history(history: dict[str, Any] | None) -> bool:
+    """Preserve the newest real sample day before a rollover removes it."""
+
+    if not isinstance(history, dict):
+        return False
+    sample_days = sorted({
+        compact["generated_at"][:10]
+        for raw in history.get("samples") or []
+        if (
+            compact := compact_industry_flow_sample(
+                raw if isinstance(raw, dict) else None
+            )
+        ) is not None
+    })
+    if not sample_days:
+        return False
+    recovery_file = _industry_flow_history_recovery_file()
+    recovery = read_json_cache(recovery_file, None)
+    backed_up = _industry_flow_history_for_day(
+        sample_days[-1],
+        recovery,
+        history,
+    )
+    if backed_up == recovery:
+        return False
+    write_json_cache(recovery_file, backed_up)
+    return True
+
+
+def _persist_industry_flow_history(history: dict[str, Any]) -> bool:
+    """Atomically mirror non-empty history before replacing the primary file."""
+
+    recovery_file = _industry_flow_history_recovery_file()
+    recovery = read_json_cache(recovery_file, None)
+    changed = False
+    if history.get("samples") and history != recovery:
+        write_json_cache(recovery_file, history)
+        changed = True
+    current = read_json_cache(INDUSTRY_FLOW_HISTORY_FILE, None)
+    if history != current:
+        write_json_cache(INDUSTRY_FLOW_HISTORY_FILE, history)
+        changed = True
+    return changed
+
+
 def _empty_money_flow_snapshot(day: str) -> dict[str, Any]:
     return {
         "schema_version": 2,
@@ -2213,9 +2293,16 @@ def reset_daily_market_histories(now: datetime | None = None) -> bool:
             changed = True
     with INDUSTRY_FLOW_HISTORY_LOCK:
         history = read_json_cache(INDUSTRY_FLOW_HISTORY_FILE, None)
-        if history is not None and _daily_payload_date_keys(history) != {day}:
-            write_json_cache(INDUSTRY_FLOW_HISTORY_FILE, _empty_industry_flow_history(day))
-            changed = True
+        recovery = read_json_cache(_industry_flow_history_recovery_file(), None)
+        rolled = _industry_flow_history_for_day(day, recovery, history)
+        if rolled.get("samples"):
+            changed = _persist_industry_flow_history(rolled) or changed
+        elif history is not None:
+            empty = _empty_industry_flow_history(day)
+            if history != empty:
+                _back_up_industry_flow_history(history)
+                write_json_cache(INDUSTRY_FLOW_HISTORY_FILE, empty)
+                changed = True
         snapshot = read_json_cache(MONEY_FLOW_SNAPSHOT_FILE, None)
         if snapshot is not None and _daily_payload_date_keys(snapshot) != {day}:
             write_json_cache(MONEY_FLOW_SNAPSHOT_FILE, _empty_money_flow_snapshot(day))
@@ -2582,7 +2669,7 @@ def record_industry_flow_sample(
             interval_seconds=INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS,
         )
         if updated != history and updated.get("samples"):
-            write_json_cache(INDUSTRY_FLOW_HISTORY_FILE, updated)
+            _persist_industry_flow_history(updated)
         return _filter_industry_flow_session_samples(
             updated.get("samples") or [],
             retention_day=current_day,

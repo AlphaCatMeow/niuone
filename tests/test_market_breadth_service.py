@@ -293,6 +293,11 @@ class MarketBreadthHistoryTests(unittest.TestCase):
 
                 breadth = json.loads(dashboard.MARKET_BREADTH_HISTORY_FILE.read_text(encoding="utf-8"))
                 flow = json.loads(dashboard.INDUSTRY_FLOW_HISTORY_FILE.read_text(encoding="utf-8"))
+                flow_recovery = json.loads(
+                    dashboard._industry_flow_history_recovery_file().read_text(
+                        encoding="utf-8"
+                    )
+                )
                 money = json.loads(dashboard.MONEY_FLOW_SNAPSHOT_FILE.read_text(encoding="utf-8"))
                 self.assertEqual(retained_breadth["date"], "2026-07-22")
                 self.assertEqual(len(retained_breadth["samples"]), 1)
@@ -315,6 +320,8 @@ class MarketBreadthHistoryTests(unittest.TestCase):
                 )
                 self.assertEqual(flow["date"], "2026-07-23")
                 self.assertEqual(flow["samples"], [])
+                self.assertEqual(flow_recovery["date"], "2026-07-22")
+                self.assertEqual(len(flow_recovery["samples"]), 1)
                 self.assertEqual(money["retention_date"], "2026-07-23")
                 self.assertEqual(money["inflow"], [])
                 self.assertEqual(money["outflow"], [])
@@ -322,6 +329,115 @@ class MarketBreadthHistoryTests(unittest.TestCase):
             dashboard.MARKET_BREADTH_HISTORY_FILE = original_breadth_file
             dashboard.INDUSTRY_FLOW_HISTORY_FILE = original_flow_file
             dashboard.MONEY_FLOW_SNAPSHOT_FILE = original_money_file
+
+    def test_daily_reset_keeps_current_samples_when_history_metadata_is_stale(self):
+        original_breadth_file = dashboard.MARKET_BREADTH_HISTORY_FILE
+        original_flow_file = dashboard.INDUSTRY_FLOW_HISTORY_FILE
+        original_money_file = dashboard.MONEY_FLOW_SNAPSHOT_FILE
+        try:
+            with tempfile.TemporaryDirectory(prefix="niuone-industry-flow-roll-") as temp_dir:
+                root = Path(temp_dir)
+                dashboard.MARKET_BREADTH_HISTORY_FILE = root / "market_breadth.json"
+                dashboard.INDUSTRY_FLOW_HISTORY_FILE = root / "industry_flow.json"
+                dashboard.MONEY_FLOW_SNAPSHOT_FILE = root / "money_flow.json"
+                dashboard.INDUSTRY_FLOW_HISTORY_FILE.write_text(json.dumps({
+                    "date": "2026-07-22",
+                    "samples": [
+                        {
+                            "generated_at": "2026-07-22 15:00:00",
+                            "items": [{"name": "银行", "net_flow_yi": -3}],
+                        },
+                        {
+                            "generated_at": "2026-07-23 09:25:00",
+                            "items": [{"name": "半导体", "net_flow_yi": 12}],
+                        },
+                        {
+                            "generated_at": "2026-07-23 10:00:00",
+                            "items": [{"name": "软件开发", "net_flow_yi": 8}],
+                        },
+                    ],
+                }), encoding="utf-8")
+
+                changed = dashboard.reset_daily_market_histories(
+                    datetime(2026, 7, 23, 11, 0, 0)
+                )
+                first = dashboard.INDUSTRY_FLOW_HISTORY_FILE.read_text(encoding="utf-8")
+                repeated = dashboard.reset_daily_market_histories(
+                    datetime(2026, 7, 23, 11, 1, 0)
+                )
+                second = dashboard.INDUSTRY_FLOW_HISTORY_FILE.read_text(encoding="utf-8")
+                stored = json.loads(second)
+
+                self.assertTrue(changed)
+                self.assertFalse(repeated)
+                self.assertEqual(first, second)
+                self.assertEqual(stored["date"], "2026-07-23")
+                self.assertEqual(
+                    [item["generated_at"] for item in stored["samples"]],
+                    ["2026-07-23 09:25:00", "2026-07-23 10:00:00"],
+                )
+                self.assertEqual(
+                    json.loads(
+                        dashboard._industry_flow_history_recovery_file().read_text(
+                            encoding="utf-8"
+                        )
+                    ),
+                    stored,
+                )
+        finally:
+            dashboard.MARKET_BREADTH_HISTORY_FILE = original_breadth_file
+            dashboard.INDUSTRY_FLOW_HISTORY_FILE = original_flow_file
+            dashboard.MONEY_FLOW_SNAPSHOT_FILE = original_money_file
+
+    def test_daily_reset_restores_current_samples_from_recovery_mirror(self):
+        original_breadth_file = dashboard.MARKET_BREADTH_HISTORY_FILE
+        original_flow_file = dashboard.INDUSTRY_FLOW_HISTORY_FILE
+        original_money_file = dashboard.MONEY_FLOW_SNAPSHOT_FILE
+        original_calendar = dashboard.is_a_share_trading_day_for_dashboard
+        try:
+            with tempfile.TemporaryDirectory(prefix="niuone-industry-flow-recover-") as temp_dir:
+                root = Path(temp_dir)
+                dashboard.MARKET_BREADTH_HISTORY_FILE = root / "market_breadth.json"
+                dashboard.INDUSTRY_FLOW_HISTORY_FILE = root / "industry_flow.json"
+                dashboard.MONEY_FLOW_SNAPSHOT_FILE = root / "money_flow.json"
+                dashboard.is_a_share_trading_day_for_dashboard = lambda _now: True
+                dashboard.record_industry_flow_sample({
+                    "generated_at": "2026-07-23 09:25:00",
+                    "items": [{"name": "半导体", "net_flow_yi": 12}],
+                }, now=datetime(2026, 7, 23, 9, 25, 0))
+                dashboard.record_industry_flow_sample({
+                    "generated_at": "2026-07-23 10:00:00",
+                    "items": [{"name": "软件开发", "net_flow_yi": 8}],
+                }, now=datetime(2026, 7, 23, 10, 0, 0))
+                mirrored = json.loads(
+                    dashboard._industry_flow_history_recovery_file().read_text(
+                        encoding="utf-8"
+                    )
+                )
+                dashboard.INDUSTRY_FLOW_HISTORY_FILE.write_text(
+                    json.dumps(dashboard._empty_industry_flow_history("2026-07-23")),
+                    encoding="utf-8",
+                )
+
+                changed = dashboard.reset_daily_market_histories(
+                    datetime(2026, 7, 23, 11, 0, 0)
+                )
+                restored = json.loads(
+                    dashboard.INDUSTRY_FLOW_HISTORY_FILE.read_text(encoding="utf-8")
+                )
+                repeated = dashboard.reset_daily_market_histories(
+                    datetime(2026, 7, 23, 11, 1, 0)
+                )
+
+                self.assertEqual(len(mirrored["samples"]), 2)
+                self.assertTrue(changed)
+                self.assertFalse(repeated)
+                self.assertEqual(restored, mirrored)
+        finally:
+            dashboard.MARKET_BREADTH_HISTORY_FILE = original_breadth_file
+            dashboard.INDUSTRY_FLOW_HISTORY_FILE = original_flow_file
+            dashboard.MONEY_FLOW_SNAPSHOT_FILE = original_money_file
+            dashboard.is_a_share_trading_day_for_dashboard = original_calendar
 
     def test_apis_publish_yesterday_before_nine_and_clear_it_at_nine(self):
         original_breadth_file = dashboard.MARKET_BREADTH_HISTORY_FILE
