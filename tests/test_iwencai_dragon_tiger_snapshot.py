@@ -6,6 +6,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 
@@ -34,6 +35,290 @@ def _payload(trade_date: str, code: str) -> dict[str, object]:
 
 
 class IwencaiDragonTigerSnapshotTests(unittest.TestCase):
+    def test_complete_snapshot_refreshes_expanded_candidate_tracking_without_query(self):
+        with tempfile.TemporaryDirectory(prefix="niuone-dragon-tiger-") as tmp:
+            path = Path(tmp) / "iwencai_dragon_tiger_latest.json"
+            payload = _payload("2026-07-24", "000001.SZ")
+            payload["items"] = [
+                {
+                    "code": "000001.SZ",
+                    "name": "连板样本",
+                    "limit_up_streak": 2,
+                    "consecutive_listed": False,
+                    "consecutive_list_days": 1,
+                    "news_precheck": {
+                        "checked": True,
+                        "available": True,
+                        "tone": "neutral",
+                        "summary": "连板样本暂无重大消息",
+                    },
+                },
+                {
+                    "code": "000002.SZ",
+                    "name": "连榜样本",
+                    "limit_up_streak": 0,
+                    "consecutive_listed": True,
+                    "consecutive_list_days": 2,
+                    "news_precheck": {
+                        "checked": True,
+                        "available": True,
+                        "tone": "positive",
+                        "summary": "连榜样本出现利好消息",
+                    },
+                },
+            ]
+            payload.update({
+                "limit_up_news_candidate_count": 1,
+                "limit_up_news_checked_codes": ["000001.SZ"],
+                "limit_up_news_pending_codes": [],
+                "limit_up_news_checked_count": 1,
+                "limit_up_news_pending_count": 0,
+                "limit_up_news_available_count": 1,
+                "limit_up_news_complete": True,
+                "continuous_news_checked_codes": ["000001.SZ"],
+                "continuous_news_pending_codes": [],
+                "continuous_news_checked_count": 1,
+                "continuous_news_pending_count": 0,
+                "continuous_news_available_count": 1,
+                "continuous_news_complete": True,
+            })
+            self.assertTrue(write_dragon_tiger_snapshot(path, payload))
+
+            first, first_saved = snapshot_job.backfill_snapshot_news(path, env={})
+            second, second_saved = snapshot_job.backfill_snapshot_news(path, env={})
+
+            self.assertTrue(first_saved)
+            self.assertFalse(second_saved)
+            self.assertEqual(first["limit_up_news_candidate_count"], 2)
+            self.assertEqual(first["limit_up_news_checked_count"], 2)
+            self.assertEqual(first["limit_up_news_checked_codes"], ["000001.SZ", "000002.SZ"])
+            self.assertEqual(first["limit_up_news_pending_count"], 0)
+            self.assertTrue(first["limit_up_news_complete"])
+            self.assertEqual(second["continuous_news_checked_count"], 2)
+
+    def test_complete_snapshot_backfills_unchecked_consecutive_listing(self):
+        with tempfile.TemporaryDirectory(prefix="niuone-dragon-tiger-") as tmp:
+            path = Path(tmp) / "iwencai_dragon_tiger_latest.json"
+            payload = _payload("2026-07-24", "920117.BJ")
+            payload["limit_up_news_complete"] = True
+            payload["items"][0].update({
+                "limit_up_streak": 0,
+                "consecutive_listed": True,
+                "consecutive_list_days": 2,
+            })
+            self.assertTrue(write_dragon_tiger_snapshot(path, payload))
+            calls = []
+            original_enrich = snapshot_job.enrich_consecutive_dragon_tiger_news
+            try:
+                def fake_enrich(current, **_kwargs):
+                    calls.append(current["date"])
+                    result = dict(current)
+                    result["items"] = [dict(item) for item in current["items"]]
+                    result["items"][0]["news_precheck"] = {
+                        "checked": True,
+                        "available": True,
+                        "tone": "neutral",
+                        "tone_label": "中性",
+                        "summary": "暂无重大消息（中性）",
+                    }
+                    result["limit_up_news_candidate_count"] = 1
+                    result["limit_up_news_checked_codes"] = ["920117.BJ"]
+                    result["limit_up_news_pending_codes"] = []
+                    result["limit_up_news_checked_count"] = 1
+                    result["limit_up_news_pending_count"] = 0
+                    result["limit_up_news_available_count"] = 1
+                    result["limit_up_news_complete"] = True
+                    result["continuous_news_checked_codes"] = ["920117.BJ"]
+                    result["continuous_news_pending_codes"] = []
+                    result["continuous_news_checked_count"] = 1
+                    result["continuous_news_pending_count"] = 0
+                    result["continuous_news_available_count"] = 1
+                    result["continuous_news_complete"] = True
+                    return result
+
+                snapshot_job.enrich_consecutive_dragon_tiger_news = fake_enrich
+                first, first_saved = snapshot_job.backfill_snapshot_news(path, env={})
+                second, second_saved = snapshot_job.backfill_snapshot_news(path, env={})
+            finally:
+                snapshot_job.enrich_consecutive_dragon_tiger_news = original_enrich
+
+            self.assertTrue(first_saved)
+            self.assertFalse(second_saved)
+            self.assertEqual(calls, ["2026-07-24"])
+            self.assertEqual(first["items"][0]["news_precheck"]["tone_label"], "中性")
+
+    def test_complete_snapshot_locally_repairs_unclassified_news_once(self):
+        with tempfile.TemporaryDirectory(prefix="niuone-dragon-tiger-") as tmp:
+            path = Path(tmp) / "iwencai_dragon_tiger_latest.json"
+            payload = _payload("2026-07-24", "000595.SZ")
+            payload["limit_up_news_complete"] = True
+            payload["continuous_news_complete"] = True
+            payload["items"][0].update({
+                "limit_up_streak": 3,
+                "news_precheck": {
+                    "checked": True,
+                    "available": False,
+                    "tone": "neutral",
+                    "tone_label": "未识别",
+                    "summary": "股东增持构成重大利好，无其他利空或中性消息。",
+                    "fetched_at": "2026-07-26T18:35:49+08:00",
+                    "error": "unclassified_response",
+                },
+            })
+            self.assertTrue(write_dragon_tiger_snapshot(path, payload))
+
+            first, first_saved = snapshot_job.backfill_snapshot_news(path, env={})
+            second, second_saved = snapshot_job.backfill_snapshot_news(path, env={})
+
+            self.assertTrue(first_saved)
+            self.assertFalse(second_saved)
+            self.assertEqual(first["items"][0]["news_precheck"]["tone_label"], "利好")
+            self.assertTrue(first["items"][0]["news_precheck"]["repaired_locally"])
+            self.assertTrue(second["items"][0]["news_precheck"]["available"])
+
+    def test_backfill_queries_pending_snapshot_once_and_stops_after_completion(self):
+        with tempfile.TemporaryDirectory(prefix="niuone-dragon-tiger-") as tmp:
+            path = Path(tmp) / "iwencai_dragon_tiger_latest.json"
+            pending = _payload("2026-07-24", "000001.SZ")
+            pending["items"][0].update({
+                "limit_up_streak": 2,
+                "consecutive_listed": False,
+                "consecutive_list_days": 1,
+                "news_precheck": {
+                    "checked": False,
+                    "available": False,
+                    "error": "news_precheck_not_configured",
+                },
+            })
+            self.assertTrue(write_dragon_tiger_snapshot(path, pending))
+            calls = []
+            original_enrich = snapshot_job.enrich_consecutive_dragon_tiger_news
+            try:
+                def fake_enrich(payload, **_kwargs):
+                    calls.append(payload["date"])
+                    result = dict(payload)
+                    result["items"] = [dict(item) for item in payload["items"]]
+                    result["items"][0]["news_precheck"] = {
+                        "checked": True,
+                        "available": True,
+                        "summary": "周五消息面已补检（中性）",
+                    }
+                    result["limit_up_news_complete"] = True
+                    result["limit_up_news_candidate_count"] = 1
+                    result["limit_up_news_checked_codes"] = ["000001.SZ"]
+                    result["limit_up_news_pending_codes"] = []
+                    result["limit_up_news_checked_count"] = 1
+                    result["limit_up_news_pending_count"] = 0
+                    result["limit_up_news_available_count"] = 1
+                    result["continuous_news_complete"] = True
+                    result["continuous_news_checked_codes"] = ["000001.SZ"]
+                    result["continuous_news_pending_codes"] = []
+                    result["continuous_news_checked_count"] = 1
+                    result["continuous_news_pending_count"] = 0
+                    result["continuous_news_available_count"] = 1
+                    return result
+
+                snapshot_job.enrich_consecutive_dragon_tiger_news = fake_enrich
+                first, first_saved = snapshot_job.backfill_snapshot_news(path, env={})
+                second, second_saved = snapshot_job.backfill_snapshot_news(path, env={})
+            finally:
+                snapshot_job.enrich_consecutive_dragon_tiger_news = original_enrich
+
+            self.assertTrue(first_saved)
+            self.assertFalse(second_saved)
+            self.assertEqual(calls, ["2026-07-24"])
+            self.assertTrue(first["limit_up_news_complete"])
+            self.assertTrue(second["limit_up_news_complete"])
+
+    def test_weekend_catch_up_targets_friday_after_configured_query_time(self):
+        original_calendar = snapshot_job.trading_day_status
+        try:
+            snapshot_job.trading_day_status = lambda *_args, **_kwargs: {
+                "date": "2026-07-26",
+                "is_trading_day": False,
+                "previous_trading_day": "2026-07-24",
+            }
+            target = snapshot_job.catch_up_trade_date(
+                env={"IWENCAI_DRAGON_TIGER_CRON": "35 17 * * 1-5"},
+                now=datetime.fromisoformat("2026-07-26T18:10:00+08:00"),
+            )
+        finally:
+            snapshot_job.trading_day_status = original_calendar
+
+        self.assertEqual(target, "2026-07-24")
+
+    def test_catch_up_fetches_missing_friday_snapshot(self):
+        with tempfile.TemporaryDirectory(prefix="niuone-dragon-tiger-") as tmp:
+            path = Path(tmp) / "iwencai_dragon_tiger_latest.json"
+            self.assertTrue(write_dragon_tiger_snapshot(path, _payload("2026-07-23", "000001.SZ")))
+            calls = []
+            original_calendar = snapshot_job.trading_day_status
+            original_refresh = snapshot_job.refresh_snapshot
+            try:
+                snapshot_job.trading_day_status = lambda *_args, **_kwargs: {
+                    "date": "2026-07-26",
+                    "is_trading_day": False,
+                    "previous_trading_day": "2026-07-24",
+                }
+
+                def fake_refresh(_path, *, env=None, trade_date=None):
+                    calls.append((env, trade_date))
+                    return _payload(str(trade_date), "000002.SZ"), True
+
+                snapshot_job.refresh_snapshot = fake_refresh
+                payload, saved = snapshot_job.catch_up_snapshot(
+                    path,
+                    env={"IWENCAI_DRAGON_TIGER_CRON": "0 18 * * 1-5"},
+                    now=datetime.fromisoformat("2026-07-26T18:10:00+08:00"),
+                )
+            finally:
+                snapshot_job.trading_day_status = original_calendar
+                snapshot_job.refresh_snapshot = original_refresh
+
+            self.assertTrue(saved)
+            self.assertEqual(payload["date"], "2026-07-24")
+            self.assertEqual(calls, [({"IWENCAI_DRAGON_TIGER_CRON": "0 18 * * 1-5"}, "2026-07-24")])
+
+    def test_refresh_carries_consecutive_streak_into_new_snapshot(self):
+        with tempfile.TemporaryDirectory(prefix="niuone-dragon-tiger-") as tmp:
+            path = Path(tmp) / "iwencai_dragon_tiger_latest.json"
+            self.assertTrue(write_dragon_tiger_snapshot(path, _payload("2026-07-15", "000001.SZ")))
+            original_fetch = snapshot_job.fetch_dragon_tiger
+            original_calendar = snapshot_job.trading_day_status
+            try:
+                def fake_fetch():
+                    result = _payload("2026-07-16", "000001.SZ")
+                    result["items"][0]["limit_up_streak"] = 2
+                    return result
+
+                snapshot_job.fetch_dragon_tiger = fake_fetch
+                snapshot_job.trading_day_status = lambda *_args, **_kwargs: {
+                    "previous_trading_day": "2026-07-15",
+                }
+                payload, saved = snapshot_job.refresh_snapshot(path, env={})
+            finally:
+                snapshot_job.fetch_dragon_tiger = original_fetch
+                snapshot_job.trading_day_status = original_calendar
+
+            self.assertTrue(saved)
+            self.assertEqual(payload["continuous_list_count"], 1)
+            self.assertEqual(payload["items"][0]["consecutive_list_days"], 2)
+            self.assertTrue(payload["items"][0]["consecutive_listed"])
+            self.assertEqual(
+                payload["items"][0]["news_precheck"]["error"],
+                "news_precheck_not_configured",
+            )
+            latest = read_dragon_tiger_snapshot(path, trade_date="2026-07-16")
+            self.assertEqual(latest["limit_up_news_pending_codes"], ["000001.SZ"])
+            self.assertFalse(latest["limit_up_news_complete"])
+            self.assertEqual(latest["continuous_news_checked_codes"], [])
+            self.assertEqual(latest["continuous_news_pending_codes"], ["000001.SZ"])
+            self.assertFalse(latest["continuous_news_complete"])
+            self.assertEqual(
+                latest["continuous_news_started_at"],
+                "2026-07-16T18:00:00+08:00",
+            )
+
     def test_next_success_replaces_latest_and_expires_legacy_archives(self):
         with tempfile.TemporaryDirectory(prefix="niuone-dragon-tiger-") as tmp:
             path = Path(tmp) / "iwencai_dragon_tiger_latest.json"

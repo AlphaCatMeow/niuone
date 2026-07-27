@@ -44,8 +44,10 @@ from dashboard.model_connectivity import (
 from dashboard.apis.iwencai_service import (
     DEFAULT_LIMIT as IWENCAI_DRAGON_TIGER_DEFAULT_LIMIT,
     dragon_tiger_archive_path,
+    enrich_consecutive_dragon_tiger_news,
     expire_dragon_tiger_archives,
     fetch_dragon_tiger,
+    mark_consecutive_dragon_tiger_items,
     normalize_limit as normalize_iwencai_limit,
     normalize_page as normalize_iwencai_page,
     normalize_trade_date as normalize_iwencai_trade_date,
@@ -3264,7 +3266,11 @@ def produce_iwencai_dragon_tiger_data(
     fallback_to_latest_on_empty: bool = False,
 ) -> dict[str, Any]:
     use_snapshot = page == 1 and limit == IWENCAI_DRAGON_TIGER_DEFAULT_LIMIT
+    previous_snapshot = None
     if use_snapshot:
+        previous_snapshot = read_dragon_tiger_snapshot(
+            IWENCAI_DRAGON_TIGER_SNAPSHOT_FILE,
+        )
         exact_latest = read_dragon_tiger_snapshot(
             IWENCAI_DRAGON_TIGER_SNAPSHOT_FILE,
             trade_date=trade_date,
@@ -3285,6 +3291,17 @@ def produce_iwencai_dragon_tiger_data(
         if latest:
             return latest
     if use_snapshot and allow_latest_snapshot:
+        if payload.get("available") is True and payload.get("items"):
+            calendar = trading_day_status(trade_date, allow_refresh=False)
+            payload = mark_consecutive_dragon_tiger_items(
+                payload,
+                previous_snapshot,
+                previous_trading_day=str(calendar.get("previous_trading_day") or ""),
+            )
+            payload = enrich_consecutive_dragon_tiger_news(
+                payload,
+                previous_snapshot=previous_snapshot,
+            )
         if write_dragon_tiger_snapshot(
             IWENCAI_DRAGON_TIGER_SNAPSHOT_FILE,
             payload,
@@ -3787,7 +3804,7 @@ CRON_TIME_CONFIGS = {
 }
 ADMIN_GROUP_NOTES = {
     "牛牛美股": "集中管理 X/推文监控、美股买入评级和隔夜美股盘面总结使用的 Grok 配置。长度默认：上下文 128000 tokens，最大输出 4096 tokens；关闭时隐藏 X/评级相关设置，隔夜美股总结仍会读取已配置的 Grok 参数。",
-    "消息面预检模型": "用于 A 股候选股最近 3 天消息面预检；auto 会为 Grok 4.5 和 GPT-5 系列搜索模型选择 Responses API，也可显式选择 responses 或 chat。长度默认：上下文 128000 tokens，最大输出 4096 tokens。模型和密钥留空则跳过。",
+    "消息面预检模型": "用于 A 股候选股及龙虎榜连板/连榜股票最近 3 天消息面预检，并把雪球/X公开内容单列为市场舆情；auto 会为 Grok 4.5 和 GPT-5 系列搜索模型选择 Responses API，Grok Responses 还会使用 x_search。也可显式选择 responses 或 chat。长度默认：上下文 128000 tokens，最大输出 4096 tokens。模型和密钥留空则跳过。",
     "买卖决策模型": "推荐使用 deepseek-v4-pro；也可填写其他兼容 /chat/completions 的模型服务。长度默认：上下文 128000 tokens，最大输出 4096 tokens。",
     "交易规则与风控": "约束买卖决策必须遵守的交易纪律、持仓数量、仓位比例、现金缓冲与盘面控仓规则。交易纪律 Prompt 会直接写入决策模型的必须遵守段。",
     "交易通知": "模拟买入或卖出成交落盘后推送。从下拉框按需添加渠道并分块配置；每个渠道可独立启用或关闭，关闭会保留配置，移除并保存后才会清除配置。Webhook、Bot Token 和签名密钥只保存、不回显。",

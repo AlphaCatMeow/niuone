@@ -31,7 +31,11 @@ from typing import Any
 
 from a_share_calendar import is_a_share_trading_day as calendar_is_a_share_trading_day, trading_day_status
 from core.model_api import build_model_request, parse_model_response, request_model
-from market_data.news_precheck import format_cached_news_record, format_cached_news_records
+from market_data.news_precheck import (
+    format_cached_news_record,
+    format_cached_news_records,
+    news_search_tools,
+)
 from niuone_paths import get_dashboard_env_file, get_dashboard_home
 from screening.stock_universe import (
     STOCK_UNIVERSE_ENV,
@@ -5299,13 +5303,17 @@ def format_candidate_label(candidate: dict[str, Any]) -> str:
 
 def build_single_candidate_news_prompt(candidate: dict[str, Any]) -> str:
     label = format_candidate_label(candidate)
-    return f"""搜索以下A股最近3天的重大消息（利好/利空/中性），只针对这一只股票：
+    return f"""搜索以下A股最近3天的重大消息与市场舆情，只针对这一只股票：
 {label}
 
+请交叉核验公司公告或交易所披露、主流财经媒体、雪球与X/Twitter公开内容。
+公告和主流财经媒体用于确认事实；雪球和X只用于概括市场观点，不得把未经证实的帖子当作公司事实。无法访问某个平台或没有可核验内容时写“未见显著讨论”，不要编造。
+
 格式：
-- 代码 名称：一句话总结（利好/利空/中性）
+- 代码 名称：事件：核心事实；影响：直接影响；舆情：雪球和X的代表性倾向或未见显著讨论（利好/利空/中性）
 如没有明确重大消息，输出：
-- 代码 名称：最近3天无明确重大消息（中性）"""
+- 代码 名称：事件：未发现明确重大消息；影响：暂无；舆情：雪球和X未见显著讨论（中性）
+不要输出帖子原文、用户名、引用编号、链接、来源列表、检索日期、检索过程或 Markdown。"""
 
 
 def request_single_candidate_news_precheck(
@@ -5328,7 +5336,7 @@ def request_single_candidate_news_precheck(
         max_retries=NEWS_PRECHECK_MAX_RETRIES,
         timeout=NEWS_PRECHECK_REQUEST_TIMEOUT,
         api_mode=NEWS_PRECHECK_API_MODE,
-        tools=[{"type": "web_search"}],
+        tools=news_search_tools(model, NEWS_PRECHECK_API_MODE),
         reasoning={"effort": "low"},
     ).strip()
 

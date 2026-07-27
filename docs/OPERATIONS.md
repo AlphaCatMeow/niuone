@@ -73,7 +73,7 @@ http://127.0.0.1:8787/
 
 ## 3. 模型配置
 
-NiuOne 需要大模型驱动完整工作流。X 关注列表监控和美股机构评级日报推荐使用 Grok；A 股盘面总结增强可使用任意兼容 `/chat/completions` 的模型；A 股候选股消息面预检可独立配置具备实时搜索能力的模型；选股后的买卖决策可配置兼容模型，推荐使用 DeepSeek。
+NiuOne 需要大模型驱动完整工作流。X 关注列表监控和美股机构评级日报推荐使用 Grok；A 股盘面总结增强可使用任意兼容 `/chat/completions` 的模型；A 股候选股及龙虎榜连板/连榜股票的消息面预检使用独立配置、具备实时搜索能力的模型；选股后的买卖决策可配置兼容模型，推荐使用 DeepSeek。
 
 核心配置项：
 
@@ -93,13 +93,13 @@ NiuOne 需要大模型驱动完整工作流。X 关注列表监控和美股机�
 
 完成管理员认证后，优先通过页面上的设置按钮进入设置页维护。所有需要模型和 API Key 的分组都提供“测试模型连接”按钮；测试使用页面当前填写值但不会自动保存，API Key 输入框留空时会复用已保存密钥。推文监控和美股评级相关设置由“开启牛牛美股”开关控制；关闭时设置页会隐藏这些项，后台 X 监控和美股评级定时任务也会跳过。也可以直接编辑 `.local-data/dashboard.env`，保存后按配置影响范围重启或等待下一轮任务读取。
 `DASHBOARD_GROK_API_MODE` 可设为 `auto`、`responses` 或 `chat`。默认 `auto` 会为 Grok 4.5 使用带 `web_search`/`x_search` 工具的 Responses API，其他模型保持 Chat Completions；兼容网关可显式选择对应模式。`X_WATCHLIST_REQUEST_TIMEOUT_SECONDS` 控制 X 单账号请求超时，默认 `45` 秒。
-`DASHBOARD_NEWS_API_MODE` 同样可设为 `auto`、`responses` 或 `chat`。默认 `auto` 会为 Grok 4.5 和 GPT-5 系列搜索模型使用带 `web_search` 工具的 Responses API；其他模型保持 Chat Completions，也可按网关能力显式选择。
+`DASHBOARD_NEWS_API_MODE` 同样可设为 `auto`、`responses` 或 `chat`。默认 `auto` 会为 Grok 4.5 和 GPT-5 系列搜索模型使用带 `web_search` 工具的 Responses API；Grok Responses 预检模型还会加入 `x_search`，其他模型通过 `web_search` 检索可公开索引的雪球/X 页面，不会改用 `DASHBOARD_GROK_*`。
 `*_CONTEXT_LENGTH` 仅表示模型上下文窗口，默认 `128000`；`*_MAX_TOKENS` 表示期望的最大输出长度，调用层会按接口映射为 `max_tokens` 或 `max_output_tokens`。已知不接受 Responses 输出长度参数的 GPT-5.6 网关别名会省略该参数，其他网关若明确返回不支持也会自动去参重试一次。模型响应同时兼容 JSON 和 SSE，即使网关在 `stream=false` 时仍强制返回 SSE。
-消息面预检默认最多并发检查 5 只候选股；如果上游出现限流或 403/429，可将 `DASHBOARD_NEWS_CONCURRENCY` 降为 `2` 或 `1`。
+消息面预检默认最多并发检查 5 只候选股；如果上游出现限流或 403/429，可将 `DASHBOARD_NEWS_CONCURRENCY` 降为 `2` 或 `1`。旧快照中的 `unclassified_response` 若能从已保存摘要唯一判断“利好/利空/中性”，补检流程会在本地修复标签并保留原查询时间，不新增模型请求；仍有歧义时保持未识别。
 
 问财数据源默认关闭。“问财数据源”设置分组提供“测试问财接口”按钮，会使用页面当前地址和密钥发送一次轻量只读查询，不保存配置或改写龙虎榜快照。启用并配置 API Key 后，Dashboard 提供固定用途的
 `/api/iwencai/dragon-tiger?date=YYYY-MM-DD&page=1&limit=100` 龙虎榜接口；接口不接受任意自然语言问句，
-单页最多 100 只股票，并复用 Dashboard 限流和缓存。返回结果按股票代码去重，`sector` 提供所属行业，`limit_up_reason` 和 `limit_up_reason_category` 分别提供问财归纳的涨停原因及原因类别，重复榜单记录保留在 `details` 中。`seats` 保留买卖前五的机构专用、普通营业部及问财明确标注的游资/量化席位，并记录同一营业部可能同时出现的 `buy_rank`、`sell_rank` 和金额；`institution_seats` 继续提供机构子集以兼容现有消费者。
+单页最多 100 只股票，并复用 Dashboard 限流和缓存。返回结果按股票代码去重，`sector` 提供所属行业，`limit_up_reason` 和 `limit_up_reason_category` 分别提供问财归纳的涨停原因及原因类别，重复榜单记录保留在 `details` 中。每日快照会与前一 A 股交易日的滚动快照比较；同一股票连续出现时写入 `consecutive_listed`、`consecutive_list_days` 和最多 10 个 `consecutive_list_dates`，缺失相邻快照时安全重置，不跨数据缺口推测。消息面预检批次使用 `IWENCAI_DRAGON_TIGER_CRON` 配置的龙虎榜计划查询时间作为起始时间，不使用上游响应的 `generated_at`；龙虎榜成功返回后，快照中尚未检索且满足连板（`limit_up_streak >= 2`）或连续上榜（`consecutive_listed = true` 且 `consecutive_list_days >= 2`）任一条件的股票使用 `DASHBOARD_NEWS_*` 配置查询最近 3 天消息，最多保持 5 路并发。公告、交易所披露和主流财经媒体用于事实核验，雪球与 X/Twitter 仅作为单独的市场舆情，不得把未核实帖子写成公司事实。每只股票的 `news_precheck.checked` 以及汇总字段 `limit_up_news_checked_codes`、`limit_up_news_pending_codes` 会持久化；旧的 `continuous_news_*` 字段作为兼容别名保留。调度器启动时会追补最近应有的交易日快照，每次新拉取前也先补检当前快照，因此周五遗漏可在周末重启或下次拉取前完成。全部完成后，后续同日拉取不会重复调用模型。模型未配置或失败不影响主榜快照，也不会回退到 `DASHBOARD_GROK_*`。`seats` 保留买卖前五的机构专用、普通营业部及问财明确标注的游资/量化席位，并记录同一营业部可能同时出现的 `buy_rank`、`sell_rank` 和金额；`institution_seats` 继续提供机构子集以兼容现有消费者。
 问财响应属于研究数据快照，发生超时、计数不一致或上游失败时会返回明确状态，不会覆盖账户、成交或其他真实交易记录。Dashboard 的 `/dragon-tiger` 栏目可按交易日实时查询；当日数据以及下一次成功查询前仍在滚动快照中的最近数据无需密码，更早日期必须输入管理员密码并建立有效会话。当日实时回源为空时，接口继续返回最近成功快照，避免零点后在新榜单生成前把页面替换为空状态。所有非当日响应均不进入公共或 CDN 缓存，确保新数据覆盖后旧日期立即恢复保护。只有与最新快照日期一致的请求会在回源前直接复用本地数据，其他日期不持久化。Cron 默认在 A 股交易日北京时间
 18:00 更新 `.local-data/runtime/cron/output/iwencai_dragon_tiger_latest.json`。该文件只保留最近一次非空成功查询，下一次成功查询会原子覆盖它，并清理旧版本生成的 `iwencai_dragon_tiger/YYYY-MM-DD.json` 归档；空结果或主榜失败继续保留上一份有效快照。席位明细失败不会阻断股票榜单；查询日期未变化时，当前快照中的有效席位记录不会被缺失结果覆盖。
 

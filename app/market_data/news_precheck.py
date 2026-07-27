@@ -10,11 +10,33 @@ from datetime import datetime
 from typing import Any, Callable, Mapping
 from zoneinfo import ZoneInfo
 
-from core.model_api import build_model_request, request_model
+if __package__ and __package__.startswith("app."):
+    from ..core.model_api import build_model_request, request_model
+else:
+    from core.model_api import build_model_request, request_model
 
 
 CN_TZ = ZoneInfo("Asia/Shanghai")
 DEFAULT_MAX_CANDIDATES = 5
+TONE_LABELS = ("利好", "利空", "中性")
+TONE_VALUES = {"利好": "positive", "利空": "negative", "中性": "neutral"}
+NEGATED_TONE_GROUP_RE = re.compile(
+    r"(?:未发现|未见|暂无|没有|并无|无|不存在|不构成|未构成|不属于|"
+    r"不能判断为|难以判断为|并非|不是)"
+    r"\s*(?:其他|任何|更多|新增)?\s*"
+    r"(?:(?:明确|重大|明显|实质性|直接|潜在)\s*)*"
+    r"(?:利好|利空|中性)"
+    r"(?:\s*(?:或|和|及|、|/)\s*"
+    r"(?:(?:明确|重大|明显|实质性|直接|潜在)\s*)*"
+    r"(?:利好|利空|中性))*"
+    r"\s*(?:消息|因素|事项|影响|事件|信号)?"
+)
+CONCLUSIVE_TONE_RE = re.compile(
+    r"(?:构成|属于|判断为|评估为|结论(?:为|是)|"
+    r"(?:整体|总体)(?:判断为|评估为|偏向|呈现)?|偏向)"
+    r"\s*(?:(?:近期|短期|中长期|重大|明显|实质性|直接|总体|整体)\s*)*"
+    r"(利好|利空|中性)"
+)
 
 
 def _bounded_int(
@@ -89,14 +111,37 @@ def candidate_label(candidate: Mapping[str, Any]) -> str:
     return " ".join(part for part in (code, name) if part) or "未知股票"
 
 
+def news_search_tools(model: str, api_mode: str = "auto") -> list[dict[str, str]]:
+    """Return search tools supported by the configured news-precheck model.
+
+    X's dedicated search tool is an xAI/Grok capability.  Other providers keep
+    using web search for publicly indexed X and Xueqiu pages instead of making
+    the independent news-precheck configuration depend on the Grok settings.
+    """
+
+    tools = [{"type": "web_search"}]
+    normalized_model = str(model or "").strip().lower()
+    normalized_mode = str(api_mode or "auto").strip().lower().replace("-", "_")
+    if normalized_model.startswith("grok-") and (
+        normalized_mode in {"responses", "response"}
+        or normalized_model.startswith("grok-4.5")
+    ):
+        tools.append({"type": "x_search"})
+    return tools
+
+
 def build_candidate_news_prompt(candidate: Mapping[str, Any]) -> str:
-    return f"""搜索以下A股最近3天的重大消息（利好/利空/中性），只针对这一只股票：
+    return f"""搜索以下A股最近3天的重大消息与市场舆情，只针对这一只股票：
 {candidate_label(candidate)}
 
-格式：
-- 代码 名称：一句话总结（利好/利空/中性）
+请交叉核验三类公开来源：公司公告或交易所披露、主流财经媒体、雪球与X/Twitter公开内容。
+公告和主流财经媒体用于确认事实；雪球和X只用于概括市场观点，不得把未经证实的帖子当作公司事实。无法访问某个平台或没有可核验内容时，明确写“未见显著讨论”，不要编造。
+
+输出格式（单行纯文本，50至120字）：
+事件：核心事实；影响：对公司的直接影响；舆情：雪球和X的代表性倾向或未见显著讨论（利好/利空/中性）
 如没有明确重大消息，输出：
-- 代码 名称：最近3天无明确重大消息（中性）"""
+事件：未发现明确重大消息；影响：暂无；舆情：雪球和X未见显著讨论（中性）
+不要重复股票代码和名称，不要输出帖子原文、用户名、引用编号、链接、来源列表、检索日期、当前日期、检索过程或免责声明，不要使用 Markdown。"""
 
 
 def request_candidate_news(candidate: Mapping[str, Any], config: NewsPrecheckConfig) -> str:
@@ -106,7 +151,7 @@ def request_candidate_news(candidate: Mapping[str, Any], config: NewsPrecheckCon
         [{"role": "user", "content": build_candidate_news_prompt(candidate)}],
         max_tokens=config.max_tokens,
         api_mode=config.api_mode,
-        tools=[{"type": "web_search"}],
+        tools=news_search_tools(config.model, config.api_mode),
         reasoning={"effort": "low"},
         stream=False,
         extra_payload={"stream": False},
@@ -161,19 +206,81 @@ def parse_chat_completion_content(raw: str) -> str:
     return str(message.get("content") or "")
 
 
+def _clean_candidate_news_text(content: Any) -> str:
+    text = str(content or "")
+    text = re.sub(r"!\[([^\]]*)\]\([^)]+\)", r"\1", text)
+    text = re.sub(r"\[\s*\[?\d+\]?\s*\]\s*\(\s*https?://[^)]+\)", "", text)
+    text = re.sub(r"\[\[?\d+\]?\]", "", text)
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    text = re.sub(r"\(?https?://[^\s)]+\)?", "", text)
+    text = re.sub(r"\*\*|__|~~|`", "", text)
+    text = re.sub(r"^\s{0,3}(?:#{1,6}\s+|>\s*|[-+]\s+)", "", text, flags=re.MULTILINE)
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(
+        r"^(?:代码\s*名称|股票代码\s*股票名称)\s*[：:]\s*",
+        "",
+        text,
+    )
+    text = re.sub(r"^[-+]\s+", "", text).strip()
+    text = re.sub(
+        r"\s*[（(](?:此为|注\s*[：:]?|说明\s*[：:]?)[^）)]*[）)]\s*$",
+        "",
+        text,
+    ).strip()
+    return text
+
+
+def _candidate_news_tone_label(text: str) -> str:
+    explicit = re.findall(r"[（(](利好|利空|中性)[）)]", text)
+    if explicit:
+        return explicit[-1]
+
+    without_negated = NEGATED_TONE_GROUP_RE.sub("", text)
+    conclusions = CONCLUSIVE_TONE_RE.findall(without_negated)
+    if conclusions:
+        return conclusions[-1]
+    present = [label for label in TONE_LABELS if label in without_negated]
+    return present[0] if len(present) == 1 else ""
+
+
+def repair_cached_news_record(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Locally reclassify a substantive legacy response without a model call."""
+
+    result = dict(record)
+    if (
+        result.get("checked") is not True
+        or result.get("available") is True
+        or result.get("error") != "unclassified_response"
+    ):
+        return result
+    text = _clean_candidate_news_text(result.get("summary"))
+    label = _candidate_news_tone_label(text)
+    tone = TONE_VALUES.get(label)
+    if not text or tone is None:
+        return result
+    result.update({
+        "available": True,
+        "tone": tone,
+        "tone_label": label,
+        "summary": text[:600],
+        "error": "",
+        "repaired_locally": True,
+    })
+    return result
+
+
 def parse_candidate_news_record(
     candidate: Mapping[str, Any],
     content: str,
     *,
     fetched_at: str,
 ) -> dict[str, Any]:
-    text = re.sub(r"\s+", " ", str(content or "")).strip().strip("`")
-    labels = re.findall(r"[（(](利好|利空|中性)[）)]", text)
-    if not labels:
-        unique = [label for label in ("利好", "利空", "中性") if label in text]
-        labels = unique if len(unique) == 1 else []
-    label = labels[-1] if labels else ""
-    tone = {"利好": "positive", "利空": "negative", "中性": "neutral"}.get(label)
+    text = _clean_candidate_news_text(content)
+    label = _candidate_news_tone_label(text)
+    tone = TONE_VALUES.get(label)
+    tone_matches = list(re.finditer(r"[（(](?:利好|利空|中性)[）)]", text))
+    if tone_matches:
+        text = text[: tone_matches[-1].end()].strip()
     return {
         "code": str(candidate.get("code") or ""),
         "name": str(candidate.get("name") or ""),
@@ -182,6 +289,7 @@ def parse_candidate_news_record(
         "tone": tone or "neutral",
         "tone_label": label or "未识别",
         "summary": text[:600],
+        "source_scope": ["disclosures", "financial_media", "xueqiu", "x"],
         "window_days": 3,
         "fetched_at": fetched_at,
         "error": "" if tone is not None else "unclassified_response",
@@ -235,7 +343,14 @@ def fetch_candidate_news_records(
 
 def format_cached_news_record(record: Mapping[str, Any]) -> str:
     if record.get("available") and str(record.get("summary") or "").strip():
-        return str(record.get("summary") or "").strip()
+        summary = str(record.get("summary") or "").strip().lstrip("- ")
+        code = str(record.get("code") or "").strip()
+        name = str(record.get("name") or "").strip()
+        if summary.startswith(candidate_label(record)) or (
+            code and summary.startswith(code)
+        ) or (name and summary.startswith(name)):
+            return f"- {summary}"
+        return f"- {candidate_label(record)}：{summary}"
     return (
         f"- {candidate_label(record)}：消息面预检失败"
         f"（{record.get('error') or 'unavailable'}）"

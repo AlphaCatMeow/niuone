@@ -983,7 +983,7 @@ class FastApiDashboardTests(unittest.TestCase):
             stylesheet,
         )
 
-    def test_mobile_dragon_tiger_names_are_not_truncated_by_seat_counts(self):
+    def test_mobile_dragon_tiger_name_and_news_badges_use_their_own_row(self):
         component = (
             ROOT / "web" / "src" / "components" / "DragonTigerPanel.vue"
         ).read_text(encoding="utf-8")
@@ -992,13 +992,23 @@ class FastApiDashboardTests(unittest.TestCase):
         self.assertNotIn("seatBadge", component)
         self.assertNotIn("dragon-tiger-seat-badge", component + stylesheet)
         self.assertIn(
-            ".dragon-tiger-list-name { align-items:flex-start; gap:3px; "
-            "overflow:visible; white-space:normal; }",
+            'grid-template-areas:\n          "name name name name"\n'
+            '          ". sector change amount";',
             stylesheet,
         )
         self.assertIn(
-            ".dragon-tiger-list-name > span { overflow:visible; text-overflow:clip; "
-            "white-space:normal; overflow-wrap:anywhere; }",
+            ".dragon-tiger-item > summary > .dragon-tiger-list-name { grid-area:name; }",
+            stylesheet,
+        )
+        self.assertIn(
+            ".dragon-tiger-list-name { align-items:center; flex-wrap:wrap; gap:3px; "
+            "overflow:hidden; white-space:normal; }",
+            stylesheet,
+        )
+        self.assertIn(
+            ".dragon-tiger-list-name > span { flex:0 0 auto; max-width:100%; "
+            "overflow:hidden; text-overflow:ellipsis; white-space:nowrap; "
+            "overflow-wrap:normal; }",
             stylesheet,
         )
         self.assertIn("最近一次成功查询会保留至下次成功更新", component)
@@ -1093,6 +1103,58 @@ class FastApiDashboardTests(unittest.TestCase):
         self.assertNotIn("limitUpTooltip.above", component)
         self.assertNotIn(".dragon-tiger-limit-up-tooltip.left", stylesheet)
         self.assertNotIn("transition-delay", stylesheet)
+
+    def test_dragon_tiger_limit_up_streak_rows_show_news_precheck_on_hover(self):
+        component = (
+            ROOT / "web" / "src" / "components" / "DragonTigerPanel.vue"
+        ).read_text(encoding="utf-8")
+        stylesheet = (ROOT / "frontend" / "dashboard.css").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("Number(item?.limit_up_streak)", component)
+        self.assertIn("return days >= 2 ? days : 0", component)
+        self.assertIn(">连榜{{ continuousListing(item) }}日</small>", component)
+        self.assertNotIn(':title="streak(item).title"', component)
+        self.assertNotIn("连续涨停 ${up} 个交易日", component)
+        self.assertNotIn('@pointerenter="newsLimitUpStreak(item) && showContinuousTooltip($event, item)"', component)
+        self.assertNotIn('@focus="newsLimitUpStreak(item) && showContinuousTooltip($event, item)"', component)
+        self.assertIn('v-if="continuousTooltip.visible"', component)
+        self.assertIn("function stripNewsMarkdown(value)", component)
+        self.assertIn("function continuousNewsContent(item)", component)
+        self.assertIn("function continuousNewsSource(item)", component)
+        self.assertIn("function newsPrecheckEligible(item)", component)
+        self.assertIn("newsLimitUpStreak(item) > 0 || continuousListing(item) > 0", component)
+        self.assertIn("function directionalNewsTone(item)", component)
+        self.assertIn("['positive', 'negative'].includes(record?.tone)", component)
+        self.assertIn("function newsTriggerLabel(item)", component)
+        self.assertIn("{{ continuousTooltip.summary }}", component)
+        self.assertIn(".dragon-tiger-continuous-tooltip-summary", stylesheet)
+        self.assertNotIn("continuousTooltip.note", component)
+        self.assertNotIn("代码 名称：", component)
+        self.assertIn("公开检索：公告/财经媒体 · 雪球 · X · 最近 3 天", component)
+        self.assertIn("公开检索：最近 3 天", component)
+        self.assertIn("核心消息", component)
+        self.assertIn("直接影响", component)
+        self.assertIn("continuousTooltip.impact", component)
+        self.assertIn("市场舆情", component)
+        self.assertIn("continuousTooltip.sentiment", component)
+        self.assertIn(".dragon-tiger-continuous-tooltip-insight", stylesheet)
+        self.assertIn(".dragon-tiger-continuous-tooltip-impact", stylesheet)
+        self.assertIn(".dragon-tiger-continuous-tooltip-sentiment", stylesheet)
+        self.assertIn(".dragon-tiger-continuous-tooltip { position:fixed;", stylesheet)
+        self.assertIn(".dragon-tiger-streak.continuous-list", stylesheet)
+        self.assertIn("'has-positive-news': directionalNewsTone(item) === 'positive'", component)
+        self.assertIn("'has-negative-news': directionalNewsTone(item) === 'negative'", component)
+        self.assertIn('class="dragon-tiger-news-tone"', component)
+        self.assertIn("directionalNewsTone(item) === 'positive' ? '利好' : '利空'", component)
+        self.assertIn('@pointerenter="showContinuousTooltip($event, item)"', component)
+        self.assertIn(".dragon-tiger-item.has-positive-news > summary", stylesheet)
+        self.assertIn(".dragon-tiger-item.has-negative-news > summary", stylesheet)
+        self.assertIn(".dragon-tiger-news-tone.positive", stylesheet)
+        self.assertIn(".dragon-tiger-news-tone.negative", stylesheet)
+        self.assertIn('v-if="newsPrecheckEligible(item)"', component)
+        self.assertIn('aria-label="消息面预检"', component)
 
     def test_dragon_tiger_page_blocks_selection_and_clipboard_copy(self):
         component = (

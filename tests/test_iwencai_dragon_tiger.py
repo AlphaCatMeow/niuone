@@ -5,12 +5,15 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 from app.dashboard.apis.iwencai_service import (
     dragon_tiger_archive_path,
+    enrich_consecutive_dragon_tiger_news,
     expire_dragon_tiger_archives,
     fetch_dragon_tiger,
+    mark_consecutive_dragon_tiger_items,
     normalize_trade_date,
     read_dragon_tiger_archive,
     read_dragon_tiger_snapshot,
@@ -46,6 +49,458 @@ class FakeClient:
 
 
 class IwencaiDragonTigerTests(unittest.TestCase):
+    def test_marks_only_stocks_present_on_adjacent_trading_day(self):
+        previous = {
+            "date": "2026-07-15",
+            "items": [{
+                "code": "000001.SZ",
+                "name": "平安银行",
+                "consecutive_list_days": 2,
+                "consecutive_list_dates": ["2026-07-14", "2026-07-15"],
+            }, {
+                "code": "600000.SH",
+                "name": "浦发银行",
+            }],
+        }
+        current = {
+            "available": True,
+            "date": "2026-07-16",
+            "items": [
+                {"code": "000001.SZ", "name": "平安银行"},
+                {"code": "000002.SZ", "name": "万科A"},
+            ],
+        }
+
+        marked = mark_consecutive_dragon_tiger_items(
+            current,
+            previous,
+            previous_trading_day="2026-07-15",
+        )
+
+        self.assertEqual(marked["continuous_list_count"], 1)
+        by_code = {item["code"]: item for item in marked["items"]}
+        self.assertTrue(by_code["000001.SZ"]["consecutive_listed"])
+        self.assertEqual(by_code["000001.SZ"]["consecutive_list_days"], 3)
+        self.assertEqual(
+            by_code["000001.SZ"]["consecutive_list_dates"],
+            ["2026-07-14", "2026-07-15", "2026-07-16"],
+        )
+        self.assertFalse(by_code["000002.SZ"]["consecutive_listed"])
+        self.assertEqual(by_code["000002.SZ"]["consecutive_list_days"], 1)
+
+    def test_consecutive_marker_resets_across_missing_snapshot_and_is_idempotent(self):
+        current = {
+            "available": True,
+            "date": "2026-07-16",
+            "items": [{"code": "000001.SZ", "name": "平安银行"}],
+        }
+        stale_previous = {
+            "date": "2026-07-14",
+            "items": [{
+                "code": "000001.SZ",
+                "name": "平安银行",
+                "consecutive_list_days": 4,
+            }],
+        }
+        reset = mark_consecutive_dragon_tiger_items(
+            current,
+            stale_previous,
+            previous_trading_day="2026-07-15",
+        )
+        repeated = mark_consecutive_dragon_tiger_items(
+            reset,
+            reset,
+            previous_trading_day="2026-07-15",
+        )
+
+        self.assertEqual(reset["items"][0]["consecutive_list_days"], 1)
+        self.assertFalse(reset["items"][0]["consecutive_listed"])
+        self.assertEqual(repeated["items"][0]["consecutive_list_days"], 1)
+
+    def test_news_precheck_enrichment_queries_limit_up_or_consecutive_listing_stocks(self):
+        captured = {}
+
+        def fake_fetcher(candidates, config, **kwargs):
+            captured["candidates"] = candidates
+            captured["config"] = config
+            captured["kwargs"] = kwargs
+            return [{
+                "code": candidate["code"],
+                "name": candidate["name"],
+                "checked": True,
+                "available": True,
+                "tone": "positive" if candidate["code"] == "000001.SZ" else "neutral",
+                "tone_label": "利好" if candidate["code"] == "000001.SZ" else "中性",
+                "summary": "重大合同落地（利好）" if candidate["code"] == "000001.SZ" else "暂无重大消息（中性）",
+                "window_days": 3,
+                "fetched_at": "2026-07-16T18:00:00+08:00",
+                "error": "",
+            } for candidate in candidates]
+
+        payload = enrich_consecutive_dragon_tiger_news(
+            {
+                "date": "2026-07-16",
+                "items": [{
+                    "code": "000001.SZ",
+                    "name": "平安银行",
+                    "limit_up_streak": 2,
+                    "consecutive_listed": False,
+                    "consecutive_list_days": 1,
+                    "net_amount_yuan": 20,
+                }, {
+                    "code": "000002.SZ",
+                    "name": "万科A",
+                    "limit_up_streak": 1,
+                    "consecutive_listed": True,
+                    "consecutive_list_days": 2,
+                }, {
+                    "code": "000003.SZ",
+                    "name": "未连续样本",
+                    "limit_up_streak": 1,
+                    "consecutive_listed": False,
+                    "consecutive_list_days": 1,
+                }],
+            },
+            env={
+                "DASHBOARD_NEWS_BASE_URL": "https://news.example/v1",
+                "DASHBOARD_NEWS_API_KEY": "news-secret",
+                "DASHBOARD_NEWS_MODEL": "search-model",
+                "DASHBOARD_NEWS_API_MODE": "responses",
+            },
+            fetcher=fake_fetcher,
+        )
+
+        self.assertEqual(
+            [item["code"] for item in captured["candidates"]],
+            ["000001.SZ", "000002.SZ"],
+        )
+        self.assertEqual(captured["config"].base_url, "https://news.example/v1")
+        self.assertEqual(captured["config"].api_key, "news-secret")
+        self.assertEqual(captured["config"].model, "search-model")
+        self.assertEqual(captured["config"].api_mode, "responses")
+        self.assertEqual(captured["kwargs"]["max_candidates"], 2)
+        self.assertEqual(payload["continuous_news_checked_count"], 2)
+        self.assertEqual(payload["continuous_news_pending_count"], 0)
+        self.assertEqual(
+            payload["continuous_news_checked_codes"],
+            ["000001.SZ", "000002.SZ"],
+        )
+        self.assertEqual(payload["continuous_news_pending_codes"], [])
+        self.assertTrue(payload["continuous_news_complete"])
+        self.assertEqual(payload["continuous_news_available_count"], 2)
+        self.assertEqual(payload["limit_up_news_candidate_count"], 2)
+        self.assertEqual(
+            payload["limit_up_news_checked_codes"],
+            ["000001.SZ", "000002.SZ"],
+        )
+        self.assertEqual(payload["limit_up_news_pending_codes"], [])
+        self.assertTrue(payload["limit_up_news_complete"])
+        self.assertEqual(payload["items"][0]["news_precheck"]["provider"], "消息面预检模型")
+        self.assertEqual(payload["items"][0]["news_precheck"]["summary"], "重大合同落地（利好）")
+        self.assertEqual(payload["items"][1]["news_precheck"]["tone_label"], "中性")
+        self.assertNotIn("news_precheck", payload["items"][2])
+        self.assertNotIn("news-secret", str(payload))
+
+    def test_news_precheck_does_not_fall_back_to_grok_configuration(self):
+        payload = enrich_consecutive_dragon_tiger_news(
+            {
+                "date": "2026-07-16",
+                "items": [{
+                    "code": "000001.SZ",
+                    "name": "平安银行",
+                    "limit_up_streak": 2,
+                    "consecutive_listed": True,
+                    "consecutive_list_days": 2,
+                }],
+            },
+            env={
+                "DASHBOARD_GROK_BASE_URL": "https://grok.example/v1",
+                "DASHBOARD_GROK_API_KEY": "grok-secret",
+                "DASHBOARD_GROK_MODEL": "grok-test",
+            },
+            fetcher=lambda *_args, **_kwargs: self.fail("不应调用消息面预检模型"),
+        )
+
+        self.assertFalse(payload["continuous_news_configured"])
+        self.assertEqual(payload["continuous_news_error"], "news_precheck_not_configured")
+        self.assertEqual(
+            payload["items"][0]["news_precheck"]["error"],
+            "news_precheck_not_configured",
+        )
+
+    def test_news_precheck_reuses_same_day_success_without_duplicate_request(self):
+        cached_news = {
+            "checked": True,
+            "available": True,
+            "tone": "neutral",
+            "tone_label": "中性",
+            "summary": "暂无新增重大消息（中性）",
+            "provider": "消息面预检模型",
+        }
+        payload = enrich_consecutive_dragon_tiger_news(
+            {
+                "date": "2026-07-16",
+                "items": [{
+                    "code": "000001.SZ",
+                    "name": "平安银行",
+                    "limit_up_streak": 2,
+                    "consecutive_listed": True,
+                    "consecutive_list_days": 2,
+                }],
+            },
+            env={},
+            previous_snapshot={
+                "date": "2026-07-16",
+                "continuous_news_configured": True,
+                "continuous_news_model": "search-model",
+                "items": [{
+                    "code": "000001.SZ",
+                    "name": "平安银行",
+                    "news_precheck": cached_news,
+                }],
+            },
+            fetcher=lambda *_args, **_kwargs: self.fail("不应重复调用消息面预检模型"),
+        )
+
+        self.assertTrue(payload["continuous_news_configured"])
+        self.assertEqual(payload["continuous_news_model"], "search-model")
+        self.assertEqual(payload["continuous_news_available_count"], 1)
+        self.assertTrue(payload["items"][0]["news_precheck"]["cached"])
+
+    def test_news_precheck_repairs_cached_unclassified_summary_without_request(self):
+        payload = enrich_consecutive_dragon_tiger_news(
+            {
+                "date": "2026-07-24",
+                "limit_up_news_complete": True,
+                "items": [{
+                    "code": "000595.SZ",
+                    "name": "新能股份",
+                    "limit_up_streak": 3,
+                    "news_precheck": {
+                        "checked": True,
+                        "available": False,
+                        "tone": "neutral",
+                        "tone_label": "未识别",
+                        "summary": "股东增持构成重大利好，无其他利空或中性消息。",
+                        "error": "unclassified_response",
+                    },
+                }],
+            },
+            env={},
+            fetcher=lambda *_args, **_kwargs: self.fail("不应重复调用消息面预检模型"),
+        )
+
+        record = payload["items"][0]["news_precheck"]
+        self.assertTrue(record["available"])
+        self.assertEqual(record["tone_label"], "利好")
+        self.assertTrue(record["repaired_locally"])
+        self.assertEqual(payload["limit_up_news_available_count"], 1)
+
+    def test_news_precheck_queries_every_unchecked_stock_with_bounded_concurrency(self):
+        captured = {}
+
+        def fake_fetcher(candidates, config, **kwargs):
+            captured["codes"] = [item["code"] for item in candidates]
+            captured["concurrency"] = config.concurrency
+            captured["max_candidates"] = kwargs["max_candidates"]
+            return [{
+                "code": item["code"],
+                "name": item["name"],
+                "checked": True,
+                "available": True,
+                "tone": "neutral",
+                "tone_label": "中性",
+                "summary": f"{item['name']}暂无重大消息（中性）",
+                "error": "",
+            } for item in candidates]
+
+        stocks = [{
+            "code": f"00000{index}.SZ",
+            "name": f"样本{index}",
+            "limit_up_streak": 2,
+            "consecutive_listed": True,
+            "consecutive_list_days": 2,
+            "net_amount_yuan": index,
+        } for index in range(1, 8)]
+        payload = enrich_consecutive_dragon_tiger_news(
+            {
+                "date": "2026-07-16",
+                "generated_at": "2026-07-16T19:23:00+08:00",
+                "items": stocks,
+            },
+            env={
+                "DASHBOARD_NEWS_BASE_URL": "https://news.example/v1",
+                "DASHBOARD_NEWS_API_KEY": "news-secret",
+                "DASHBOARD_NEWS_MODEL": "search-model",
+                "DASHBOARD_NEWS_CONCURRENCY": "5",
+                "IWENCAI_DRAGON_TIGER_CRON": "5 17 * * 1-5",
+            },
+            fetcher=fake_fetcher,
+            now=datetime.fromisoformat("2026-07-16T19:24:30+08:00"),
+        )
+
+        self.assertEqual(len(captured["codes"]), 7)
+        self.assertEqual(captured["max_candidates"], 7)
+        self.assertEqual(captured["concurrency"], 5)
+        self.assertEqual(payload["continuous_news_checked_count"], 7)
+        self.assertEqual(payload["continuous_news_pending_count"], 0)
+        self.assertTrue(payload["continuous_news_complete"])
+        self.assertEqual(
+            payload["continuous_news_started_at"],
+            "2026-07-16T17:05:00+08:00",
+        )
+        self.assertEqual(
+            payload["continuous_news_completed_at"],
+            "2026-07-16T19:24:30+08:00",
+        )
+
+    def test_news_precheck_only_queries_unchecked_stocks_on_same_day_refresh(self):
+        captured = {}
+        checked_record = {
+            "checked": True,
+            "available": False,
+            "tone": "neutral",
+            "tone_label": "不可用",
+            "summary": "",
+            "error": "request_RuntimeError",
+            "provider": "消息面预检模型",
+        }
+
+        def fake_fetcher(candidates, _config, **kwargs):
+            captured["codes"] = [item["code"] for item in candidates]
+            captured["max_candidates"] = kwargs["max_candidates"]
+            return [{
+                "code": "000002.SZ",
+                "name": "万科A",
+                "checked": True,
+                "available": True,
+                "tone": "positive",
+                "tone_label": "利好",
+                "summary": "新增重大合同（利好）",
+                "error": "",
+            }]
+
+        payload = enrich_consecutive_dragon_tiger_news(
+            {
+                "date": "2026-07-16",
+                "generated_at": "2026-07-16T20:10:00+08:00",
+                "items": [{
+                    "code": "000001.SZ",
+                    "name": "平安银行",
+                    "limit_up_streak": 2,
+                    "consecutive_listed": True,
+                    "consecutive_list_days": 2,
+                }, {
+                    "code": "000002.SZ",
+                    "name": "万科A",
+                    "limit_up_streak": 2,
+                    "consecutive_listed": True,
+                    "consecutive_list_days": 2,
+                }],
+            },
+            env={
+                "DASHBOARD_NEWS_BASE_URL": "https://news.example/v1",
+                "DASHBOARD_NEWS_API_KEY": "news-secret",
+                "DASHBOARD_NEWS_MODEL": "search-model",
+            },
+            previous_snapshot={
+                "date": "2026-07-16",
+                "continuous_news_started_at": "2026-07-16T18:47:00+08:00",
+                "items": [{
+                    "code": "000001.SZ",
+                    "name": "平安银行",
+                    "news_precheck": checked_record,
+                }, {
+                    "code": "000002.SZ",
+                    "name": "万科A",
+                    "news_precheck": {
+                        "checked": False,
+                        "available": False,
+                        "error": "pending_news_precheck",
+                    },
+                }],
+            },
+            fetcher=fake_fetcher,
+        )
+
+        self.assertEqual(captured["codes"], ["000002.SZ"])
+        self.assertEqual(captured["max_candidates"], 1)
+        self.assertEqual(payload["continuous_news_checked_count"], 2)
+        self.assertEqual(payload["continuous_news_pending_codes"], [])
+        self.assertTrue(payload["continuous_news_complete"])
+        self.assertEqual(
+            payload["continuous_news_started_at"],
+            "2026-07-16T18:47:00+08:00",
+        )
+        self.assertEqual(
+            payload["items"][0]["news_precheck"]["error"],
+            "request_RuntimeError",
+        )
+
+    def test_news_precheck_uses_scheduled_run_key_for_start_time(self):
+        payload = enrich_consecutive_dragon_tiger_news(
+            {
+                "date": "2026-07-16",
+                "generated_at": "2026-07-16T19:23:00+08:00",
+                "items": [{
+                    "code": "000001.SZ",
+                    "name": "平安银行",
+                    "limit_up_streak": 2,
+                    "consecutive_listed": True,
+                    "consecutive_list_days": 2,
+                }],
+            },
+            env={
+                "DASHBOARD_NEWS_BASE_URL": "https://news.example/v1",
+                "DASHBOARD_NEWS_API_KEY": "news-secret",
+                "DASHBOARD_NEWS_MODEL": "search-model",
+                "IWENCAI_DRAGON_TIGER_CRON": "*/10 17-20 * * 1-5",
+                "NIUONE_CRON_RUN_KEY": "6a72470cc5e1:202607161740",
+            },
+            fetcher=lambda candidates, _config, **_kwargs: [{
+                "code": candidates[0]["code"],
+                "name": candidates[0]["name"],
+                "checked": True,
+                "available": True,
+                "tone": "neutral",
+                "tone_label": "中性",
+                "summary": "暂无重大消息（中性）",
+                "error": "",
+            }],
+            now=datetime.fromisoformat("2026-07-16T19:24:30+08:00"),
+        )
+
+        self.assertEqual(
+            payload["continuous_news_started_at"],
+            "2026-07-16T17:40:00+08:00",
+        )
+
+    def test_news_precheck_records_pending_stocks_when_model_is_not_configured(self):
+        payload = enrich_consecutive_dragon_tiger_news(
+            {
+                "date": "2026-07-16",
+                "generated_at": "2026-07-16T17:35:00+08:00",
+                "items": [{
+                    "code": "000001.SZ",
+                    "name": "平安银行",
+                    "limit_up_streak": 2,
+                    "consecutive_listed": True,
+                    "consecutive_list_days": 2,
+                }],
+            },
+            env={},
+            fetcher=lambda *_args, **_kwargs: self.fail("未配置时不应发起检索"),
+        )
+
+        self.assertEqual(payload["continuous_news_checked_codes"], [])
+        self.assertEqual(payload["continuous_news_pending_codes"], ["000001.SZ"])
+        self.assertEqual(payload["continuous_news_pending_count"], 1)
+        self.assertFalse(payload["continuous_news_complete"])
+        self.assertEqual(
+            payload["continuous_news_started_at"],
+            "2026-07-16T18:00:00+08:00",
+        )
+
     def test_normalizes_dynamic_fields_sorts_and_marks_count_mismatch(self):
         client = FakeClient({
             "code_count": 1,

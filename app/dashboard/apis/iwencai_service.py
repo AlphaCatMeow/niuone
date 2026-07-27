@@ -6,7 +6,7 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 from zoneinfo import ZoneInfo
 
 if __package__ and __package__.startswith("app."):
@@ -16,9 +16,19 @@ if __package__ and __package__.startswith("app."):
         IwencaiConfig,
         IwencaiError,
     )
+    from ...market_data.news_precheck import (
+        NewsPrecheckConfig,
+        fetch_candidate_news_records,
+        repair_cached_news_record,
+    )
 else:
     from core.json_cache import read_json_cache, write_json_cache
     from market_data.iwencai_client import IwencaiClient, IwencaiConfig, IwencaiError
+    from market_data.news_precheck import (
+        NewsPrecheckConfig,
+        fetch_candidate_news_records,
+        repair_cached_news_record,
+    )
 
 
 CN_TZ = ZoneInfo("Asia/Shanghai")
@@ -28,6 +38,8 @@ MAX_LIMIT = 100
 SOURCE_PAGE_LIMIT = 100
 MAX_SOURCE_PAGES = 5
 MAX_SEAT_SOURCE_PAGES = 10
+DEFAULT_DRAGON_TIGER_CRON = "0 18 * * 1-5"
+DRAGON_TIGER_CRON_JOB_ID = "6a72470cc5e1"
 DETAIL_FIELDS = (
     "list_date",
     "list_type",
@@ -303,6 +315,370 @@ def _integer(value: Any) -> int | None:
 def _max_streak(*values: Any) -> int | None:
     normalized = [count for value in values if (count := _streak_count(value)) is not None]
     return max(normalized) if normalized else None
+
+
+def _stock_identity(item: Mapping[str, Any]) -> str:
+    code = str(item.get("code") or "").strip()
+    if code:
+        return f"code:{code}"
+    name = str(item.get("name") or "").strip()
+    return f"name:{name}" if name else ""
+
+
+def _consecutive_dates(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    for entry in value:
+        text = str(entry or "").strip()
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", text) or text in result:
+            continue
+        result.append(text)
+    return result[-10:]
+
+
+def mark_consecutive_dragon_tiger_items(
+    payload: Mapping[str, Any],
+    previous_snapshot: Mapping[str, Any] | None,
+    *,
+    previous_trading_day: str,
+) -> dict[str, Any]:
+    """Mark stocks present on adjacent trading-day snapshots.
+
+    Only the rolling snapshot is needed: each item carries its bounded streak
+    forward.  Missing or non-adjacent snapshots reset the streak instead of
+    guessing across a data gap.
+    """
+
+    result = dict(payload)
+    trade_date = normalize_trade_date(str(result.get("date") or ""))
+    previous = previous_snapshot if isinstance(previous_snapshot, Mapping) else {}
+    previous_date = str(previous.get("date") or "").strip()
+    previous_items = {
+        identity: item
+        for item in previous.get("items") or []
+        if isinstance(item, Mapping) and (identity := _stock_identity(item))
+    }
+    adjacent = bool(previous_date and previous_date == str(previous_trading_day or ""))
+    same_day = previous_date == trade_date
+    marked_items: list[dict[str, Any]] = []
+
+    for source in result.get("items") or []:
+        if not isinstance(source, Mapping):
+            continue
+        item = dict(source)
+        previous_item = previous_items.get(_stock_identity(item))
+        days = 1
+        dates = [trade_date]
+        if previous_item is not None and same_day:
+            days = max(1, _streak_count(previous_item.get("consecutive_list_days")) or 1)
+            dates = _consecutive_dates(previous_item.get("consecutive_list_dates")) or [trade_date]
+        elif previous_item is not None and adjacent:
+            previous_days = max(
+                1,
+                _streak_count(previous_item.get("consecutive_list_days")) or 1,
+            )
+            days = previous_days + 1
+            dates = _consecutive_dates(previous_item.get("consecutive_list_dates"))
+            if not dates:
+                dates = [previous_date]
+            if trade_date not in dates:
+                dates.append(trade_date)
+        item["consecutive_list_days"] = days
+        item["consecutive_listed"] = days >= 2
+        item["consecutive_list_dates"] = dates[-10:]
+        marked_items.append(item)
+
+    result["items"] = marked_items
+    result["continuous_list_count"] = sum(
+        1 for item in marked_items if item.get("consecutive_listed") is True
+    )
+    return result
+
+
+def _dragon_tiger_news_config(
+    values: Mapping[str, Any],
+) -> tuple[NewsPrecheckConfig | None, str]:
+    try:
+        config = NewsPrecheckConfig.from_mapping(values)
+    except ValueError:
+        return None, "news_precheck_incomplete"
+    return config, "" if config is not None else "news_precheck_not_configured"
+
+
+def _requires_dragon_tiger_news_precheck(item: Mapping[str, Any]) -> bool:
+    limit_up_streak = (_streak_count(item.get("limit_up_streak")) or 0) >= 2
+    consecutive_days = _streak_count(item.get("consecutive_list_days")) or 0
+    consecutive_listing = (
+        item.get("consecutive_listed") is True and consecutive_days >= 2
+    )
+    return limit_up_streak or consecutive_listing
+
+
+def _current_news_tracking_time(now: datetime | None) -> str:
+    current = now or datetime.now(CN_TZ)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=CN_TZ)
+    return current.astimezone(CN_TZ).isoformat(timespec="seconds")
+
+
+def _configured_dragon_tiger_start_time(
+    payload: Mapping[str, Any],
+    values: Mapping[str, Any],
+    *,
+    now: datetime | None,
+) -> str:
+    run_key = str(values.get("NIUONE_CRON_RUN_KEY") or "").strip()
+    matched_run = re.fullmatch(rf"{DRAGON_TIGER_CRON_JOB_ID}:(\d{{12}})", run_key)
+    if matched_run:
+        try:
+            scheduled = datetime.strptime(matched_run.group(1), "%Y%m%d%H%M").replace(
+                tzinfo=CN_TZ
+            )
+            return scheduled.isoformat(timespec="seconds")
+        except ValueError:
+            pass
+
+    raw_expr = str(
+        values.get("IWENCAI_DRAGON_TIGER_CRON") or DEFAULT_DRAGON_TIGER_CRON
+    ).strip()
+    if re.fullmatch(r"\d{1,2}:\d{2}", raw_expr):
+        hour_text, minute_text = raw_expr.split(":", 1)
+    else:
+        parts = raw_expr.split()
+        if len(parts) != 5 or not parts[0].isdigit() or not parts[1].isdigit():
+            return _current_news_tracking_time(now)
+        minute_text, hour_text = parts[:2]
+    hour, minute = int(hour_text), int(minute_text)
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return _current_news_tracking_time(now)
+    try:
+        trade_date = datetime.strptime(str(payload.get("date") or ""), "%Y-%m-%d")
+    except ValueError:
+        return _current_news_tracking_time(now)
+    return trade_date.replace(hour=hour, minute=minute, tzinfo=CN_TZ).isoformat(
+        timespec="seconds"
+    )
+
+
+def _update_dragon_tiger_news_tracking(
+    result: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    *,
+    now: datetime | None,
+    started_at: str,
+) -> None:
+    checked_codes: list[str] = []
+    pending_codes: list[str] = []
+    available_count = 0
+    for item in candidates:
+        record = item.get("news_precheck")
+        code = str(item.get("code") or item.get("name") or "").strip()
+        if isinstance(record, Mapping) and record.get("checked") is True:
+            if code:
+                checked_codes.append(code)
+            if record.get("available") is True:
+                available_count += 1
+        elif code:
+            pending_codes.append(code)
+
+    result["continuous_news_checked_codes"] = checked_codes
+    result["continuous_news_pending_codes"] = pending_codes
+    result["continuous_news_checked_count"] = len(checked_codes)
+    result["continuous_news_pending_count"] = len(pending_codes)
+    result["continuous_news_available_count"] = available_count
+    result["continuous_news_complete"] = not pending_codes
+    result["limit_up_news_candidate_count"] = len(candidates)
+    result["limit_up_news_checked_codes"] = list(checked_codes)
+    result["limit_up_news_pending_codes"] = list(pending_codes)
+    result["limit_up_news_checked_count"] = len(checked_codes)
+    result["limit_up_news_pending_count"] = len(pending_codes)
+    result["limit_up_news_available_count"] = available_count
+    result["limit_up_news_complete"] = not pending_codes
+    if not candidates:
+        return
+
+    result.setdefault(
+        "continuous_news_started_at",
+        started_at,
+    )
+    result.setdefault("limit_up_news_started_at", result["continuous_news_started_at"])
+    if pending_codes:
+        result.pop("continuous_news_completed_at", None)
+        result.pop("limit_up_news_completed_at", None)
+    else:
+        result.setdefault(
+            "continuous_news_completed_at",
+            _current_news_tracking_time(now),
+        )
+        result.setdefault("limit_up_news_completed_at", result["continuous_news_completed_at"])
+
+
+def enrich_consecutive_dragon_tiger_news(
+    payload: Mapping[str, Any],
+    *,
+    env: Mapping[str, Any] | None = None,
+    previous_snapshot: Mapping[str, Any] | None = None,
+    fetcher: Callable[..., list[dict[str, Any]]] | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Attach news summaries to limit-up-streak or consecutive-listing stocks."""
+
+    result = dict(payload)
+    values = os.environ if env is None else env
+    started_at = _configured_dragon_tiger_start_time(result, values, now=now)
+    items = [dict(item) for item in result.get("items") or [] if isinstance(item, Mapping)]
+    candidates = [item for item in items if _requires_dragon_tiger_news_precheck(item)]
+    result["items"] = items
+    result.pop("continuous_news_limited", None)
+    if not candidates:
+        result["continuous_news_configured"] = False
+        result["limit_up_news_configured"] = False
+        _update_dragon_tiger_news_tracking(
+            result,
+            candidates,
+            now=now,
+            started_at=started_at,
+        )
+        return result
+
+    previous = previous_snapshot if isinstance(previous_snapshot, Mapping) else {}
+    same_day = str(previous.get("date") or "") == str(result.get("date") or "")
+    if same_day:
+        for field in (
+            "continuous_news_started_at",
+            "continuous_news_completed_at",
+            "limit_up_news_started_at",
+            "limit_up_news_completed_at",
+        ):
+            if not result.get(field) and previous.get(field):
+                result[field] = previous.get(field)
+    cached_by_identity: dict[str, dict[str, Any]] = {}
+    if same_day:
+        for previous_item in previous.get("items") or []:
+            if not isinstance(previous_item, Mapping):
+                continue
+            record = previous_item.get("news_precheck")
+            identity = _stock_identity(previous_item)
+            if identity and isinstance(record, Mapping) and record.get("checked") is True:
+                cached_by_identity[identity] = dict(record)
+
+    pending: list[dict[str, Any]] = []
+    for item in candidates:
+        current_record = item.get("news_precheck")
+        if isinstance(current_record, Mapping) and current_record.get("checked") is True:
+            item["news_precheck"] = repair_cached_news_record(current_record)
+            continue
+        cached = cached_by_identity.get(_stock_identity(item))
+        if cached:
+            cached = repair_cached_news_record(cached)
+            cached["cached"] = True
+            item["news_precheck"] = cached
+        else:
+            item["news_precheck"] = {
+                "checked": False,
+                "available": False,
+                "provider": "消息面预检模型",
+                "error": "pending_news_precheck",
+            }
+            pending.append(item)
+
+    if not pending:
+        if "continuous_news_configured" not in result:
+            result["continuous_news_configured"] = (
+                previous.get("continuous_news_configured") is True
+            )
+        result["limit_up_news_configured"] = result["continuous_news_configured"]
+        if not result.get("continuous_news_model") and previous.get(
+            "continuous_news_model"
+        ):
+            result["continuous_news_model"] = previous.get("continuous_news_model")
+        if result.get("continuous_news_model"):
+            result["limit_up_news_model"] = result["continuous_news_model"]
+        if not result.get("continuous_news_started_at") and previous.get(
+            "continuous_news_started_at"
+        ):
+            result["continuous_news_started_at"] = previous.get("continuous_news_started_at")
+        if not result.get("continuous_news_completed_at") and previous.get(
+            "continuous_news_completed_at"
+        ):
+            result["continuous_news_completed_at"] = previous.get(
+                "continuous_news_completed_at"
+            )
+        _update_dragon_tiger_news_tracking(
+            result,
+            candidates,
+            now=now,
+            started_at=started_at,
+        )
+        return result
+
+    result.pop("continuous_news_completed_at", None)
+    result.pop("limit_up_news_completed_at", None)
+
+    config, config_error = _dragon_tiger_news_config(values)
+    result["continuous_news_configured"] = config is not None
+    result["limit_up_news_configured"] = config is not None
+    if config is None:
+        result["continuous_news_error"] = config_error
+        result["limit_up_news_error"] = config_error
+        for item in pending:
+            item["news_precheck"] = {
+                "checked": False,
+                "available": False,
+                "provider": "消息面预检模型",
+                "error": config_error,
+            }
+    else:
+        result.pop("continuous_news_error", None)
+        result.pop("limit_up_news_error", None)
+        result["continuous_news_model"] = config.model
+        result["limit_up_news_model"] = config.model
+        pending.sort(
+            key=lambda item: (
+                _streak_count(item.get("limit_up_streak")) or 0,
+                abs(float(item.get("net_amount_yuan") or 0.0)),
+            ),
+            reverse=True,
+        )
+        selected = pending
+        active_fetcher = fetcher or fetch_candidate_news_records
+        try:
+            records = active_fetcher(
+                selected,
+                config,
+                max_candidates=len(selected),
+                now=now,
+            )
+        except Exception as exc:
+            records = []
+            result["continuous_news_error"] = f"request_{type(exc).__name__}"
+            result["limit_up_news_error"] = result["continuous_news_error"]
+        records_by_identity = {
+            identity: record
+            for record in records
+            if isinstance(record, dict) and (identity := _stock_identity(record))
+        }
+        for item in selected:
+            record = dict(records_by_identity.get(_stock_identity(item)) or {})
+            if not record:
+                record = {
+                    "checked": True,
+                    "available": False,
+                    "error": "empty_news_precheck_response",
+                }
+            record.setdefault("checked", True)
+            record.setdefault("available", False)
+            record["provider"] = "消息面预检模型"
+            item["news_precheck"] = record
+
+    _update_dragon_tiger_news_tracking(
+        result,
+        candidates,
+        now=now,
+        started_at=started_at,
+    )
+    return result
 
 
 def _dynamic_value(item: Mapping[str, Any], *prefixes: str) -> Any:

@@ -117,6 +117,26 @@ class NiuoneCronSchedulerTests(unittest.TestCase):
         self.assertFalse(scheduler.job_enabled(job, {}))
         self.assertTrue(scheduler.job_enabled(job, {"IWENCAI_ENABLED": "1"}))
 
+    def test_iwencai_startup_catch_up_runs_only_when_source_is_enabled(self):
+        scheduler = load_scheduler_module()
+        job = scheduler.IWENCAI_STARTUP_CATCH_UP_JOB
+        calls = []
+        original_run_job = scheduler.run_job
+        try:
+            scheduler.run_job = lambda selected, run_time: calls.append(
+                (selected, run_time)
+            ) or "done"
+            now = datetime(2026, 7, 26, 18, 10, tzinfo=scheduler.CN_TZ)
+            disabled = scheduler.run_startup_catch_up(now, {})
+            enabled = scheduler.run_startup_catch_up(now, {"IWENCAI_ENABLED": "1"})
+        finally:
+            scheduler.run_job = original_run_job
+
+        self.assertIsNone(disabled)
+        self.assertEqual(enabled, "done")
+        self.assertEqual(job.command, ("iwencai_dragon_tiger_snapshot.py", "--catch-up"))
+        self.assertEqual(calls, [(job, now)])
+
     def test_time_exit_job_uses_hhmm_setting(self):
         scheduler = load_scheduler_module()
         b3_job = next(job for job in scheduler.JOBS if job.env_name == "DASHBOARD_B3_EXIT_TIME")

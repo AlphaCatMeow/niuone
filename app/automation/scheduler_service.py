@@ -54,6 +54,14 @@ JOBS = (
     Job("DASHBOARD_TIME_EXIT_TIME", "45 14 * * 1-5", "fc4f23b79591", "牛牛尾盘离场检查", ("niuniu_practice_trader.py", "--auto-exits"), 120),
     Job("DASHBOARD_US_RATING_CRON", "0 11 * * *", "fd0b807138f4", "每日美股机构买入评级汇报", ("us_rating_report.py", "--store-only"), 300),
 )
+IWENCAI_STARTUP_CATCH_UP_JOB = Job(
+    "IWENCAI_DRAGON_TIGER_CRON",
+    "0 18 * * 1-5",
+    "a7b51c9238d4",
+    "龙虎榜启动追补",
+    ("iwencai_dragon_tiger_snapshot.py", "--catch-up"),
+    180,
+)
 
 
 def log(message: str) -> None:
@@ -216,12 +224,20 @@ def run_job(job: Job, run_time: datetime) -> JobRunResult:
     return result
 
 
+def run_startup_catch_up(now: datetime, env_values: dict[str, str]) -> JobRunResult | None:
+    if not job_enabled(IWENCAI_STARTUP_CATCH_UP_JOB, env_values):
+        return None
+    return run_job(IWENCAI_STARTUP_CATCH_UP_JOB, now)
+
+
 def main() -> None:
     signal.signal(signal.SIGTERM, handle_stop)
     signal.signal(signal.SIGINT, handle_stop)
     log(f"scheduler started pid={os.getpid()}")
     state = load_state()
     run_keys = list(state.get("run_keys") or [])[-500:]
+    startup_values = parse_env_file()
+    run_startup_catch_up(datetime.now(CN_TZ).replace(second=0, microsecond=0), startup_values)
     try:
         while not STOP:
             env_values = parse_env_file()

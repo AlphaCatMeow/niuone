@@ -14,6 +14,19 @@ const payload = ref({ loading: true, loaded: false, available: false, items: [] 
 const sort = reactive({ key: 'net_amount_yuan', direction: 'desc' })
 const adminAuth = reactive({ open: false, credential: '', error: '', submitting: false })
 const limitUpTooltip = reactive({ visible: false, text: '', x: 0, y: 0, width: 0 })
+const continuousTooltip = reactive({
+  visible: false,
+  title: '',
+  tone: '',
+  toneClass: '',
+  summary: '',
+  impact: '',
+  sentiment: '',
+  source: '',
+  x: 0,
+  y: 0,
+  width: 0,
+})
 const adminCredentialInput = ref(null)
 const { setCategoryCount } = useDashboardTabs()
 let requestController = null
@@ -143,6 +156,177 @@ function hideLimitUpReasonTooltip() {
   limitUpTooltip.visible = false
 }
 
+function continuousListing(item) {
+  const days = Math.max(0, Math.trunc(Number(item?.consecutive_list_days) || 0))
+  return item?.consecutive_listed === true && days >= 2 ? days : 0
+}
+
+function newsLimitUpStreak(item) {
+  const days = Math.max(0, Math.trunc(Number(item?.limit_up_streak) || 0))
+  return days >= 2 ? days : 0
+}
+
+function newsPrecheckEligible(item) {
+  return newsLimitUpStreak(item) > 0 || continuousListing(item) > 0
+}
+
+function directionalNewsTone(item) {
+  const record = item?.news_precheck
+  if (!newsPrecheckEligible(item)
+    || record?.checked !== true
+    || record?.available !== true
+    || !String(record?.summary || '').trim()) return ''
+  return ['positive', 'negative'].includes(record?.tone) ? record.tone : ''
+}
+
+function newsTriggerLabel(item) {
+  const labels = []
+  if (newsLimitUpStreak(item)) labels.push(`${newsLimitUpStreak(item)}连板`)
+  if (continuousListing(item)) labels.push(`连榜${continuousListing(item)}日`)
+  return labels.join(' · ') || '消息面'
+}
+
+function rawContinuousNewsSummary(item) {
+  const record = item?.news_precheck
+  const summary = String(record?.summary || '').trim()
+  if (record?.available === true && summary) return summary
+  if (record?.error === 'news_precheck_not_configured') return '消息面预检模型尚未配置，连板/连榜标记不受影响。'
+  if (record?.error === 'news_precheck_incomplete') return '消息面预检模型配置不完整，连板/连榜标记不受影响。'
+  if (record?.error === 'pending_news_precheck') return '该股票尚待消息面检索，将在本次龙虎榜拉取流程中处理。'
+  if (record?.error === 'daily_query_limit') return '本次达到消息面查询上限，将在后续快照中补充。'
+  if (record?.checked === true) return '消息面预检模型本次未返回可用摘要。'
+  return '暂无消息面预检摘要。'
+}
+
+function escapeNewsPattern(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function stripNewsMarkdown(value) {
+  return String(value || '')
+    .replace(/\[\s*\[?\d+\]?\s*\]\s*\(\s*https?:\/\/[^)]+\)/gi, '')
+    .replace(/\[\[?\d+\]?\]/g, '')
+    .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/\(?https?:\/\/[^\s)]+\)?/gi, '')
+    .replace(/^\s{0,3}(?:#{1,6}\s+|>\s*|[-+]\s+)/gm, '')
+    .replace(/\*\*|__|~~|`/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function continuousNewsContent(item) {
+  let summary = stripNewsMarkdown(rawContinuousNewsSummary(item))
+  const code = String(item?.code || '').trim()
+  const shortCode = code.replace(/\.(?:SH|SZ|BJ)$/i, '')
+  const name = String(item?.name || '').trim()
+  const prefixes = [
+    [code, name],
+    [shortCode, name],
+    [name],
+  ].filter(parts => parts.every(Boolean))
+  for (const parts of prefixes) {
+    const pattern = new RegExp(`^${parts.map(escapeNewsPattern).join('\\s+')}\\s*[：:]\\s*`, 'i')
+    if (pattern.test(summary)) {
+      summary = summary.replace(pattern, '').trim()
+      break
+    }
+  }
+  summary = summary.replace(/^(?:代码\s*名称|股票代码\s*股票名称)\s*[：:]\s*/, '')
+  const toneIndex = summary.search(/[（(]\s*(?:利好|利空|中性)\s*[）)]/)
+  if (toneIndex >= 0) {
+    summary = summary.slice(0, toneIndex).trim()
+  }
+  const noteIndex = summary.search(/[（(]\s*注[：:]/)
+  if (noteIndex >= 0) {
+    summary = summary.slice(0, noteIndex).trim()
+  }
+  summary = summary
+    .replace(/[（(]\s*(?:利好|利空|中性)\s*[）)]\s*[。.]*$/, '')
+    .replace(/^最近\s*3\s*天(?:无|暂无)明确重大消息[。.]*$/, '未发现明确重大消息')
+    .replace(/[，,；;]\s*$/, '。')
+    .trim()
+  let sentiment = ''
+  const sentimentMatch = summary.match(/[；;]\s*(?:市场)?舆情[：:]\s*(.+)$/)
+  if (sentimentMatch) {
+    sentiment = sentimentMatch[1].trim()
+    summary = summary.slice(0, sentimentMatch.index).trim()
+  }
+  let impact = ''
+  const labeled = summary.match(/^事件[：:]\s*(.+?)[；;]\s*影响[：:]\s*(.+)$/)
+  if (labeled) {
+    summary = labeled[1].trim()
+    impact = labeled[2].trim()
+  } else {
+    const impactIndex = summary.search(/[，,；;]\s*(?=(?:切入|进入|拓展|扩大|提升|改善|强化|布局|有望|将为|预计|导致|可能))/)
+    if (impactIndex >= 0) {
+      impact = summary.slice(impactIndex + 1).trim()
+      summary = summary.slice(0, impactIndex).trim()
+    }
+  }
+  return {
+    summary: summary || '暂无可用消息摘要。',
+    impact,
+    sentiment,
+  }
+}
+
+function continuousNewsSummary(item) {
+  return continuousNewsContent(item).summary
+}
+
+function continuousNewsSource(item) {
+  const sourceScope = Array.isArray(item?.news_precheck?.source_scope)
+    ? item.news_precheck.source_scope
+    : []
+  return sourceScope.includes('xueqiu') && sourceScope.includes('x')
+    ? '公开检索：公告/财经媒体 · 雪球 · X · 最近 3 天'
+    : '公开检索：最近 3 天'
+}
+
+function hideContinuousTooltip() {
+  continuousTooltip.visible = false
+}
+
+function showContinuousTooltip(event, item) {
+  const tone = directionalNewsTone(item)
+  const target = event?.currentTarget
+  if (!tone || !(target instanceof Element)) {
+    hideContinuousTooltip()
+    return
+  }
+  const rect = target.getBoundingClientRect()
+  const viewportMargin = 12
+  const tooltipGap = 8
+  const content = continuousNewsContent(item)
+  const summary = content.summary
+  const tooltipWidth = Math.min(410, Math.max(250, window.innerWidth - viewportMargin * 2))
+  const estimatedLength = summary.length + content.impact.length + content.sentiment.length
+  const estimatedLines = Math.max(1, Math.ceil(estimatedLength * 12 / Math.max(1, tooltipWidth - 28)))
+  const estimatedHeight = 92 + estimatedLines * 19
+    + (content.impact ? 28 : 0)
+    + (content.sentiment ? 28 : 0)
+  const below = rect.bottom + tooltipGap
+  continuousTooltip.title = `${item?.name || '--'} · ${tone === 'positive' ? '利好' : '利空'}`
+  continuousTooltip.tone = String(item?.news_precheck?.tone_label || '')
+  continuousTooltip.toneClass = ['positive', 'negative', 'neutral'].includes(item?.news_precheck?.tone)
+    ? item.news_precheck.tone
+    : ''
+  continuousTooltip.summary = summary
+  continuousTooltip.impact = content.impact
+  continuousTooltip.sentiment = content.sentiment
+  continuousTooltip.source = continuousNewsSource(item)
+  continuousTooltip.width = tooltipWidth
+  continuousTooltip.x = Math.max(
+    viewportMargin,
+    Math.min(rect.left, window.innerWidth - tooltipWidth - viewportMargin),
+  )
+  continuousTooltip.y = below + estimatedHeight <= window.innerHeight - viewportMargin
+    ? below
+    : Math.max(viewportMargin, rect.top - estimatedHeight - tooltipGap)
+  continuousTooltip.visible = true
+}
+
 function preventDragonTigerClipboard(event) {
   event.preventDefault()
 }
@@ -187,9 +371,9 @@ function showLimitUpReasonTooltip(event, item) {
 
 function streak(item) {
   const up = Math.max(0, Math.trunc(Number(item?.limit_up_streak) || 0))
-  if (up > 0) return { label: up === 1 ? '首板' : `${up}连板`, className: 'limit-up', title: `连续涨停 ${up} 个交易日` }
+  if (up > 0) return { label: up === 1 ? '首板' : `${up}连板`, className: 'limit-up' }
   const down = Math.max(0, Math.trunc(Number(item?.limit_down_streak) || 0))
-  if (down > 0) return { label: down === 1 ? '首跌停' : `${down}连跌停`, className: 'limit-down', title: `连续跌停 ${down} 个交易日` }
+  if (down > 0) return { label: down === 1 ? '首跌停' : `${down}连跌停`, className: 'limit-down' }
   return null
 }
 
@@ -369,6 +553,8 @@ onMounted(() => {
   document.addEventListener('cut', preventDragonTigerClipboard, true)
   window.addEventListener('resize', hideLimitUpReasonTooltip)
   window.addEventListener('scroll', hideLimitUpReasonTooltip, true)
+  window.addEventListener('resize', hideContinuousTooltip)
+  window.addEventListener('scroll', hideContinuousTooltip, true)
   stopRefreshPolling = startVisiblePolling(() => {
     if (!selectedDate.value) load({ background: true })
   }, REFRESH_INTERVAL_MS)
@@ -383,6 +569,8 @@ onBeforeUnmount(() => {
   document.removeEventListener('cut', preventDragonTigerClipboard, true)
   window.removeEventListener('resize', hideLimitUpReasonTooltip)
   window.removeEventListener('scroll', hideLimitUpReasonTooltip, true)
+  window.removeEventListener('resize', hideContinuousTooltip)
+  window.removeEventListener('scroll', hideContinuousTooltip, true)
 })
 </script>
 
@@ -447,7 +635,15 @@ onBeforeUnmount(() => {
           </button>
         </div>
 
-        <details v-for="item in items" :key="`${item.code || ''}-${item.name || ''}`" class="dragon-tiger-item">
+        <details
+          v-for="item in items"
+          :key="`${item.code || ''}-${item.name || ''}`"
+          class="dragon-tiger-item"
+          :class="{
+            'has-positive-news': directionalNewsTone(item) === 'positive',
+            'has-negative-news': directionalNewsTone(item) === 'negative',
+          }"
+        >
           <summary>
             <span class="dragon-tiger-list-name">
               <span
@@ -460,8 +656,25 @@ onBeforeUnmount(() => {
                 v-if="streak(item)"
                 class="dragon-tiger-streak"
                 :class="streak(item).className"
-                :title="streak(item).title"
               >{{ streak(item).label }}</small>
+              <small
+                v-if="continuousListing(item)"
+                class="dragon-tiger-streak continuous-list"
+              >连榜{{ continuousListing(item) }}日</small>
+              <small
+                v-if="directionalNewsTone(item)"
+                class="dragon-tiger-news-tone"
+                :class="directionalNewsTone(item)"
+                tabindex="0"
+                :aria-label="`${item.name || '--'}消息面预检结果：${directionalNewsTone(item) === 'positive' ? '利好' : '利空'}，悬浮查看详情`"
+                @pointerenter="showContinuousTooltip($event, item)"
+                @pointerleave="hideContinuousTooltip"
+                @focus="showContinuousTooltip($event, item)"
+                @blur="hideContinuousTooltip"
+              >
+                <span aria-hidden="true">{{ directionalNewsTone(item) === 'positive' ? '✦' : '▼' }}</span>
+                {{ directionalNewsTone(item) === 'positive' ? '利好' : '利空' }}
+              </small>
             </span>
             <span class="dragon-tiger-list-sector" :title="item.sector_path || item.sector || '--'">
               {{ item.sector || '--' }}
@@ -495,6 +708,28 @@ onBeforeUnmount(() => {
               </div>
               <p>{{ item.limit_up_reason || item.limit_up_reason_category }}</p>
               <small>同花顺问财归纳，仅供研究参考</small>
+            </section>
+
+            <section
+              v-if="newsPrecheckEligible(item)"
+              class="dragon-tiger-reasons dragon-tiger-continuous-news"
+              aria-label="消息面预检"
+            >
+              <div class="dragon-tiger-reasons-head">
+                <b>{{ newsTriggerLabel(item) }} · 消息面预检</b>
+                <span v-if="item.news_precheck?.tone_label">{{ item.news_precheck.tone_label }}</span>
+              </div>
+              <small class="dragon-tiger-continuous-news-label">核心消息</small>
+              <p>{{ continuousNewsSummary(item) }}</p>
+              <template v-if="continuousNewsContent(item).impact">
+                <small class="dragon-tiger-continuous-news-label">直接影响</small>
+                <p>{{ continuousNewsContent(item).impact }}</p>
+              </template>
+              <template v-if="continuousNewsContent(item).sentiment">
+                <small class="dragon-tiger-continuous-news-label">市场舆情</small>
+                <p>{{ continuousNewsContent(item).sentiment }}</p>
+              </template>
+              <small class="dragon-tiger-continuous-news-source">{{ continuousNewsSource(item) }}</small>
             </section>
 
             <section class="dragon-tiger-reasons" aria-label="上榜理由">
@@ -600,6 +835,30 @@ onBeforeUnmount(() => {
     >
       <b>涨停原因</b>
       <span>{{ limitUpTooltip.text }}</span>
+    </div>
+    <div
+      v-if="continuousTooltip.visible"
+      class="dragon-tiger-continuous-tooltip"
+      :style="{left: `${continuousTooltip.x}px`, top: `${continuousTooltip.y}px`, width: `${continuousTooltip.width}px`}"
+      role="tooltip"
+    >
+      <div class="dragon-tiger-continuous-tooltip-head">
+        <b>{{ continuousTooltip.title }}</b>
+        <em v-if="continuousTooltip.tone" :class="continuousTooltip.toneClass">{{ continuousTooltip.tone }}</em>
+      </div>
+      <div class="dragon-tiger-continuous-tooltip-insight">
+        <small>核心消息</small>
+        <p class="dragon-tiger-continuous-tooltip-summary">{{ continuousTooltip.summary }}</p>
+        <template v-if="continuousTooltip.impact">
+          <small class="dragon-tiger-continuous-tooltip-impact-label">直接影响</small>
+          <p class="dragon-tiger-continuous-tooltip-impact">{{ continuousTooltip.impact }}</p>
+        </template>
+        <template v-if="continuousTooltip.sentiment">
+          <small class="dragon-tiger-continuous-tooltip-sentiment-label">市场舆情</small>
+          <p class="dragon-tiger-continuous-tooltip-sentiment">{{ continuousTooltip.sentiment }}</p>
+        </template>
+      </div>
+      <small class="dragon-tiger-continuous-tooltip-source">{{ continuousTooltip.source }}</small>
     </div>
     <div
       v-if="adminAuth.open"
