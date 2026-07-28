@@ -27,6 +27,7 @@ export const PRACTICE_TIDE_STATUS_LABELS = {
   lagging: '落后',
   candidate: '候选',
   emerging: '启动',
+  intraday_mainline: '日内强势观察',
   mainline: '主线',
   diverging: '分歧',
   fading: '退潮',

@@ -55,6 +55,23 @@ class PublicProjectionTests(unittest.TestCase):
                 "stage": "completed",
                 "model_error": "private provider detail",
             },
+            niuone_mainline={
+                "generated_at": "2026-07-21 10:00:06",
+                "niuone_context": {
+                    "as_of_date": "2026-07-21",
+                    "mainline": {"primary": "银行", "mode": "confirmed"},
+                    "market": {"state": "balanced", "allow_new_buys": True},
+                    "themes": {
+                        "银行": {
+                            "industry": "银行",
+                            "score": 80,
+                            "mainline_confirmed": True,
+                            "private_rule": "secret",
+                        }
+                    },
+                },
+                "secret_path": "/private/runtime/niuone.json",
+            },
         )
 
         self.assertEqual(sections["metadata"]["schema_version"], PUBLIC_SCHEMA_VERSION)
@@ -86,6 +103,8 @@ class PublicProjectionTests(unittest.TestCase):
         self.assertEqual(sections["market_summary"]["generated_at"], "2026-07-21 10:00:05")
         self.assertEqual(sections["market_summary"]["status"], "completed")
         self.assertNotIn("model_error", sections["market_summary"])
+        self.assertEqual(sections["niuone_mainline"]["mainline"]["primary"], "银行")
+        self.assertNotIn("private_rule", sections["niuone_mainline"]["themes"][0])
         serialized = repr(sections)
         self.assertNotIn("/private/runtime", serialized)
         self.assertNotIn("token=secret", serialized)

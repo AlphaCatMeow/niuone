@@ -22,6 +22,7 @@ from strategies.scoring import (  # noqa: E402
     analyze_enriched_rows,
     build_niuone_context,
     enrich_rows,
+    score_niu_emerging,
     score_niu_leader,
 )
 from strategies.scoring.common import with_strategy_profile  # noqa: E402
@@ -133,12 +134,16 @@ class NiuOneStrategyTests(unittest.TestCase):
             prepared,
             market_snapshot=market_snapshot,
             flow_rows={"inflow": [{"name": "半导体", "net_flow_yi": 30}], "outflow": []},
+            as_of_date="2026-07-27",
+            previous_trading_day="2026-07-24",
         )
         confirmed = build_niuone_context(
             prepared,
             market_snapshot=market_snapshot,
             flow_rows={"inflow": [{"name": "半导体", "net_flow_yi": 30}], "outflow": []},
             previous_context=context,
+            as_of_date="2026-07-28",
+            previous_trading_day="2026-07-27",
         )
 
         theme = confirmed["themes"]["半导体"]
@@ -147,8 +152,16 @@ class NiuOneStrategyTests(unittest.TestCase):
         self.assertEqual(confirmed["market"]["per_trade_risk_pct"], 1.5)
         self.assertGreaterEqual(theme["strong_stock_count"], 3)
         self.assertGreaterEqual(theme["effective_strong_count"], 2.4)
+        self.assertAlmostEqual(
+            theme["effective_breadth_pct"],
+            theme["effective_strong_count"] / theme["member_count"] * 100,
+            delta=0.2,
+        )
         self.assertFalse(theme["single_stock_dominated"])
         self.assertEqual(theme["state"], "mainline")
+        self.assertTrue(theme["cross_day_confirmed"])
+        self.assertGreaterEqual(theme["core_overlap_count"], 2)
+        self.assertEqual(theme["confirmation_count"], 2)
         self.assertEqual(confirmed["mainline"]["mode"], "single")
         self.assertEqual(confirmed["mainline"]["primary"], "半导体")
 
@@ -166,18 +179,156 @@ class NiuOneStrategyTests(unittest.TestCase):
         self.assertNotEqual(theme["state"], "mainline")
         self.assertEqual(context["mainline"]["mode"], "none")
 
-    def test_prior_scan_confirmation_promotes_an_emerging_theme(self):
-        first = build_niuone_context(self._prepared_market())
-        first["themes"]["半导体"].update({
-            "state": "emerging",
-            "raw_state": "mainline",
-            "confirmation_count": 1,
-            "state_streak": 1,
-        })
-        second = build_niuone_context(self._prepared_market(), previous_context=first)
+    def test_context_classifies_every_uncovered_reference_stock(self):
+        valid = {
+            "code": "600001",
+            "name": "有效样本",
+            "industry": "半导体",
+            "quote": {"amount": 1.5e9},
+            "rows": make_rows("600001", "半导体"),
+        }
+        missing_industry = {
+            "code": "600002",
+            "name": "无行业样本",
+            "industry": "",
+            "quote": {"amount": 1.5e9},
+            "rows": make_rows("600002", ""),
+        }
+        insufficient = {
+            "code": "600003",
+            "name": "历史不足样本",
+            "industry": "银行",
+            "quote": {"amount": 1.5e9},
+            "rows": make_rows("600003", "银行")[:40],
+        }
+        invalid_rows = make_rows("600004", "汽车")
+        invalid_rows[-21]["close"] = 0
+        invalid_metrics = {
+            "code": "600004",
+            "name": "指标无效样本",
+            "industry": "汽车",
+            "quote": {"amount": 1.5e9},
+            "rows": invalid_rows,
+        }
 
-        self.assertEqual(second["themes"]["半导体"]["state"], "mainline")
-        self.assertGreaterEqual(second["themes"]["半导体"]["confirmation_count"], 2)
+        context = build_niuone_context(
+            [valid, missing_industry, insufficient, invalid_metrics],
+            reference_pool_count=5,
+        )
+
+        diagnostics = context["coverage_diagnostics"]
+        reasons = {reason["key"]: reason["count"] for reason in diagnostics["reasons"]}
+        self.assertEqual(context["mapped_stock_count"], 1)
+        self.assertEqual(context["data_coverage"], 0.2)
+        self.assertEqual(diagnostics["uncovered_stock_count"], 4)
+        self.assertEqual(reasons, {
+            "kline_unavailable": 1,
+            "insufficient_history": 1,
+            "invalid_metrics": 1,
+            "industry_unmapped": 1,
+        })
+
+    def test_raw_defensive_market_immediately_zeroes_new_buy_budget(self):
+        context = build_niuone_context(
+            self._prepared_market(),
+            market_snapshot={
+                "up": 1,
+                "down": 199,
+                "median_change_pct": -1.5,
+                "limit_up": 0,
+                "limit_down": 20,
+                "core_index_count": 0,
+                "index_below_ma20_count": 0,
+            },
+            previous_context={
+                "market": {
+                    "state": "offensive",
+                    "raw_state": "offensive",
+                    "confirmation_count": 2,
+                }
+            },
+            as_of_date="2026-07-27",
+            previous_trading_day="2026-07-24",
+        )
+
+        market = context["market"]
+        self.assertEqual(market["raw_state"], "defensive")
+        self.assertEqual(market["risk_state"], "defensive")
+        self.assertFalse(market["allow_new_buys"])
+        self.assertEqual(market["per_trade_risk_pct"], 0.0)
+        self.assertEqual(market["max_total_position_pct"], 0.0)
+
+    def test_same_day_repeated_scans_remain_intraday_observation(self):
+        prepared = self._prepared_market()
+        first = build_niuone_context(
+            prepared,
+            as_of_date="2026-07-27",
+            previous_trading_day="2026-07-24",
+        )
+        second = build_niuone_context(
+            prepared,
+            previous_context=first,
+            as_of_date="2026-07-27",
+            previous_trading_day="2026-07-24",
+        )
+
+        theme = second["themes"]["半导体"]
+        self.assertEqual(theme["state"], "emerging")
+        self.assertEqual(theme["intraday_state"], "intraday_mainline")
+        self.assertEqual(theme["confirmation_count"], 1)
+        self.assertEqual(theme["intraday_confirmation_count"], 2)
+        self.assertFalse(theme["cross_day_confirmed"])
+        self.assertEqual(second["mainline"]["mode"], "none")
+        self.assertEqual(second["mainline"]["intraday_primary"], "半导体")
+
+        rows = make_rows("600000", "半导体", 0.01)
+        emerging = score_niu_emerging(rows, second)
+        self.assertIsNotNone(emerging)
+        self.assertFalse(emerging["actionable"])
+        self.assertIn("启动主题尚未跨交易日延续", emerging["hard_blockers"])
+
+    def test_changed_core_stocks_do_not_confirm_mainline_next_day(self):
+        first = build_niuone_context(
+            self._prepared_market(),
+            as_of_date="2026-07-27",
+            previous_trading_day="2026-07-24",
+        )
+        first["themes"]["半导体"]["core_stock_codes"] = ["601001", "601002", "601003"]
+        second = build_niuone_context(
+            self._prepared_market(),
+            previous_context=first,
+            as_of_date="2026-07-28",
+            previous_trading_day="2026-07-27",
+        )
+
+        theme = second["themes"]["半导体"]
+        self.assertEqual(theme["state"], "emerging")
+        self.assertEqual(theme["core_overlap_count"], 0)
+        self.assertFalse(theme["core_continuity_met"])
+        self.assertFalse(theme["cross_day_confirmed"])
+
+    def test_legacy_same_day_mainline_cache_is_not_trusted_as_cross_day_confirmation(self):
+        prepared = self._prepared_market()
+        legacy = build_niuone_context(
+            prepared,
+            as_of_date="2026-07-27",
+            previous_trading_day="2026-07-24",
+        )
+        legacy["version"] = 1
+        theme = legacy["themes"]["半导体"]
+        theme["state"] = "mainline"
+        theme.pop("mainline_confirmed", None)
+        theme.pop("cross_day_confirmed", None)
+
+        current = build_niuone_context(
+            prepared,
+            previous_context=legacy,
+            as_of_date="2026-07-27",
+            previous_trading_day="2026-07-24",
+        )
+
+        self.assertEqual(current["themes"]["半导体"]["state"], "emerging")
+        self.assertFalse(current["themes"]["半导体"]["cross_day_confirmed"])
 
     def test_scorer_uses_mainline_context_and_ema_hard_gates(self):
         rows = make_rows("600000", "半导体", 0.02)
@@ -192,6 +343,8 @@ class NiuOneStrategyTests(unittest.TestCase):
                     "member_count": 8, "eligible_data": True, "strong_stock_count": 4,
                     "effective_strong_count": 3.5, "leader_concentration": 0.3,
                     "single_stock_dominated": False, "confirmation_count": 2, "state_streak": 2,
+                    "cross_day_persistent": True, "cross_day_confirmed": True,
+                    "mainline_confirmed": True, "core_overlap_count": 3,
                 }
             },
             "stocks": {
@@ -211,6 +364,12 @@ class NiuOneStrategyTests(unittest.TestCase):
         self.assertEqual(result["per_trade_risk_budget_pct"], 1.5)
         self.assertFalse(any("BBI" in blocker for blocker in result["hard_blockers"]))
 
+        rows[-1]["quote_change_pct"] = 5.1
+        chased = score_niu_leader(rows, context)
+        self.assertIsNotNone(chased)
+        self.assertFalse(chased["actionable"])
+        self.assertIn("领航战法单日涨幅>4%", chased["hard_blockers"])
+
         payload = with_strategy_profile("niu_leader", {
             "score": 9.0,
             "distance_pct": 10.0,
@@ -222,6 +381,8 @@ class NiuOneStrategyTests(unittest.TestCase):
             "sector_status": "mainline",
             "mainline_score": 85,
             "mainline_selected": True,
+            "mainline_cross_day_confirmed": True,
+            "mainline_confirmed": True,
             "single_stock_dominated": False,
             "stock_strong": True,
             "stock_sector_rank": 90,
@@ -433,6 +594,8 @@ class NiuOneStrategyTests(unittest.TestCase):
             market_snapshot=market_snapshot,
             flow_rows=flow_rows,
             dragon_tiger_snapshot=dragon_tiger,
+            as_of_date="2026-07-24",
+            previous_trading_day="2026-07-23",
         )
         context = build_niuone_context(
             prepared,
@@ -440,8 +603,10 @@ class NiuOneStrategyTests(unittest.TestCase):
             flow_rows=flow_rows,
             previous_context=first,
             dragon_tiger_snapshot=dragon_tiger,
+            as_of_date="2026-07-27",
+            previous_trading_day="2026-07-24",
         )
-        rows = make_rows("600000", "半导体", 0.02)
+        rows = make_rows("600000", "半导体", 0.01)
 
         multi = analyze_enriched_rows(rows, {"niu_leader": score_niu_leader}, context)
 

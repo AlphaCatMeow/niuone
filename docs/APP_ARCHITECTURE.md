@@ -47,6 +47,7 @@ Dashboard 使用 Vue 3 + Vite 和 FastAPI/Uvicorn，并保持单进程、单监�
 - `server.py` 的既有后台函数仍由 FastAPI 组合层复用，但其中已不存在 `BaseHTTPRequestHandler`、`ThreadingHTTPServer` 或静态页面分发；
 - `web/` 保存 Vue 组件、Vite 配置和依赖锁，生产产物由 FastAPI 从 `web/dist/` 提供；
 - Vue 已接管主题、合规弹窗、版本状态、栏目 bootstrap 与路由、最后刷新时间、全部公开栏目、完整模拟账户及管理页；旧 `frontend/*.html`、`frontend/dashboard.js` 和 `frontend/admin.js` 已删除，`frontend/` 仅保存 Vue 复用的样式。模拟账户拆为账户概览、持仓/卖出卡片、收益曲线、交易日历、操作日志、规则、盘面总结和候选股组件，数据层共享公开投影订阅并按区块摘要刷新。FastAPI 显式声明全部浏览器 API，未知路径直接返回 404；管理员会话、操作请求头、请求体上限与分级限流语义保持不变。
+- “题材强度”页面使用独立 `niuone_mainline_latest.json` 扫描状态和 `niuone_mainline` 公开投影区块；`/niuone-mainline` 只消费字段白名单读模型，因此策略切换不会覆盖最近一次牛牛主线，同时原始个股上下文和消息数据不会下沉到浏览器。
 - 浏览器先检查轻量 latest 指针，只在区块摘要变化时加载对应数据；完整模拟账户历史仅在用户打开缺少分时数据的日历日期时按需读取，成功后本页面会话不再重复下载，失败最多每 5 分钟重试一次。
 - Vue 资金流动画请求使用 `compact=1` 字段投影，服务端仅返回节点标识、名称、净额、采样时间和控件配置；完整响应仍保留给显式请求它的 API 客户端。
 

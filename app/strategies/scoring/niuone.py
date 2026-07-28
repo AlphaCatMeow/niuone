@@ -22,6 +22,8 @@ NIUONE_STRATEGY_IDS = frozenset({"niu_leader", "niu_pullback", "niu_emerging"})
 NIUONE_MIN_ROWS = 55
 NIUONE_MIN_THEME_MEMBERS = 3
 NIUONE_STRONG_SCORE_THRESHOLD = 70.0
+NIUONE_CORE_STOCK_LIMIT = 5
+NIUONE_MIN_CROSS_DAY_CORE_OVERLAP = 2
 
 
 def _mean(values: list[float], default: float = 0.0) -> float:
@@ -54,10 +56,15 @@ def _percentile(value: float, population: list[float]) -> float:
     return _clamp((below + max(0, equal - 1) / 2) / (len(clean) - 1) * 100)
 
 
-def _return_pct(rows: list[dict[str, Any]], lookback: int) -> float | None:
+def _return_pct(
+    rows: list[dict[str, Any]],
+    lookback: int,
+    *,
+    current_close: float | None = None,
+) -> float | None:
     if len(rows) <= lookback:
         return None
-    close = safe_float(rows[-1].get("close"))
+    close = current_close if current_close is not None else safe_float(rows[-1].get("close"))
     base = safe_float(rows[-lookback - 1].get("close"))
     if close is None or base is None or base <= 0:
         return None
@@ -80,11 +87,14 @@ def _member_metrics(item: dict[str, Any]) -> dict[str, Any] | None:
     if len(rows) < NIUONE_MIN_ROWS:
         return None
     latest = rows[-1]
-    close = safe_float(latest.get("close"))
+    quote = item.get("quote") if isinstance(item.get("quote"), dict) else {}
+    close = safe_float(quote.get("price"))
+    if close is None or close <= 0:
+        close = safe_float(latest.get("close"))
     ema20 = safe_float(latest.get("ema20"))
     ema50 = safe_float(latest.get("ema50"))
-    ret5 = _return_pct(rows, 5)
-    ret20 = _return_pct(rows, 20)
+    ret5 = _return_pct(rows, 5, current_close=close)
+    ret20 = _return_pct(rows, 20, current_close=close)
     if close is None or close <= 0 or ret5 is None or ret20 is None:
         return None
     recent_volumes = [safe_float(row.get("volume")) for row in rows[-5:]]
@@ -94,7 +104,7 @@ def _member_metrics(item: dict[str, Any]) -> dict[str, Any] | None:
     volume_ratio = _mean(recent) / _mean(prior) if prior and _mean(prior) > 0 else 1.0
     prior_highs = [safe_float(row.get("high")) for row in rows[-21:-1]]
     highs = [value for value in prior_highs if value is not None and value > 0]
-    quote = item.get("quote") if isinstance(item.get("quote"), dict) else {}
+    live_change = safe_float(quote.get("change_pct"))
     return {
         "code": _stock_code(item.get("code") or latest.get("symbol_code")),
         "name": str(item.get("name") or latest.get("stock_name") or ""),
@@ -106,8 +116,20 @@ def _member_metrics(item: dict[str, Any]) -> dict[str, Any] | None:
         "new_high20": bool(highs and close >= max(highs)),
         "volume_ratio": volume_ratio,
         "amount": safe_float(quote.get("amount")) or safe_float(latest.get("quote_amount")) or 0.0,
-        "change_pct": safe_float(quote.get("change_pct")) or safe_float(latest.get("change_pct")) or 0.0,
+        "change_pct": live_change if live_change is not None else (safe_float(latest.get("change_pct")) or 0.0),
     }
+
+
+def _theme_core_codes(theme: Mapping[str, Any] | None) -> list[str]:
+    if not isinstance(theme, Mapping):
+        return []
+    explicit = theme.get("core_stock_codes")
+    if isinstance(explicit, list):
+        codes = [_stock_code(value) for value in explicit]
+    else:
+        strong_stocks = theme.get("strong_stocks") if isinstance(theme.get("strong_stocks"), list) else []
+        codes = [_stock_code(item.get("code")) for item in strong_stocks if isinstance(item, Mapping)]
+    return list(dict.fromkeys(code for code in codes if code))[:NIUONE_CORE_STOCK_LIMIT]
 
 
 def _flow_map(flow_rows: Any) -> dict[str, float]:
@@ -251,18 +273,20 @@ def _market_context(
         state = raw_state
     else:
         state = prior_state
+    risk_state = "defensive" if raw_state == "defensive" else state
     return {
         "score": round(score, 2),
         "raw_state": raw_state,
         "state": state,
         "confirmation_count": confirmation_count,
         "hard_stop": hard_stop,
-        "allow_new_buys": state != "defensive" and not hard_stop,
+        "allow_new_buys": raw_state != "defensive" and state != "defensive" and not hard_stop,
         "breadth_score": round(breadth, 2),
         "median_change_pct": round(median_change, 3),
         "limit_up": limit_up,
         "limit_down": limit_down,
-        **niuone_risk_budget(state),
+        "risk_state": risk_state,
+        **niuone_risk_budget(risk_state),
     }
 
 
@@ -273,7 +297,11 @@ def _theme_state(
     strong_count: int,
     effective_count: float,
     previous: dict[str, Any],
-) -> tuple[str, str, int, int]:
+    core_codes: list[str],
+    as_of_date: str,
+    previous_context_date: str,
+    previous_trading_day: str,
+) -> dict[str, Any]:
     if not eligible or score < 45:
         raw_state = "inactive"
     elif score < 55:
@@ -287,45 +315,152 @@ def _theme_state(
 
     prior_state = str(previous.get("state") or "")
     prior_raw = str(previous.get("raw_state") or prior_state)
-    confirmation = int(previous.get("confirmation_count") or 0) + 1 if prior_raw == raw_state else 1
+    prior_date = str(previous.get("as_of_date") or previous_context_date or "")[:10]
+    same_day = bool(as_of_date and prior_date == as_of_date)
+    consecutive_trading_day = bool(
+        as_of_date
+        and previous_trading_day
+        and prior_date == previous_trading_day
+        and prior_date != as_of_date
+    )
+    previous_core_codes = _theme_core_codes(previous)
+    continued_core_codes = sorted(set(core_codes).intersection(previous_core_codes))
+    core_overlap_count = len(continued_core_codes)
+    overlap_base = min(len(core_codes), len(previous_core_codes))
+    core_overlap_ratio = core_overlap_count / overlap_base if overlap_base else 0.0
+    core_continuity_met = bool(
+        consecutive_trading_day
+        and core_overlap_count >= NIUONE_MIN_CROSS_DAY_CORE_OVERLAP
+    )
+    qualified_states = {"emerging", "mainline"}
+    cross_day_persistent_now = bool(
+        core_continuity_met
+        and raw_state in qualified_states
+        and prior_raw in qualified_states
+    )
+    prior_cross_day_persistent = bool(previous.get("cross_day_persistent"))
+    cross_day_persistent = cross_day_persistent_now or bool(same_day and prior_cross_day_persistent)
+    prior_mainline_confirmed = bool(
+        previous.get("mainline_confirmed")
+        or previous.get("cross_day_confirmed")
+    )
+
+    prior_confirmation = max(1, int(previous.get("confirmation_count") or 1))
+    if raw_state in qualified_states:
+        if same_day and prior_raw in qualified_states:
+            confirmation = prior_confirmation
+        elif cross_day_persistent_now:
+            confirmation = prior_confirmation + 1
+        else:
+            confirmation = 1
+    else:
+        confirmation = 0
+    intraday_confirmation = (
+        int(previous.get("intraday_confirmation_count") or 1) + 1
+        if same_day and prior_raw == raw_state
+        else 1
+    )
+
     if raw_state == "mainline":
-        if prior_state in {"mainline", "diverging"} or confirmation >= 2 or (score >= 84 and strong_count >= 4 and effective_count >= 3):
+        if cross_day_persistent_now or (same_day and prior_mainline_confirmed):
             state = "mainline"
         else:
             state = "emerging"
     elif raw_state == "emerging":
-        if prior_state == "mainline" and score >= 62:
+        if prior_mainline_confirmed and (same_day or consecutive_trading_day) and score >= 62:
             state = "diverging"
-        elif confirmation >= 2 or (score >= 72 and strong_count >= 3):
-            state = "emerging"
         else:
-            state = "candidate"
-    elif raw_state == "candidate" and prior_state == "mainline":
+            state = "emerging"
+    elif raw_state == "candidate" and prior_mainline_confirmed and (same_day or consecutive_trading_day):
         state = "diverging"
-    elif raw_state in {"fading", "inactive"} and prior_state in {"mainline", "diverging"} and score >= 45:
+    elif (
+        raw_state in {"fading", "inactive"}
+        and prior_mainline_confirmed
+        and (same_day or consecutive_trading_day)
+        and score >= 45
+    ):
         state = "fading"
     else:
         state = raw_state
-    streak = int(previous.get("state_streak") or 0) + 1 if prior_state == state else 1
-    return raw_state, state, confirmation, streak
+    if same_day and prior_state == state:
+        streak = max(1, int(previous.get("state_streak") or 1))
+    elif consecutive_trading_day and prior_state == state:
+        streak = max(1, int(previous.get("state_streak") or 1)) + 1
+    else:
+        streak = 1
+    cross_day_confirmed = bool(
+        state == "mainline"
+        and (cross_day_persistent_now or (same_day and prior_mainline_confirmed))
+    )
+    mainline_confirmed = bool(
+        cross_day_confirmed
+        or (
+            state in {"diverging", "fading"}
+            and prior_mainline_confirmed
+            and (same_day or core_continuity_met)
+        )
+    )
+    intraday_state = "intraday_mainline" if raw_state == "mainline" and not cross_day_confirmed else raw_state
+    return {
+        "raw_state": raw_state,
+        "state": state,
+        "intraday_state": intraday_state,
+        "confirmation_count": confirmation,
+        "intraday_confirmation_count": intraday_confirmation,
+        "state_streak": streak,
+        "same_day_previous_scan": same_day,
+        "consecutive_trading_day": consecutive_trading_day,
+        "cross_day_persistent": cross_day_persistent,
+        "cross_day_confirmed": cross_day_confirmed,
+        "mainline_confirmed": mainline_confirmed,
+        "previous_as_of_date": prior_date,
+        "core_overlap_count": core_overlap_count,
+        "core_overlap_ratio": round(core_overlap_ratio, 4),
+        "core_continuity_met": core_continuity_met,
+        "continued_core_codes": continued_core_codes,
+    }
 
 
 def build_niuone_context(
     prepared_items: list[dict[str, Any]],
     *,
+    reference_pool_count: int | None = None,
     market_snapshot: dict[str, Any] | None = None,
     flow_rows: Any = None,
     previous_context: dict[str, Any] | None = None,
     dragon_tiger_snapshot: dict[str, Any] | None = None,
     news_snapshot: dict[str, Any] | None = None,
+    as_of_date: str = "",
+    previous_trading_day: str = "",
 ) -> dict[str, Any]:
     """Build a market-mainline context without forcing a winner.
 
     Industry is the deterministic theme proxy. A future concept-tag provider can
     supply a richer mapping without changing the state or execution contracts.
     """
-    members = [metric for item in prepared_items if (metric := _member_metrics(item)) is not None]
+    members: list[dict[str, Any]] = []
+    insufficient_history_count = 0
+    invalid_metrics_count = 0
+    for item in prepared_items:
+        rows = item.get("rows") if isinstance(item.get("rows"), list) else []
+        if len(rows) < NIUONE_MIN_ROWS:
+            insufficient_history_count += 1
+            continue
+        metric = _member_metrics(item)
+        if metric is None:
+            invalid_metrics_count += 1
+            continue
+        members.append(metric)
+    resolved_reference_pool_count = max(
+        len(prepared_items),
+        int(reference_pool_count or 0),
+    )
+    unavailable_kline_count = max(0, resolved_reference_pool_count - len(prepared_items))
+    missing_industry_count = sum(1 for member in members if not member.get("industry"))
     previous_context = previous_context if isinstance(previous_context, dict) else {}
+    as_of_date = str(as_of_date or "")[:10]
+    previous_trading_day = str(previous_trading_day or "")[:10]
+    previous_context_date = str(previous_context.get("as_of_date") or "")[:10]
     market = _market_context(
         members,
         market_snapshot if isinstance(market_snapshot, dict) else {},
@@ -380,7 +515,11 @@ def build_niuone_context(
         normalized = [weight / weight_total for weight in weights] if weight_total > 0 else []
         concentration = max(normalized) if normalized else 1.0
         effective_count = 1.0 / sum(weight * weight for weight in normalized) if normalized else 0.0
+        effective_breadth_pct = _clamp(
+            effective_count / len(theme_members) * 100 if theme_members else 0.0
+        )
         strong_count = len(strong_members)
+        core_codes = [str(member["code"]) for member in strong_members[:NIUONE_CORE_STOCK_LIMIT] if member.get("code")]
         strong_ratio = strong_count / len(theme_members) * 100 if theme_members else 0.0
         top_scores = [float(member["strong_score"]) for member in strong_members[:3]]
         strength_component = _mean(top_scores) * 0.25
@@ -424,13 +563,19 @@ def build_niuone_context(
             - sample_penalty
         )
         eligible = len(theme_members) >= NIUONE_MIN_THEME_MEMBERS
-        raw_state, state, confirmation_count, streak = _theme_state(
+        state_detail = _theme_state(
             score=score,
             eligible=eligible,
             strong_count=strong_count,
             effective_count=effective_count,
             previous=previous,
+            core_codes=core_codes,
+            as_of_date=as_of_date,
+            previous_context_date=previous_context_date,
+            previous_trading_day=previous_trading_day,
         )
+        raw_state = str(state_detail["raw_state"])
+        state = str(state_detail["state"])
         themes[industry] = {
             "industry": industry,
             "theme_basis": "industry_proxy",
@@ -439,13 +584,28 @@ def build_niuone_context(
             "score": round(score, 2),
             "raw_state": raw_state,
             "state": state,
-            "confirmation_count": confirmation_count,
-            "state_streak": streak,
+            "intraday_state": state_detail["intraday_state"],
+            "confirmation_count": state_detail["confirmation_count"],
+            "intraday_confirmation_count": state_detail["intraday_confirmation_count"],
+            "state_streak": state_detail["state_streak"],
+            "as_of_date": as_of_date,
+            "previous_as_of_date": state_detail["previous_as_of_date"],
+            "same_day_previous_scan": state_detail["same_day_previous_scan"],
+            "consecutive_trading_day": state_detail["consecutive_trading_day"],
+            "cross_day_persistent": state_detail["cross_day_persistent"],
+            "cross_day_confirmed": state_detail["cross_day_confirmed"],
+            "mainline_confirmed": state_detail["mainline_confirmed"],
+            "core_stock_codes": core_codes,
+            "core_overlap_count": state_detail["core_overlap_count"],
+            "core_overlap_ratio": state_detail["core_overlap_ratio"],
+            "core_continuity_met": state_detail["core_continuity_met"],
+            "continued_core_codes": state_detail["continued_core_codes"],
             "previous_score": safe_round(previous_score, 2),
             "score_change": safe_round(score - previous_score, 2) if previous_score is not None else None,
             "strong_stock_count": strong_count,
             "strong_stock_ratio": round(strong_ratio, 2),
             "effective_strong_count": round(effective_count, 2),
+            "effective_breadth_pct": round(effective_breadth_pct, 2),
             "leader_concentration": round(concentration, 4),
             "single_stock_dominated": bool(strong_count <= 1 or concentration > 0.70),
             "flow_net_yi": safe_round(flow_value, 2),
@@ -502,6 +662,7 @@ def build_niuone_context(
 
     ordered = sorted(themes.values(), key=lambda theme: float(theme["score"]), reverse=True)
     confirmed = [theme for theme in ordered if theme["state"] == "mainline"]
+    intraday = [theme for theme in ordered if theme.get("intraday_state") == "intraday_mainline"]
     primary = confirmed[0] if confirmed else None
     secondary = confirmed[1] if len(confirmed) > 1 and float(confirmed[0]["score"]) - float(confirmed[1]["score"]) <= 8 else None
     summary = {
@@ -512,17 +673,73 @@ def build_niuone_context(
         "secondary_score": secondary["score"] if secondary else None,
         "score_gap": round(float(ordered[0]["score"]) - float(ordered[1]["score"]), 2) if len(ordered) > 1 else None,
         "reason": "强势股形成多点共振" if primary else "尚无主题完成主线确认",
+        "intraday_primary": intraday[0]["industry"] if intraday else "",
+        "intraday_primary_score": intraday[0]["score"] if intraday else None,
+        "observation_reason": (
+            "日内强势仅作观察，等待下一交易日核心股延续"
+            if intraday and not primary
+            else ""
+        ),
     }
+    covered_count = len(stocks)
+    uncovered_count = max(0, resolved_reference_pool_count - covered_count)
+    coverage_reasons = [
+        {
+            "key": "kline_unavailable",
+            "label": "K线不可用或少于30根",
+            "count": unavailable_kline_count,
+            "description": "行情请求失败、返回空数据，或可用日K少于30根",
+        },
+        {
+            "key": "insufficient_history",
+            "label": "历史不足55根",
+            "count": insufficient_history_count,
+            "description": "已有日K不少于30根，但未达到题材强度计算要求的55根",
+        },
+        {
+            "key": "invalid_metrics",
+            "label": "关键指标无效",
+            "count": invalid_metrics_count,
+            "description": "收盘价或5日、20日收益等关键输入无法形成有效指标",
+        },
+        {
+            "key": "industry_unmapped",
+            "label": "行业映射缺失",
+            "count": missing_industry_count,
+            "description": "强度指标有效，但没有可用于题材聚类的行业归属",
+        },
+    ]
+    classified_uncovered_count = sum(int(reason["count"]) for reason in coverage_reasons)
+    if classified_uncovered_count < uncovered_count:
+        coverage_reasons.append({
+            "key": "other",
+            "label": "其他数据不完整",
+            "count": uncovered_count - classified_uncovered_count,
+            "description": "未归入已知数据质量分类",
+        })
     return {
-        "version": 1,
+        "version": 2,
         "strategy": "niuone",
         "theme_basis": "industry_proxy",
+        "as_of_date": as_of_date,
+        "previous_trading_day": previous_trading_day,
         "market": market,
         "mainline": summary,
         "theme_count": len(themes),
-        "mapped_stock_count": len(stocks),
+        "mapped_stock_count": covered_count,
         "strong_stock_count": sum(1 for member in members if member["strong"]),
-        "data_coverage": round(len(stocks) / len(prepared_items), 4) if prepared_items else 0.0,
+        "data_coverage": (
+            round(covered_count / resolved_reference_pool_count, 4)
+            if resolved_reference_pool_count
+            else 0.0
+        ),
+        "coverage_diagnostics": {
+            "reference_pool_count": resolved_reference_pool_count,
+            "prepared_stock_count": len(prepared_items),
+            "covered_stock_count": covered_count,
+            "uncovered_stock_count": uncovered_count,
+            "reasons": coverage_reasons,
+        },
         "dragon_tiger": dragon,
         "news": news,
         "themes": themes,
@@ -541,7 +758,9 @@ def _entry_metrics(rows: list[dict[str, Any]], context: dict[str, Any]) -> dict[
     market = context.get("market") if isinstance(context.get("market"), dict) else {}
     if not isinstance(theme, dict) or not isinstance(stock, dict):
         return None
-    close = safe_float(latest.get("close"))
+    close = safe_float(latest.get("quote_price"))
+    if close is None or close <= 0:
+        close = safe_float(latest.get("close"))
     ema20 = safe_float(latest.get("ema20"))
     ema50 = safe_float(latest.get("ema50"))
     atr = _atr(rows)
@@ -555,7 +774,8 @@ def _entry_metrics(rows: list[dict[str, Any]], context: dict[str, Any]) -> dict[
     prior_volumes = [safe_float(row.get("volume")) for row in rows[-21:-1]]
     volumes = [value for value in prior_volumes if value is not None and value > 0]
     volume_ratio = current_volume / _mean(volumes) if volumes else 1.0
-    change_pct = safe_float(latest.get("change_pct")) or 0.0
+    live_change = safe_float(latest.get("quote_change_pct"))
+    change_pct = live_change if live_change is not None else (safe_float(latest.get("change_pct")) or 0.0)
     breakout = bool(highs and close >= max(highs) * 1.002 and 1.15 <= volume_ratio <= 2.5)
     recent_lows = [safe_float(row.get("low")) for row in rows[-4:]]
     lows = [value for value in recent_lows if value is not None and value > 0]
@@ -628,7 +848,7 @@ def _payload(
         str(mainline.get("primary") or ""),
         str(mainline.get("secondary") or ""),
     }
-    budget = niuone_risk_budget(str(market.get("state") or ""))
+    budget = niuone_risk_budget(str(market.get("risk_state") or market.get("state") or ""))
     absolute_cap = NIUONE_ABSOLUTE_POSITION_CAP_PCT[strategy_name]
     dynamic_cap = risk_sized_position_cap_pct(
         per_trade_risk_pct=budget["per_trade_risk_pct"],
@@ -644,6 +864,7 @@ def _payload(
         "theme_basis": "industry_proxy",
         "mainline_state": theme.get("state"),
         "mainline_raw_state": theme.get("raw_state"),
+        "mainline_intraday_state": theme.get("intraday_state"),
         "mainline_score": theme.get("score"),
         "mainline_mode": mainline.get("mode", "none"),
         "mainline_primary": mainline.get("primary", ""),
@@ -658,6 +879,15 @@ def _payload(
         "leader_concentration": theme.get("leader_concentration"),
         "single_stock_dominated": bool(theme.get("single_stock_dominated")),
         "mainline_confirmation_count": theme.get("confirmation_count"),
+        "mainline_intraday_confirmation_count": theme.get("intraday_confirmation_count"),
+        "mainline_cross_day_persistent": bool(theme.get("cross_day_persistent")),
+        "mainline_cross_day_confirmed": bool(theme.get("cross_day_confirmed")),
+        "mainline_confirmed": bool(theme.get("mainline_confirmed")),
+        "mainline_core_overlap_count": theme.get("core_overlap_count"),
+        "mainline_core_overlap_ratio": theme.get("core_overlap_ratio"),
+        "mainline_continued_core_codes": list(theme.get("continued_core_codes") or []),
+        "mainline_as_of_date": theme.get("as_of_date"),
+        "mainline_previous_as_of_date": theme.get("previous_as_of_date"),
         "mainline_state_streak": theme.get("state_streak"),
         "mainline_score_change": theme.get("score_change"),
         "market_regime": market.get("state"),
@@ -738,10 +968,14 @@ def score_niu_leader(rows: list[dict[str, Any]], context: dict[str, Any]) -> dic
     risks = _common_risks(metrics)
     if metrics["theme"].get("state") != "mainline":
         risks.append("主题尚未确认为市场主线")
+    if not metrics["theme"].get("cross_day_confirmed"):
+        risks.append("主线未完成跨交易日核心股延续确认")
     if not metrics["stock"].get("strong") or float(metrics["stock"].get("theme_rank") or 0) < 80:
         risks.append("个股不是主线核心强股")
     if not (metrics["breakout"] or metrics["pullback"]):
         risks.append("未形成突破或首次缩量回踩")
+    if metrics["change_pct"] > 4 or metrics["extension_atr"] > 1.0:
+        risks.append("领航战法拒绝追高")
     verdict = "高匹配牛牛领航" if metrics["composite_score"] >= 8 else ("观察牛牛领航" if metrics["composite_score"] >= 6.5 else "不匹配")
     return with_strategy_profile("niu_leader", _payload("niu_leader", metrics, verdict=verdict, risk_flags=risks))
 
@@ -753,6 +987,8 @@ def score_niu_pullback(rows: list[dict[str, Any]], context: dict[str, Any]) -> d
     risks = _common_risks(metrics)
     if metrics["theme"].get("state") not in {"mainline", "diverging"} or float(metrics["theme"].get("score") or 0) < 70:
         risks.append("主线强度不足以参与分歧")
+    if not metrics["theme"].get("mainline_confirmed"):
+        risks.append("主题没有有效的跨交易日主线确认记录")
     if float(metrics["stock"].get("theme_rank") or 0) < 70:
         risks.append("个股不是主线第一梯队")
     if not (metrics["pullback"] or metrics["reclaim"]):
@@ -770,6 +1006,8 @@ def score_niu_emerging(rows: list[dict[str, Any]], context: dict[str, Any]) -> d
     risks = _common_risks(metrics)
     if metrics["theme"].get("state") != "emerging":
         risks.append("主题不是待确认的新主线")
+    if not metrics["theme"].get("cross_day_persistent"):
+        risks.append("启动主题尚未跨交易日延续")
     if int(metrics["theme"].get("strong_stock_count") or 0) < 2:
         risks.append("少于两只强势股共同确认")
     if not metrics["stock"].get("strong") or float(metrics["stock"].get("theme_rank") or 0) < 80:

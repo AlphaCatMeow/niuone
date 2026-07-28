@@ -70,6 +70,10 @@ from screening.stock_universe import (
     stock_name_is_st,
     stock_universe_metadata,
 )
+from screening.niuone_mainline_cache import (
+    load_cached_niuone_context,
+    write_niuone_mainline_cache,
+)
 from strategies.registry import (
     ACTIVE_STRATEGY_ENV,
     DISPLAY_STRATEGY_ORDER,
@@ -146,6 +150,7 @@ DASHBOARD_ENV_FILE = get_dashboard_env_file(Path(__file__).resolve().parents[1])
 B1_OUTPUT_DIR = DASHBOARD_HOME / "cron" / "output"
 B1_CACHE_FILE = B1_OUTPUT_DIR / "b1_screen_latest.json"
 MULTI_STRATEGY_CACHE = B1_OUTPUT_DIR / "multi_strategy_latest.json"
+NIUONE_MAINLINE_CACHE = B1_OUTPUT_DIR / "niuone_mainline_latest.json"
 STOCK_INDUSTRY_CACHE = B1_OUTPUT_DIR / "stock_industry_cache.json"
 B1_HISTORY_DIR = B1_OUTPUT_DIR / "b1_history"
 MULTI_STRATEGY_HISTORY = B1_OUTPUT_DIR / "multi_strategy_history"
@@ -673,13 +678,48 @@ def load_previous_sector_tide_market() -> dict[str, Any] | None:
 
 
 def load_previous_niuone_context() -> dict[str, Any] | None:
-    """Load the prior 牛牛战法 state used for mainline confirmation."""
+    """Load the prior 牛牛战法 state and retain its persisted market date."""
+    dedicated = load_cached_niuone_context(NIUONE_MAINLINE_CACHE)
+    if dedicated is not None:
+        return dedicated
+    return load_cached_niuone_context(MULTI_STRATEGY_CACHE)
+
+
+def resolve_niuone_trading_dates(
+    prepared_items: list[dict[str, Any]],
+    *,
+    now: datetime | None = None,
+    status_loader: Callable[..., dict[str, Any]] | None = None,
+) -> tuple[str, str]:
+    """Resolve the quote/K-line market date and its exact prior trading day."""
+    date_counts: dict[str, int] = {}
+    for item in prepared_items:
+        quote = item.get("quote") if isinstance(item.get("quote"), dict) else {}
+        quote_date = re.search(r"(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})", str(quote.get("quote_time") or ""))
+        if quote_date:
+            value = f"{quote_date.group('year')}-{quote_date.group('month')}-{quote_date.group('day')}"
+            date_counts[value] = date_counts.get(value, 0) + 1
+            continue
+        rows = item.get("rows") if isinstance(item.get("rows"), list) else []
+        latest = rows[-1] if rows and isinstance(rows[-1], dict) else {}
+        matched = re.search(r"\d{4}-\d{2}-\d{2}", str(latest.get("date") or ""))
+        if matched:
+            value = matched.group(0)
+            date_counts[value] = date_counts.get(value, 0) + 1
+    if date_counts:
+        as_of_date = max(date_counts, key=lambda value: (date_counts[value], value))
+    else:
+        as_of_date = (now or datetime.now()).strftime("%Y-%m-%d")
+    if status_loader is None:
+        from a_share_calendar import trading_day_status
+
+        status_loader = trading_day_status
     try:
-        payload = json.loads(MULTI_STRATEGY_CACHE.read_text(encoding="utf-8"))
+        status = status_loader(as_of_date, allow_refresh=False)
+        previous_trading_day = str(status.get("previous_trading_day") or "")[:10]
     except Exception:
-        return None
-    context = payload.get("niuone_context") if isinstance(payload, dict) else None
-    return context if isinstance(context, dict) else None
+        previous_trading_day = ""
+    return as_of_date, previous_trading_day
 
 
 def fetch_industry_money_flow() -> dict[str, Any]:
@@ -1787,6 +1827,8 @@ def main():
     sector_tide_flow_rows: dict[str, Any] = {"inflow": [], "outflow": []}
     previous_sector_tide_market: dict[str, Any] | None = None
     previous_niuone_context: dict[str, Any] | None = None
+    niuone_as_of_date = ""
+    niuone_previous_trading_day = ""
     dragon_tiger_snapshot: dict[str, Any] | None = None
     overnight_us_snapshot: dict[str, Any] | None = None
 
@@ -1868,6 +1910,8 @@ def main():
         finally:
             if context_pool is not None:
                 context_pool.shutdown(wait=True)
+        if niuone_enabled:
+            niuone_as_of_date, niuone_previous_trading_day = resolve_niuone_trading_dates(prepared_items)
         dragon_tiger_snapshot = load_previous_sector_tide_dragon_tiger()
         if sector_tide_enabled:
             previous_sector_tide_market = load_previous_sector_tide_market()
@@ -1900,10 +1944,13 @@ def main():
             previous_niuone_context = load_previous_niuone_context()
             niuone_context = build_niuone_context(
                 prepared_items,
+                reference_pool_count=len(reference_candidates),
                 market_snapshot=market_snapshot,
                 flow_rows=sector_tide_flow_rows,
                 previous_context=previous_niuone_context,
                 dragon_tiger_snapshot=dragon_tiger_snapshot,
+                as_of_date=niuone_as_of_date,
+                previous_trading_day=niuone_previous_trading_day,
             )
             niuone_context["industry_money_flow"] = sector_tide_flow_rows
             niuone_context["reference_stock_universe"] = list(reference_stock_universe)
@@ -1918,6 +1965,8 @@ def main():
                 "  牛牛主线 context: "
                 f"market={market.get('state')} score={market.get('score')} "
                 f"mode={mainline.get('mode')} primary={mainline.get('primary') or 'none'} "
+                f"intraday={mainline.get('intraday_primary') or 'none'} "
+                f"as_of={niuone_as_of_date or 'unknown'} "
                 f"themes={niuone_context.get('theme_count')} "
                 f"strong_stocks={niuone_context.get('strong_stock_count')} "
                 f"coverage={niuone_context.get('data_coverage')}",
@@ -1994,12 +2043,22 @@ def main():
             "theme_basis": best.get("theme_basis"),
             "mainline_state": best.get("mainline_state"),
             "mainline_raw_state": best.get("mainline_raw_state"),
+            "mainline_intraday_state": best.get("mainline_intraday_state"),
             "mainline_score": best.get("mainline_score"),
             "mainline_mode": best.get("mainline_mode"),
             "mainline_primary": best.get("mainline_primary"),
             "mainline_secondary": best.get("mainline_secondary"),
             "mainline_selected": best.get("mainline_selected"),
             "mainline_confirmation_count": best.get("mainline_confirmation_count"),
+            "mainline_intraday_confirmation_count": best.get("mainline_intraday_confirmation_count"),
+            "mainline_cross_day_persistent": best.get("mainline_cross_day_persistent"),
+            "mainline_cross_day_confirmed": best.get("mainline_cross_day_confirmed"),
+            "mainline_confirmed": best.get("mainline_confirmed"),
+            "mainline_core_overlap_count": best.get("mainline_core_overlap_count"),
+            "mainline_core_overlap_ratio": best.get("mainline_core_overlap_ratio"),
+            "mainline_continued_core_codes": best.get("mainline_continued_core_codes"),
+            "mainline_as_of_date": best.get("mainline_as_of_date"),
+            "mainline_previous_as_of_date": best.get("mainline_previous_as_of_date"),
             "mainline_state_streak": best.get("mainline_state_streak"),
             "mainline_score_change": best.get("mainline_score_change"),
             "strong_stock_count": best.get("strong_stock_count"),
@@ -2165,11 +2224,14 @@ def main():
         news_snapshot = fetch_sector_tide_news_precheck(news_shortlist)
         niuone_context = build_niuone_context(
             prepared_items,
+            reference_pool_count=len(reference_candidates),
             market_snapshot=market_snapshot,
             flow_rows=sector_tide_flow_rows,
             previous_context=previous_niuone_context,
             dragon_tiger_snapshot=dragon_tiger_snapshot,
             news_snapshot=news_snapshot,
+            as_of_date=niuone_as_of_date,
+            previous_trading_day=niuone_previous_trading_day,
         )
         niuone_context["industry_money_flow"] = sector_tide_flow_rows
         niuone_context["reference_stock_universe"] = list(reference_stock_universe)
@@ -2258,6 +2320,8 @@ def main():
         }
     json_str = json.dumps(output, ensure_ascii=False, indent=2)
     print(json_str)
+    if niuone_context is not None:
+        write_niuone_mainline_cache(NIUONE_MAINLINE_CACHE, output)
     write_outputs(json_str, generated_at)
 
 

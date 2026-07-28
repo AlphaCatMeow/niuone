@@ -199,7 +199,7 @@ STRATEGY_DEFINITIONS: dict[str, dict[str, Any]] = {
     "niu_leader": {
         "label": "牛牛领航",
         "color": "#8b5cf6",
-        "desc": "已确认市场主线中的核心强势股突破或首次缩量回踩",
+        "desc": "跨交易日确认的市场主线中，核心强势股突破或首次缩量回踩",
         "family": "persona",
         "persona": "niuone",
         "scorer": "score_niu_leader",
@@ -209,7 +209,7 @@ STRATEGY_DEFINITIONS: dict[str, dict[str, Any]] = {
         "profile": {
             "priority": 91,
             "entry_threshold": 8.0,
-            "score_basis": "主线确认/强股共振/核心地位/买点质量",
+            "score_basis": "跨日主线确认/核心股延续/买点质量/拒绝追高",
             "position_hint": "按有效损失距离动态定仓，单票绝对上限30%",
             "time_stop": "5个交易日未创新高或主线连续转弱退出",
             "certainty_rank": 1,
@@ -239,7 +239,7 @@ STRATEGY_DEFINITIONS: dict[str, dict[str, Any]] = {
     "niu_emerging": {
         "label": "牛牛启动",
         "color": "#c084fc",
-        "desc": "多只强势股共同指向的新主线，以小仓等待二次确认",
+        "desc": "跨交易日延续但尚未升级主线的强势主题，以小仓等待确认",
         "family": "persona",
         "persona": "niuone",
         "scorer": "score_niu_emerging",
@@ -249,7 +249,7 @@ STRATEGY_DEFINITIONS: dict[str, dict[str, Any]] = {
         "profile": {
             "priority": 76,
             "entry_threshold": 8.4,
-            "score_basis": "新主线启动/至少双强股确认/小仓验证",
+            "score_basis": "跨日主题延续/至少双核心股连续/小仓验证",
             "position_hint": "观察仓，单票绝对上限15%，次日确认后才允许加仓",
             "time_stop": "T+2未升级为确认主线则退出",
             "certainty_rank": 3,

@@ -1,0 +1,372 @@
+<script setup>
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { useNiuOneMainlineData } from '../composables/useNiuOneMainlineData.js'
+
+const {
+  state,
+  activateNiuOneMainline,
+  deactivateNiuOneMainline,
+  refreshNiuOneMainline,
+} = useNiuOneMainlineData()
+
+const activeFilter = ref('all')
+const payload = computed(() => state.payload || {})
+const market = computed(() => payload.value.market || {})
+const mainline = computed(() => payload.value.mainline || {})
+const themes = computed(() => Array.isArray(payload.value.themes) ? payload.value.themes : [])
+const defensiveMarket = computed(() => (
+  market.value.hard_stop === true
+  || market.value.state === 'defensive'
+  || market.value.raw_state === 'defensive'
+))
+const confirmedCount = computed(() => themes.value.filter(theme => theme.mainline_confirmed).length)
+const intradayCount = computed(() => themes.value.filter(theme => (
+  theme.intraday_state === 'intraday_mainline' || theme.raw_state === 'intraday_mainline'
+)).length)
+const coveragePct = computed(() => {
+  const coverage = Number(payload.value.data_quality?.coverage)
+  return Number.isFinite(coverage) ? Math.round(coverage * 1000) / 10 : null
+})
+const coverageReasons = computed(() => (
+  Array.isArray(payload.value.data_quality?.uncovered_reasons)
+    ? payload.value.data_quality.uncovered_reasons
+    : []
+))
+const filters = computed(() => [
+  { key: 'all', label: '强度前5', count: themes.value.length },
+  { key: 'confirmed', label: '已确认', count: confirmedCount.value },
+  { key: 'intraday', label: '日内观察', count: intradayCount.value },
+  { key: 'emerging', label: '酝酿中', count: themes.value.filter(theme => theme.state === 'emerging').length },
+])
+const filteredThemes = computed(() => themes.value.filter(theme => {
+  if (activeFilter.value === 'confirmed') return theme.mainline_confirmed === true
+  if (activeFilter.value === 'intraday') {
+    return theme.intraday_state === 'intraday_mainline' || theme.raw_state === 'intraday_mainline'
+  }
+  if (activeFilter.value === 'emerging') return theme.state === 'emerging'
+  return true
+}))
+
+function numeric(value, digits = 1) {
+  const number = Number(value)
+  return Number.isFinite(number) ? number.toFixed(digits) : '--'
+}
+
+function signed(value, suffix = '') {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return '--'
+  return `${number > 0 ? '+' : ''}${number.toFixed(1)}${suffix}`
+}
+
+function percent(value) {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return '--'
+  return `${Math.round(number * 100)}%`
+}
+
+function effectiveBreadthTitle(theme) {
+  const breadth = numeric(theme.effective_breadth_pct)
+  const effective = numeric(theme.effective_strong_count)
+  const members = Number(theme.member_count)
+  const sample = Number.isFinite(members) && members > 0 ? `${members}只` : '待补充'
+  return `有效广度 ${breadth}% · 等效强势股 ${effective}只 / 有效样本 ${sample}`
+}
+
+function marketLabel(value) {
+  return {
+    offensive: '进攻', balanced: '均衡', cautious: '谨慎', defensive: '防守',
+  }[value] || value || '待评估'
+}
+
+function stateLabel(theme) {
+  if (theme.mainline_confirmed) return '已确认主线'
+  if (theme.intraday_state === 'intraday_mainline' || theme.raw_state === 'intraday_mainline') return '日内观察'
+  return {
+    emerging: '酝酿中', diverging: '分歧', fading: '退潮', none: '未成线',
+  }[theme.state] || theme.state || '未成线'
+}
+
+function themeTone(theme) {
+  if (theme.mainline_confirmed) return 'confirmed'
+  if (theme.intraday_state === 'intraday_mainline' || theme.raw_state === 'intraday_mainline') return 'intraday'
+  if (theme.state === 'emerging') return 'emerging'
+  return 'neutral'
+}
+
+onMounted(activateNiuOneMainline)
+onBeforeUnmount(deactivateNiuOneMainline)
+</script>
+
+<template>
+  <div class="mainline-page">
+    <section class="mainline-hero">
+      <div class="mainline-heading">
+        <div>
+          <h2>题材强度雷达</h2>
+          <p>用全市场强势股聚类追踪题材延续性；覆盖范围独立于设置中的选股范围，仅用于题材研究。</p>
+        </div>
+        <div class="mainline-actions">
+          <span class="mainline-time">{{ payload.generated_at || '尚无扫描时间' }}</span>
+          <button type="button" :disabled="state.loading" @click="refreshNiuOneMainline">
+            {{ state.loading ? '读取中…' : '刷新数据' }}
+          </button>
+        </div>
+      </div>
+
+      <div v-if="state.error" class="mainline-notice error" role="alert">
+        主线数据读取失败：{{ state.error }}
+      </div>
+      <div v-if="state.loading && !state.loaded" class="mainline-loading">正在读取题材强度快照…</div>
+      <div v-else-if="!payload.available" class="mainline-empty">
+        <strong>尚无题材强度扫描结果</strong>
+        <span>运行一次牛牛战法选股后，此页会独立保留主线状态，不受当前所选策略切换影响。</span>
+      </div>
+
+      <template v-else>
+        <div class="mainline-summary-grid">
+          <article class="mainline-summary-card primary" :class="{ empty: !mainline.primary }">
+            <span>跨日确认主线</span>
+            <strong>{{ mainline.primary || '暂无' }}</strong>
+            <small>{{ mainline.primary ? `强度 ${numeric(mainline.primary_score)}` : '未满足连续交易日与核心股重合条件' }}</small>
+          </article>
+          <article class="mainline-summary-card intraday" :class="{ empty: !mainline.intraday_primary }">
+            <span>日内观察主线</span>
+            <strong>{{ mainline.intraday_primary || '暂无' }}</strong>
+            <small>{{ mainline.intraday_primary ? `当日强度 ${numeric(mainline.intraday_primary_score)}` : '当前没有达到日内主线阈值的题材' }}</small>
+          </article>
+          <article class="mainline-summary-card" :class="defensiveMarket ? 'risk' : 'positive'">
+            <span>市场状态</span>
+            <strong>{{ marketLabel(market.state) }} · {{ numeric(market.score, 0) }}分</strong>
+            <small>涨停 {{ market.limit_up || 0 }} · 跌停 {{ market.limit_down || 0 }} · 中位涨幅 {{ signed(market.median_change_pct, '%') }}</small>
+          </article>
+          <article class="mainline-summary-card coverage-card">
+            <div class="coverage-label-row">
+              <span>题材有效覆盖</span>
+              <div v-if="coverageReasons.length" class="coverage-info">
+                <button
+                  type="button"
+                  aria-label="查看未覆盖原因"
+                  aria-describedby="coverageReasonPopover"
+                >
+                  <svg viewBox="0 0 20 20" aria-hidden="true">
+                    <circle cx="10" cy="10" r="8"></circle>
+                    <path d="M10 9v5M10 6.2v.1"></path>
+                  </svg>
+                </button>
+                <div id="coverageReasonPopover" class="coverage-popover" role="tooltip">
+                  <strong>未覆盖原因</strong>
+                  <div
+                    v-for="reason in coverageReasons"
+                    :key="reason.key || reason.label"
+                    class="coverage-popover-row"
+                  >
+                    <span>{{ reason.label }}</span>
+                    <b>{{ reason.count }}只</b>
+                    <small v-if="reason.description">{{ reason.description }}</small>
+                  </div>
+                  <footer>各项按扫描阶段互斥归类，合计等于未覆盖股票数。</footer>
+                </div>
+              </div>
+            </div>
+            <strong>{{ payload.data_quality?.mapped_stock_count || 0 }} / {{ payload.data_quality?.reference_pool_count || 0 }}</strong>
+            <small>{{ coveragePct == null ? '覆盖率待计算' : `覆盖 ${coveragePct}% · 未覆盖 ${payload.data_quality?.unmapped_stock_count || 0} 只` }}</small>
+          </article>
+        </div>
+
+        <div class="mainline-notice" :class="defensiveMarket ? 'warning' : 'info'">
+          <strong>{{ defensiveMarket ? '防守环境：仅作观察' : '题材研究视图' }}</strong>
+          <span v-if="mainline.observation_reason">{{ mainline.observation_reason }}</span>
+          <span v-else-if="mainline.reason">{{ mainline.reason }}</span>
+          <span v-else>题材强度用于建立全市场观察顺序，不代表交易候选或买入信号。</span>
+        </div>
+      </template>
+    </section>
+
+    <template v-if="payload.available">
+      <section class="mainline-section">
+        <div class="mainline-section-head">
+          <div>
+            <h3>题材强度榜</h3>
+            <p>排名体现当前强势聚类；“日内观察”不是买入信号。</p>
+          </div>
+          <div class="mainline-filters" role="group" aria-label="主线状态筛选">
+            <button
+              v-for="filter in filters"
+              :key="filter.key"
+              type="button"
+              :class="{ active: activeFilter === filter.key }"
+              :aria-pressed="activeFilter === filter.key"
+              @click="activeFilter = filter.key"
+            >{{ filter.label }} <span>{{ filter.count }}</span></button>
+          </div>
+        </div>
+
+        <div v-if="!filteredThemes.length" class="mainline-empty compact">当前筛选条件下没有题材。</div>
+        <div v-else class="theme-table" role="table" aria-label="题材强度排名">
+          <div class="theme-table-head" role="row">
+            <span role="columnheader">题材</span>
+            <span class="theme-column-help" role="columnheader" tabindex="0" data-tooltip="0–100分的题材综合评分，包含强股、广度、龙头、资金和延续性。" aria-label="强度：0到100分的题材综合评分，包含强股、广度、龙头、资金和延续性。">强度</span>
+            <span role="columnheader">强势股</span>
+            <span class="theme-column-help" role="columnheader" tabindex="0" data-tooltip="等效强势股数 ÷ 题材有效样本数，归一化后用于不同规模题材间比较。" aria-label="有效广度：等效强势股数除以题材有效样本数，归一化后用于不同规模题材间比较。">有效广度</span>
+            <span class="theme-column-help" role="columnheader" tabindex="0" data-tooltip="与上一相邻交易日重合的核心强势股数量及比例。" aria-label="核心延续：与上一相邻交易日重合的核心强势股数量及比例。">核心延续</span>
+            <span role="columnheader">代表股</span>
+            <span class="theme-column-help" role="columnheader" tabindex="0" data-tooltip="展示是否形成跨日延续，以及行业主力资金净额或数据状态。" aria-label="延续与资金：展示是否形成跨日延续，以及行业主力资金净额或数据状态。">延续与资金</span>
+          </div>
+          <article
+            v-for="(theme, index) in filteredThemes"
+            :key="theme.industry"
+            class="theme-row"
+            :class="themeTone(theme)"
+            role="row"
+          >
+            <div class="theme-identity" role="cell">
+              <span class="theme-rank">{{ String(themes.indexOf(theme) + 1 || index + 1).padStart(2, '0') }}</span>
+              <div>
+                <h4>{{ theme.industry }}</h4>
+                <span class="theme-state">{{ stateLabel(theme) }}</span>
+              </div>
+            </div>
+            <div class="theme-score" role="cell">
+              <strong>{{ numeric(theme.score) }}</strong>
+              <small>{{ signed(theme.score_change) }}</small>
+            </div>
+            <div class="theme-data-cell" data-label="强势股" role="cell"><strong>{{ theme.strong_stock_count }}</strong><small>只</small></div>
+            <div
+              class="theme-data-cell"
+              data-label="有效广度"
+              role="cell"
+              :title="effectiveBreadthTitle(theme)"
+              :aria-label="effectiveBreadthTitle(theme)"
+            ><strong>{{ numeric(theme.effective_breadth_pct) }}%</strong></div>
+            <div class="theme-data-cell continuity" data-label="核心延续" role="cell"><strong>{{ theme.core_overlap_count }}只</strong><small>{{ percent(theme.core_overlap_ratio) }}</small></div>
+            <div class="theme-stock-list" data-label="代表股" role="cell">
+              <template v-if="theme.strong_stocks?.length">
+                <span v-for="stock in theme.strong_stocks" :key="stock.code" :title="`${stock.code} · 强度 ${numeric(stock.strong_score)}`">{{ stock.name || stock.code }}</span>
+              </template>
+              <span v-else>—</span>
+            </div>
+            <div class="theme-context" role="cell">
+              <strong>{{ theme.cross_day_persistent ? '连续出现' : '尚未跨日' }}</strong>
+              <small v-if="theme.single_stock_dominated" class="risk-text">单股主导</small>
+              <small v-else-if="theme.flow_net_yi != null">主力净额 {{ signed(theme.flow_net_yi, '亿') }}</small>
+              <small v-else>资金数据待补充</small>
+            </div>
+          </article>
+        </div>
+      </section>
+
+    </template>
+  </div>
+</template>
+
+<style scoped>
+.mainline-page { display:grid; gap:16px; color:var(--text); }
+.mainline-hero,.mainline-section { border:1px solid var(--line); border-radius:18px; background:var(--panel); box-shadow:0 8px 28px rgba(15,23,42,.055); }
+.mainline-hero { padding:20px; }
+.mainline-heading,.mainline-section-head { display:flex; align-items:center; justify-content:space-between; gap:14px; }
+.mainline-heading { align-items:flex-start; }
+.mainline-heading h2 { margin:0 0 5px; font-size:26px; line-height:1.2; }
+.mainline-heading p,.mainline-section-head p { margin:0; color:var(--muted); font-size:13px; line-height:1.65; }
+.mainline-actions { display:flex; align-items:center; gap:10px; flex-shrink:0; }
+.mainline-time { color:var(--muted); font-size:12px; white-space:nowrap; }
+.mainline-actions button,.mainline-filters button { border:1px solid var(--line); border-radius:10px; background:var(--panel2); color:var(--text); font:inherit; cursor:pointer; }
+.mainline-actions button { min-height:36px; padding:0 13px; font-size:13px; font-weight:750; }
+.mainline-actions button:hover,.mainline-filters button:hover { border-color:var(--accent-border); background:var(--accent-soft); }
+.mainline-actions button:disabled { cursor:wait; opacity:.65; }
+.mainline-summary-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin-top:18px; }
+.mainline-summary-card { min-width:0; padding:15px; border:1px solid var(--line); border-radius:14px; background:var(--panel2); }
+.mainline-summary-card > span { display:block; color:var(--muted); font-size:12px; }
+.mainline-summary-card strong { display:block; overflow:hidden; margin:7px 0 4px; font-size:18px; line-height:1.25; text-overflow:ellipsis; white-space:nowrap; }
+.mainline-summary-card small { display:block; color:var(--muted); font-size:11px; line-height:1.45; }
+.mainline-summary-card.primary { border-color:var(--red-border); background:var(--red-soft); }
+.mainline-summary-card.intraday { border-color:var(--yellow-border); background:var(--yellow-soft); }
+.mainline-summary-card.positive { border-color:var(--green-border); background:var(--green-soft); }
+.mainline-summary-card.risk { border-color:var(--red-border); background:var(--red-soft); }
+.mainline-summary-card.empty strong { color:var(--muted); }
+.coverage-card { position:relative; }
+.coverage-label-row { display:flex; align-items:center; gap:7px; color:var(--muted); font-size:12px; }
+.coverage-info { display:inline-flex; align-items:center; }
+.coverage-info > button { display:grid; width:20px; height:20px; place-items:center; padding:0; border:0; border-radius:999px; background:transparent; color:var(--accent); cursor:pointer; }
+.coverage-info > button:hover,.coverage-info > button:focus-visible { background:var(--accent-soft); outline:none; box-shadow:0 0 0 2px var(--accent-border); }
+.coverage-info svg { width:19px; height:19px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; }
+.coverage-popover { position:absolute; z-index:20; top:35px; right:10px; left:10px; display:none; padding:12px; border:1px solid var(--accent-border); border-radius:12px; background:var(--panel); color:var(--text); box-shadow:0 16px 34px rgba(15,23,42,.2); }
+.coverage-info:hover .coverage-popover,.coverage-info:focus-within .coverage-popover { display:block; }
+.coverage-popover > strong { display:block; margin-bottom:8px; color:var(--text); font-size:12px; }
+.coverage-popover-row { display:grid; grid-template-columns:1fr auto; gap:2px 10px; padding:7px 0; border-top:1px solid var(--line); }
+.coverage-popover-row > span { color:var(--text); font-size:11px; }
+.coverage-popover-row > b { color:var(--accent-text); font-size:11px; font-variant-numeric:tabular-nums; }
+.coverage-popover-row > small { grid-column:1 / -1; color:var(--muted); font-size:9px; line-height:1.45; }
+.coverage-popover footer { margin-top:6px; color:var(--muted); font-size:9px; line-height:1.45; }
+.mainline-notice { display:flex; align-items:flex-start; gap:10px; margin-top:12px; padding:11px 13px; border:1px solid var(--accent-border); border-radius:12px; background:var(--accent-soft); color:var(--accent-text); font-size:12px; line-height:1.55; }
+.mainline-notice strong { flex-shrink:0; }
+.mainline-notice.warning,.mainline-notice.error { border-color:var(--red-border); background:var(--red-soft); color:var(--red-text); }
+.mainline-loading,.mainline-empty { display:flex; min-height:150px; align-items:center; justify-content:center; flex-direction:column; gap:7px; color:var(--muted); text-align:center; }
+.mainline-empty strong { color:var(--text); font-size:17px; }
+.mainline-empty.compact { min-height:80px; }
+.mainline-section { padding:18px; }
+.mainline-section-head { align-items:flex-end; margin-bottom:14px; }
+.mainline-section-head h3 { margin:0 0 3px; font-size:18px; }
+.mainline-filters { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:6px; }
+.mainline-filters button { padding:7px 10px; color:var(--muted); font-size:12px; }
+.mainline-filters button span { margin-left:3px; font-variant-numeric:tabular-nums; }
+.mainline-filters button.active { border-color:var(--accent-border); background:var(--accent-soft); color:var(--accent-text); font-weight:750; }
+.theme-table { overflow:visible; border:1px solid var(--line); border-radius:10px; }
+.theme-table-head,.theme-row { display:grid; grid-template-columns:minmax(150px,1.15fr) 68px 62px 78px 84px minmax(170px,1.4fr) minmax(118px,.9fr); align-items:center; column-gap:14px; }
+.theme-table-head { position:relative; z-index:2; padding:9px 12px; border-radius:9px 9px 0 0; background:var(--panel2); color:var(--muted); font-size:10px; font-weight:700; letter-spacing:.02em; }
+.theme-column-help { position:relative; width:max-content; max-width:100%; cursor:help; outline:none; }
+.theme-column-help::after { content:attr(data-tooltip); position:absolute; z-index:5; top:calc(100% + 9px); left:0; width:max-content; max-width:250px; padding:8px 10px; border:1px solid var(--line); border-radius:6px; background:var(--text); color:var(--panel); box-shadow:0 8px 18px rgba(15,23,42,.16); font-size:11px; font-weight:500; letter-spacing:0; line-height:1.5; white-space:normal; opacity:0; pointer-events:none; transform:translateY(-3px); transition:opacity .12s ease,transform .12s ease; }
+.theme-column-help:hover::after,.theme-column-help:focus::after { opacity:1; transform:translateY(0); }
+.theme-column-help:focus-visible { color:var(--accent-text); }
+.theme-column-help:nth-last-child(-n+2)::after { right:0; left:auto; }
+.theme-row { min-height:72px; padding:11px 12px; border-top:1px solid var(--line); background:var(--panel); transition:background-color .15s ease; }
+.theme-row:last-child { border-radius:0 0 9px 9px; }
+.theme-row:hover { background:var(--panel2); }
+.theme-identity { display:flex; min-width:0; align-items:center; gap:10px; }
+.theme-identity > div { min-width:0; }
+.theme-rank { width:22px; flex:0 0 22px; color:var(--muted); font-size:11px; font-variant-numeric:tabular-nums; }
+.theme-identity h4 { overflow:hidden; margin:0 0 4px; font-size:14px; line-height:1.2; text-overflow:ellipsis; white-space:nowrap; }
+.theme-state { display:flex; align-items:center; gap:5px; color:var(--muted); font-size:10px; white-space:nowrap; }
+.theme-state::before { content:""; width:6px; height:6px; flex:0 0 6px; border-radius:50%; background:var(--muted); opacity:.7; }
+.theme-row.confirmed .theme-state { color:var(--red-text); }
+.theme-row.confirmed .theme-state::before { background:var(--red); opacity:1; }
+.theme-row.intraday .theme-state { color:var(--yellow-text); }
+.theme-row.intraday .theme-state::before { background:var(--yellow); opacity:1; }
+.theme-row.emerging .theme-state { color:var(--accent-text); }
+.theme-row.emerging .theme-state::before { background:var(--accent); opacity:1; }
+.theme-score,.theme-data-cell,.theme-context { min-width:0; }
+.theme-score strong { display:block; font-size:18px; line-height:1.1; font-variant-numeric:tabular-nums; }
+.theme-score small,.theme-data-cell small,.theme-context small { display:block; margin-top:4px; color:var(--muted); font-size:9px; line-height:1.3; }
+.theme-data-cell strong { font-size:13px; font-variant-numeric:tabular-nums; }
+.theme-stock-list { overflow:hidden; min-width:0; color:var(--text); font-size:11px; line-height:1.55; text-overflow:ellipsis; }
+.theme-stock-list > span { white-space:nowrap; }
+.theme-stock-list > span:not(:last-child)::after { content:"、"; color:var(--muted); }
+.theme-context { text-align:right; }
+.theme-context strong { display:block; font-size:11px; font-weight:650; }
+.theme-context .risk-text { color:var(--red-text); }
+@media (max-width:1050px) {
+  .mainline-summary-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .theme-table-head,.theme-row { grid-template-columns:minmax(130px,1.1fr) 62px 56px 72px 78px minmax(130px,1.2fr) minmax(108px,.8fr); column-gap:9px; }
+}
+@media (max-width:720px) {
+  .mainline-hero,.mainline-section { padding:14px; border-radius:14px; }
+  .mainline-heading,.mainline-section-head { align-items:stretch; flex-direction:column; }
+  .mainline-actions { justify-content:space-between; }
+  .mainline-summary-grid { grid-template-columns:1fr; }
+  .mainline-notice { flex-direction:column; gap:3px; }
+  .mainline-filters { justify-content:flex-start; overflow:auto; flex-wrap:nowrap; padding-bottom:2px; }
+  .mainline-filters button { flex-shrink:0; }
+  .theme-table { overflow:visible; border-width:1px 0 0; border-radius:0; }
+  .theme-table-head { display:none; }
+  .theme-row { grid-template-columns:minmax(0,1fr) auto; gap:10px 16px; min-height:0; padding:14px 0; }
+  .theme-identity { grid-column:1; }
+  .theme-score { grid-column:2; text-align:right; }
+  .theme-data-cell { display:flex; grid-column:span 1; align-items:baseline; justify-content:space-between; gap:8px; padding-top:9px; border-top:1px solid var(--line); }
+  .theme-data-cell::before { content:attr(data-label); color:var(--muted); font-size:10px; }
+  .theme-data-cell small { display:inline; margin:0 0 0 2px; }
+  .theme-stock-list,.theme-context { grid-column:1 / -1; }
+  .theme-stock-list { padding-top:9px; border-top:1px solid var(--line); }
+  .theme-stock-list::before { content:attr(data-label) "  "; color:var(--muted); font-size:10px; }
+  .theme-context { display:flex; justify-content:space-between; text-align:left; }
+  .theme-context small { margin:0; }
+}
+</style>

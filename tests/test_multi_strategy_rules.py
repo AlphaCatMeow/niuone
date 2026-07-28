@@ -4,6 +4,7 @@ import os
 import sys
 import threading
 import time
+import tempfile
 import types
 import unittest
 import urllib.error
@@ -99,6 +100,56 @@ class MultiStrategyRuleTests(unittest.TestCase):
         selected = screen.filter_niuone_reference_candidates(candidates, keys, quotes)
 
         self.assertEqual([item[0] for item in selected], ["600001", "300001", "688001"])
+
+    def test_niuone_dates_follow_quote_date_and_exact_previous_trading_day(self):
+        status_calls = []
+
+        def status_loader(value, *, allow_refresh=True):
+            status_calls.append((value, allow_refresh))
+            return {"previous_trading_day": "2026-07-24"}
+
+        current, previous = screen.resolve_niuone_trading_dates(
+            [
+                {
+                    "quote": {"quote_time": "20260727103000"},
+                    "rows": [{"date": "2026-07-24"}],
+                },
+                {
+                    "quote": {"quote_time": "20260727103100"},
+                    "rows": [{"date": "2026-07-24"}],
+                },
+            ],
+            status_loader=status_loader,
+        )
+
+        self.assertEqual((current, previous), ("2026-07-27", "2026-07-24"))
+        self.assertEqual(status_calls, [("2026-07-27", False)])
+
+    def test_niuone_previous_context_prefers_independent_cache(self):
+        with tempfile.TemporaryDirectory(prefix="niuone-context-") as directory:
+            root = Path(directory)
+            dedicated = root / "niuone_mainline_latest.json"
+            shared = root / "multi_strategy_latest.json"
+            dedicated.write_text(
+                '{"generated_at":"2026-07-28 10:00:00","niuone_context":{"as_of_date":"2026-07-28","mainline":{"primary":"银行"}}}',
+                encoding="utf-8",
+            )
+            shared.write_text(
+                '{"generated_at":"2026-07-29 10:00:00","niuone_context":{"as_of_date":"2026-07-29","mainline":{"primary":"证券"}}}',
+                encoding="utf-8",
+            )
+            original_dedicated = screen.NIUONE_MAINLINE_CACHE
+            original_shared = screen.MULTI_STRATEGY_CACHE
+            try:
+                screen.NIUONE_MAINLINE_CACHE = dedicated
+                screen.MULTI_STRATEGY_CACHE = shared
+                context = screen.load_previous_niuone_context()
+            finally:
+                screen.NIUONE_MAINLINE_CACHE = original_dedicated
+                screen.MULTI_STRATEGY_CACHE = original_shared
+
+        self.assertEqual(context["as_of_date"], "2026-07-28")
+        self.assertEqual(context["mainline"]["primary"], "银行")
 
     @staticmethod
     def _tencent_quote_response():

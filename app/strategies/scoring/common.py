@@ -163,6 +163,8 @@ def strategy_hard_blockers(strategy_name: str, payload: dict[str, Any]) -> list[
                 blockers.append("牛牛领航仅用于进攻/轮动行情")
             if status != "mainline":
                 blockers.append("主题尚未确认为市场主线")
+            if not payload.get("mainline_cross_day_confirmed"):
+                blockers.append("主线未完成跨交易日核心股延续确认")
             if not payload.get("mainline_selected"):
                 blockers.append("主题未进入当前主线/双主线")
             if payload.get("single_stock_dominated"):
@@ -171,13 +173,17 @@ def strategy_hard_blockers(strategy_name: str, payload: dict[str, Any]) -> list[
                 blockers.append("个股不是主线核心强股")
             if not (payload.get("breakout") or payload.get("pullback")):
                 blockers.append("未形成突破/首次缩量回踩")
-            if extension is not None and extension > 1.6:
-                blockers.append("距EMA20超过1.6ATR")
+            if change is not None and change > 4:
+                blockers.append("领航战法单日涨幅>4%")
+            if extension is not None and extension > 1:
+                blockers.append("领航战法距EMA20超过1ATR")
         elif strategy_name == "niu_pullback":
             if regime not in {"offensive", "rotation", "recovery"}:
                 blockers.append("市场状态不允许主线回踩")
             if status not in {"mainline", "diverging"} or (safe_float(payload.get("mainline_score")) or 0) < 70:
                 blockers.append("主线强度不足")
+            if not payload.get("mainline_confirmed"):
+                blockers.append("主题没有有效的跨交易日主线确认记录")
             if status == "mainline" and not payload.get("mainline_selected"):
                 blockers.append("主题未进入当前主线/双主线")
             if rank < 70:
@@ -193,6 +199,8 @@ def strategy_hard_blockers(strategy_name: str, payload: dict[str, Any]) -> list[
                 blockers.append("市场状态不允许启动观察仓")
             if status != "emerging":
                 blockers.append("主题不是待确认新主线")
+            if not payload.get("mainline_cross_day_persistent"):
+                blockers.append("启动主题尚未跨交易日延续")
             if int(safe_float(payload.get("strong_stock_count")) or 0) < 2:
                 blockers.append("少于两只强势股共同确认")
             if payload.get("single_stock_dominated"):

@@ -17,6 +17,7 @@ class DashboardSources(Protocol):
     def benchmarks(self) -> dict[str, Any]: ...
     def messages(self) -> dict[str, Any]: ...
     def market_summary(self) -> dict[str, Any]: ...
+    def niuone_mainline(self) -> dict[str, Any]: ...
 
 
 @dataclass(slots=True)
@@ -40,6 +41,9 @@ class LegacyDashboardSources:
     def market_summary(self) -> dict[str, Any]:
         return self.legacy.get_practice_market_summary_status()
 
+    def niuone_mainline(self) -> dict[str, Any]:
+        return self.legacy.load_niuone_mainline_cache_payload()
+
 
 class ProjectionService:
     """Refresh public projections independently from browser request traffic."""
@@ -58,12 +62,14 @@ class ProjectionService:
         with self._refresh_lock:
             practice = self.sources.practice()
             failures: set[str] = set()
+            niuone_mainline_reader = getattr(self.sources, "niuone_mainline", lambda: {})
             sections = build_public_sections(
                 practice,
                 candidates=self._read_optional("candidates", self.sources.candidates, failures),
                 benchmarks=self._read_optional("benchmarks", self.sources.benchmarks, failures),
                 messages=self._read_optional("messages", self.sources.messages, failures),
                 market_summary=self._read_optional("market_summary", self.sources.market_summary, failures),
+                niuone_mainline=self._read_optional("niuone_mainline", niuone_mainline_reader, failures),
             )
             for name in failures:
                 previous = self._previous_section(name)

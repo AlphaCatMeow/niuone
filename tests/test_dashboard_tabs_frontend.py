@@ -65,6 +65,7 @@ console.log(JSON.stringify({{fetchCalls, initialMarketCount, counts}}));
                 "initialMarketCount": "",
                 "counts": {
                     "practice": "",
+                    "niuone_mainline": "",
                     "indices": "",
                     "market_monitor": " · 6",
                     "dragon_tiger": "",

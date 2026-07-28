@@ -38,6 +38,7 @@ GZIP_MIN_BYTES = int(os.environ.get("DASHBOARD_GZIP_MIN_BYTES", "1024") or "1024
 SPA_DASHBOARD_PATHS = (
     "/",
     "/practice",
+    "/niuone-mainline",
     "/indices",
     "/industry-flow",
     "/dragon-tiger",

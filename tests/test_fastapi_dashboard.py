@@ -82,7 +82,7 @@ class FastApiDashboardTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_vue_dashboard_and_admin_share_the_fastapi_port(self):
-        for path in ("/", "/practice", "/admin", "/admin/settings/notifications"):
+        for path in ("/", "/practice", "/niuone-mainline", "/admin", "/admin/settings/notifications"):
             with self.subTest(path=path):
                 response = self.client.get(path)
                 self.assertEqual(response.status_code, 200)
@@ -228,6 +228,7 @@ class FastApiDashboardTests(unittest.TestCase):
                 ),
                 ("/api/practice_candidates", "practice_candidates"),
                 ("/api/b1_screen", "practice_candidates"),
+                ("/api/niuone/mainline", "niuone_mainline"),
                 ("/api/niuniu_practice?fast=1", "niuniu_practice_fast:v2"),
                 ("/api/niuniu_practice", "niuniu_practice"),
                 ("/api/practice_benchmarks", "practice_benchmarks"),
@@ -277,6 +278,7 @@ class FastApiDashboardTests(unittest.TestCase):
             "iwencai_dragon_tiger:2026-07-16:2:10:0:0:0",
             "practice_candidates",
             "practice_candidates",
+            "niuone_mainline",
             "niuniu_practice_fast:v2",
             "niuniu_practice",
             "practice_benchmarks",

@@ -97,6 +97,8 @@ const tradeDiscipline = computed(() => [props.item.position_hint, props.item.tim
       <template v-else-if="niuoneStrategy">
         <span>市场 {{ item.market_regime || '--' }} {{ formatPracticeNumber(item.market_score) }}</span>
         <span>主线状态 {{ PRACTICE_TIDE_STATUS_LABELS[item.mainline_state] || item.mainline_state || '--' }} / {{ formatPracticeNumber(item.mainline_score) }}</span>
+        <span v-if="item.mainline_intraday_state === 'intraday_mainline'">日内强势观察 · 不直接触发买入</span>
+        <span>跨日确认 {{ item.mainline_cross_day_confirmed ? '已完成' : '待完成' }} · 延续核心股 {{ item.mainline_core_overlap_count ?? 0 }}只</span>
         <span>主线模式 {{ item.mainline_mode || 'none' }} · 核心 {{ item.mainline_primary || '--' }}<template v-if="item.mainline_secondary"> / {{ item.mainline_secondary }}</template></span>
         <span>强股 {{ item.strong_stock_count ?? '--' }} · 有效强股 {{ formatPracticeNumber(item.effective_strong_count) }}</span>
         <span>龙头集中度 {{ formatPracticeNumber(Number(item.leader_concentration) * 100) }}%</span>

@@ -11,8 +11,10 @@ import math
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from app.dashboard.niuone_mainline import build_niuone_mainline_view
 
-PUBLIC_SCHEMA_VERSION = 3
+
+PUBLIC_SCHEMA_VERSION = 4
 
 ACCOUNT_FIELDS = (
     "initial_cash",
@@ -233,6 +235,7 @@ def build_public_sections(
     benchmarks: Mapping[str, Any] | None = None,
     messages: Mapping[str, Any] | None = None,
     market_summary: Mapping[str, Any] | None = None,
+    niuone_mainline: Mapping[str, Any] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Return independently cacheable, sanitised presentation sections."""
 
@@ -302,6 +305,7 @@ def build_public_sections(
         "generated_at": _public_scalar(market_summary.get("generated_at") or ""),
         "status": _public_scalar(market_summary.get("stage") or market_summary.get("status") or ""),
     }
+    niuone_mainline_section = build_niuone_mainline_view(niuone_mainline)
     return {
         "metadata": metadata,
         "account": account,
@@ -311,4 +315,5 @@ def build_public_sections(
         "benchmarks": benchmark_section,
         "messages": message_section,
         "market_summary": summary_section,
+        "niuone_mainline": niuone_mainline_section,
     }

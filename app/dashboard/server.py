@@ -26,6 +26,7 @@ from a_share_calendar import is_a_share_trading_day as calendar_is_a_share_tradi
 from dashboard_json_cache import read_json_cache, write_json_cache
 from dashboard import practice_payload as practice_payload_impl
 from dashboard import practice_market_summary as practice_market_summary_impl
+from dashboard.niuone_mainline import build_niuone_mainline_view
 from dashboard import response_cache as response_cache_impl
 from dashboard import security as security_impl
 from dashboard import visit_stats as visit_stats_impl
@@ -159,6 +160,7 @@ IWENCAI_DRAGON_TIGER_SNAPSHOT_FILE = Path(
     or CRON_OUTPUT_DIR / "iwencai_dragon_tiger_latest.json"
 ).expanduser()
 B1_CACHE_FILE = CRON_OUTPUT_DIR / "b1_screen_latest.json"
+NIUONE_MAINLINE_CACHE_FILE = CRON_OUTPUT_DIR / "niuone_mainline_latest.json"
 MONEY_FLOW_SNAPSHOT_FILE = CRON_OUTPUT_DIR / "industry_main_money_flow_cache.json"
 # Main-net samples use a new history file so legacy total-flow observations
 # remain recoverable but can never be replayed under the new metric label.
@@ -405,6 +407,7 @@ VISIT_STATS_LOCK = threading.RLock()
 VISIT_STATS_INIT_SIGNATURE: tuple[Any, ...] | None = None
 ENV_FILE_WRITE_LOCK = threading.RLock()
 PRACTICE_CANDIDATES_CACHE_KEY = "practice_candidates"
+NIUONE_MAINLINE_CACHE_KEY = "niuone_mainline"
 PRACTICE_CANDIDATES_API_PATHS = frozenset({"/api/practice_candidates", "/api/b1_screen"})
 PRACTICE_CANDIDATES_REFRESH_API_PATHS = frozenset({"/api/practice_candidates/refresh", "/api/b1_screen/trigger"})
 PRACTICE_MANUAL_CYCLE_API_PATH = "/api/niuniu_practice/manual-cycle"
@@ -417,6 +420,7 @@ API_TTLS = {
         or os.environ.get("DASHBOARD_B1_SCREEN_TTL_SECONDS")
         or "15"
     ),
+    "niuone_mainline": int(os.environ.get("DASHBOARD_NIUONE_MAINLINE_TTL_SECONDS", "15") or "15"),
     "niuniu_practice": int(os.environ.get("DASHBOARD_PRACTICE_TTL_SECONDS", "15") or "15"),
     "practice_benchmarks": 30,
     "indices": int(os.environ.get("DASHBOARD_INDICES_TTL_SECONDS", "60") or "60"),
@@ -1489,12 +1493,22 @@ def refresh_b1_candidate_cache_from_current_pool() -> dict[str, Any]:
                 "theme_basis": best.get("theme_basis"),
                 "mainline_state": best.get("mainline_state"),
                 "mainline_raw_state": best.get("mainline_raw_state"),
+                "mainline_intraday_state": best.get("mainline_intraday_state"),
                 "mainline_score": best.get("mainline_score"),
                 "mainline_mode": best.get("mainline_mode"),
                 "mainline_primary": best.get("mainline_primary"),
                 "mainline_secondary": best.get("mainline_secondary"),
                 "mainline_selected": best.get("mainline_selected"),
                 "mainline_confirmation_count": best.get("mainline_confirmation_count"),
+                "mainline_intraday_confirmation_count": best.get("mainline_intraday_confirmation_count"),
+                "mainline_cross_day_persistent": best.get("mainline_cross_day_persistent"),
+                "mainline_cross_day_confirmed": best.get("mainline_cross_day_confirmed"),
+                "mainline_confirmed": best.get("mainline_confirmed"),
+                "mainline_core_overlap_count": best.get("mainline_core_overlap_count"),
+                "mainline_core_overlap_ratio": best.get("mainline_core_overlap_ratio"),
+                "mainline_continued_core_codes": best.get("mainline_continued_core_codes"),
+                "mainline_as_of_date": best.get("mainline_as_of_date"),
+                "mainline_previous_as_of_date": best.get("mainline_previous_as_of_date"),
                 "mainline_state_streak": best.get("mainline_state_streak"),
                 "mainline_score_change": best.get("mainline_score_change"),
                 "strong_stock_count": best.get("strong_stock_count"),
@@ -1722,6 +1736,25 @@ def load_practice_candidates_cache() -> dict[str, Any]:
     if errors:
         return {"error": "; ".join(errors), "items": [], "count": 0, "generated_at": ""}
     return {"items": [], "count": 0, "generated_at": ""}
+
+
+def load_niuone_mainline_cache_payload() -> dict[str, Any]:
+    """Load the newest dedicated or migration-era NiuOne mainline payload."""
+    payloads: list[dict[str, Any]] = []
+    for cache_file in (NIUONE_MAINLINE_CACHE_FILE, MULTI_STRATEGY_CACHE_FILE, B1_CACHE_FILE):
+        try:
+            parsed = json.loads(cache_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            continue
+        if isinstance(parsed, dict) and isinstance(parsed.get("niuone_context"), dict):
+            payloads.append(parsed)
+    if not payloads:
+        return {}
+    return max(payloads, key=lambda payload: str(payload.get("generated_at") or ""))
+
+
+def load_niuone_mainline_view() -> dict[str, Any]:
+    return build_niuone_mainline_view(load_niuone_mainline_cache_payload())
 
 
 def summarize_b1_scan_failure(stderr: str, stdout: str, limit: int = 900) -> str:

@@ -406,6 +406,7 @@ class DashboardAuthTests(unittest.TestCase):
         expected_paths = {
             '/',
             '/practice',
+            '/niuone-mainline',
             '/indices',
             '/industry-flow',
             '/dragon-tiger',
@@ -2681,16 +2682,37 @@ console.log(JSON.stringify([
         dashboard_page = (
             ROOT / 'web' / 'src' / 'components' / 'DashboardPage.vue'
         ).read_text(encoding='utf-8')
+        mainline_page = (
+            ROOT / 'web' / 'src' / 'components' / 'NiuOneMainlinePanel.vue'
+        ).read_text(encoding='utf-8')
 
-        for route in ('/practice', '/indices', '/industry-flow', '/dragon-tiger', '/market-monitor', '/x-monitor', '/us-ratings'):
+        for route in ('/practice', '/niuone-mainline', '/indices', '/industry-flow', '/dragon-tiger', '/market-monitor', '/x-monitor', '/us-ratings'):
             self.assertIn(f"'{route}'", router_source)
-        self.assertIn("const CATEGORY_ORDER = ['practice', 'indices', 'market_monitor', 'dragon_tiger', 'x_monitor', 'us_ratings']", tabs_source)
+        self.assertIn("const CATEGORY_ORDER = ['practice', 'niuone_mainline', 'indices', 'market_monitor', 'dragon_tiger', 'x_monitor', 'us_ratings']", tabs_source)
+        self.assertIn("niuone_mainline: '题材强度'", tabs_source)
         self.assertIn("industry_flow: '/industry-flow'", tabs_source)
         self.assertIn("const LEGACY_CATEGORY_ALIASES = { b1_screen: 'practice' }", tabs_source)
         self.assertIn("fetch(`/api/iwencai/dragon-tiger${query}`", dragon_source)
         self.assertIn("const SORT_FIELDS = new Set(['name', 'sector', 'change_pct', 'net_amount_yuan'])", dragon_source)
         self.assertIn("record?.seat_category === 'institution'", dragon_source)
         self.assertIn('<PracticePanel />', dashboard_page)
+        self.assertIn('<NiuOneMainlinePanel />', dashboard_page)
+        self.assertNotIn('NIUONE THEME STRENGTH', mainline_page)
+        self.assertNotIn('.mainline-hero::before', mainline_page)
+        self.assertIn('aria-label="查看未覆盖原因"', mainline_page)
+        self.assertIn('class="coverage-popover" role="tooltip"', mainline_page)
+        self.assertNotIn('class="coverage-breakdown"', mainline_page)
+        self.assertIn('class="theme-table" role="table"', mainline_page)
+        self.assertEqual(mainline_page.count('class="theme-column-help" role="columnheader"'), 4)
+        self.assertIn('<span role="columnheader">题材</span>', mainline_page)
+        self.assertIn('<span role="columnheader">强势股</span>', mainline_page)
+        self.assertIn('<span role="columnheader">代表股</span>', mainline_page)
+        self.assertIn('data-tooltip="等效强势股数 ÷ 题材有效样本数', mainline_page)
+        self.assertIn('.theme-column-help:hover::after,.theme-column-help:focus::after', mainline_page)
+        self.assertIn('numeric(theme.effective_breadth_pct)', mainline_page)
+        self.assertNotIn('data-label="有效强度"', mainline_page)
+        self.assertNotIn('class="theme-card"', mainline_page)
+        self.assertNotIn('theme-score-track', mainline_page)
         self.assertIn('<DragonTigerPanel />', dashboard_page)
         self.assertIn('subscribePublicProjection(handleProjection)', PRACTICE_CANDIDATE_DATA)
         self.assertIn("fetchJson('/api/v2/public/latest'", PUBLIC_PROJECTION_DATA)
