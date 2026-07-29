@@ -10,7 +10,7 @@ except ModuleNotFoundError:  # Standalone entrypoints add app/ directly to sys.p
     from core.json_cache import read_json_cache, write_json_cache
 
 
-NIUONE_MAINLINE_CACHE_SCHEMA_VERSION = 2
+NIUONE_MAINLINE_CACHE_SCHEMA_VERSION = 3
 
 
 def build_niuone_mainline_cache_payload(scan: Mapping[str, Any]) -> dict[str, Any]:

@@ -10,6 +10,7 @@ const {
 } = useNiuOneMainlineData()
 
 const activeFilter = ref('all')
+const expandedTheme = ref('')
 const payload = computed(() => state.payload || {})
 const market = computed(() => payload.value.market || {})
 const mainline = computed(() => payload.value.mainline || {})
@@ -70,6 +71,31 @@ function effectiveBreadthTitle(theme) {
   const members = Number(theme.member_count)
   const sample = Number.isFinite(members) && members > 0 ? `${members}只` : '待补充'
   return `有效广度 ${breadth}% · 等效强势股 ${effective}只 / 有效样本 ${sample}`
+}
+
+function leaderStock(theme) {
+  if (theme?.leader_stock && typeof theme.leader_stock === 'object') return theme.leader_stock
+  return Array.isArray(theme?.strong_stocks) ? theme.strong_stocks[0] || null : null
+}
+
+function themeStocks(theme) {
+  return Array.isArray(theme?.strong_stocks) ? theme.strong_stocks : []
+}
+
+function stockChangeTone(value) {
+  const number = Number(value)
+  if (!Number.isFinite(number) || number === 0) return 'flat'
+  return number > 0 ? 'up' : 'down'
+}
+
+function themeStockPanelId(theme) {
+  const index = themes.value.indexOf(theme)
+  return `themeStocks${index >= 0 ? index : 0}`
+}
+
+function toggleThemeStocks(theme) {
+  const key = String(theme?.industry || '')
+  expandedTheme.value = expandedTheme.value === key ? '' : key
 }
 
 function marketLabel(value) {
@@ -209,14 +235,14 @@ onBeforeUnmount(deactivateNiuOneMainline)
             <span role="columnheader">强势股</span>
             <span class="theme-column-help" role="columnheader" tabindex="0" data-tooltip="等效强势股数 ÷ 题材有效样本数，归一化后用于不同规模题材间比较。" aria-label="有效广度：等效强势股数除以题材有效样本数，归一化后用于不同规模题材间比较。">有效广度</span>
             <span class="theme-column-help" role="columnheader" tabindex="0" data-tooltip="与上一相邻交易日重合的核心强势股数量及比例。" aria-label="核心延续：与上一相邻交易日重合的核心强势股数量及比例。">核心延续</span>
-            <span role="columnheader">代表股</span>
+            <span role="columnheader">龙头股</span>
             <span class="theme-column-help" role="columnheader" tabindex="0" data-tooltip="展示是否形成跨日延续，以及行业主力资金净额或数据状态。" aria-label="延续与资金：展示是否形成跨日延续，以及行业主力资金净额或数据状态。">延续与资金</span>
           </div>
           <article
             v-for="(theme, index) in filteredThemes"
             :key="theme.industry"
             class="theme-row"
-            :class="themeTone(theme)"
+            :class="[themeTone(theme), { expanded: expandedTheme === theme.industry }]"
             role="row"
           >
             <div class="theme-identity" role="cell">
@@ -230,18 +256,50 @@ onBeforeUnmount(deactivateNiuOneMainline)
               <strong>{{ numeric(theme.score) }}</strong>
               <small>{{ signed(theme.score_change) }}</small>
             </div>
-            <div class="theme-data-cell" data-label="强势股" role="cell"><strong>{{ theme.strong_stock_count }}</strong><small>只</small></div>
+            <div class="theme-data-cell strong-count" data-label="强势股" role="cell"><strong>{{ theme.strong_stock_count }}</strong><small>只</small></div>
             <div
-              class="theme-data-cell"
+              class="theme-data-cell breadth"
               data-label="有效广度"
               role="cell"
               :title="effectiveBreadthTitle(theme)"
               :aria-label="effectiveBreadthTitle(theme)"
             ><strong>{{ numeric(theme.effective_breadth_pct) }}%</strong></div>
             <div class="theme-data-cell continuity" data-label="核心延续" role="cell"><strong>{{ theme.core_overlap_count }}只</strong><small>{{ percent(theme.core_overlap_ratio) }}</small></div>
-            <div class="theme-stock-list" data-label="代表股" role="cell">
-              <template v-if="theme.strong_stocks?.length">
-                <span v-for="stock in theme.strong_stocks" :key="stock.code" :title="`${stock.code} · 强度 ${numeric(stock.strong_score)}`">{{ stock.name || stock.code }}</span>
+            <div class="theme-stock-list" data-label="龙头股" role="cell">
+              <template v-if="leaderStock(theme)">
+                <button
+                  type="button"
+                  class="theme-leader-button"
+                  :aria-expanded="expandedTheme === theme.industry"
+                  :aria-controls="themeStockPanelId(theme)"
+                  :aria-label="`${theme.industry}龙头股 ${leaderStock(theme).name || leaderStock(theme).code}，${expandedTheme === theme.industry ? '收起' : '展开'}代表股列表`"
+                  @click="toggleThemeStocks(theme)"
+                >
+                  <span class="theme-leader-identity">
+                    <span class="theme-leader-badge">龙头</span>
+                    <strong>{{ leaderStock(theme).name || leaderStock(theme).code }}</strong>
+                    <small>{{ leaderStock(theme).code }}</small>
+                  </span>
+                  <span class="theme-stock-change" :class="stockChangeTone(leaderStock(theme).change_pct)">{{ signed(leaderStock(theme).change_pct, '%') }}</span>
+                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"></path></svg>
+                </button>
+                <div
+                  v-if="expandedTheme === theme.industry"
+                  :id="themeStockPanelId(theme)"
+                  class="theme-stock-details"
+                  role="region"
+                  :aria-label="`${theme.industry}代表股列表`"
+                >
+                  <div class="theme-stock-details-head"><span>代表股列表</span><span>当前涨跌幅</span></div>
+                  <div v-for="(stock, stockIndex) in themeStocks(theme)" :key="stock.code || stock.name" class="theme-stock-detail-row">
+                    <span class="theme-stock-detail-name">
+                      <b v-if="stockIndex === 0">龙头</b>
+                      <strong>{{ stock.name || stock.code }}</strong>
+                      <small>{{ stock.code }}</small>
+                    </span>
+                    <strong class="theme-stock-change" :class="stockChangeTone(stock.change_pct)">{{ signed(stock.change_pct, '%') }}</strong>
+                  </div>
+                </div>
               </template>
               <span v-else>—</span>
             </div>
@@ -260,8 +318,8 @@ onBeforeUnmount(deactivateNiuOneMainline)
 </template>
 
 <style scoped>
-.mainline-page { display:grid; gap:16px; color:var(--text); }
-.mainline-hero,.mainline-section { border:1px solid var(--line); border-radius:18px; background:var(--panel); box-shadow:0 8px 28px rgba(15,23,42,.055); }
+.mainline-page { display:grid; width:100%; min-width:0; gap:16px; color:var(--text); }
+.mainline-hero,.mainline-section { min-width:0; border:1px solid var(--line); border-radius:18px; background:var(--panel); box-shadow:0 8px 28px rgba(15,23,42,.055); }
 .mainline-hero { padding:20px; }
 .mainline-heading,.mainline-section-head { display:flex; align-items:center; justify-content:space-between; gap:14px; }
 .mainline-heading { align-items:flex-start; }
@@ -319,6 +377,7 @@ onBeforeUnmount(deactivateNiuOneMainline)
 .theme-column-help:focus-visible { color:var(--accent-text); }
 .theme-column-help:nth-last-child(-n+2)::after { right:0; left:auto; }
 .theme-row { min-height:72px; padding:11px 12px; border-top:1px solid var(--line); background:var(--panel); transition:background-color .15s ease; }
+.theme-row.expanded { align-items:start; }
 .theme-row:last-child { border-radius:0 0 9px 9px; }
 .theme-row:hover { background:var(--panel2); }
 .theme-identity { display:flex; min-width:0; align-items:center; gap:10px; }
@@ -337,9 +396,26 @@ onBeforeUnmount(deactivateNiuOneMainline)
 .theme-score strong { display:block; font-size:18px; line-height:1.1; font-variant-numeric:tabular-nums; }
 .theme-score small,.theme-data-cell small,.theme-context small { display:block; margin-top:4px; color:var(--muted); font-size:9px; line-height:1.3; }
 .theme-data-cell strong { font-size:13px; font-variant-numeric:tabular-nums; }
-.theme-stock-list { overflow:hidden; min-width:0; color:var(--text); font-size:11px; line-height:1.55; text-overflow:ellipsis; }
-.theme-stock-list > span { white-space:nowrap; }
-.theme-stock-list > span:not(:last-child)::after { content:"、"; color:var(--muted); }
+.theme-stock-list { overflow:visible; min-width:0; color:var(--text); font-size:11px; line-height:1.55; }
+.theme-leader-button { display:grid; width:100%; min-width:0; grid-template-columns:minmax(0,1fr) auto 14px; align-items:center; gap:7px; padding:5px 6px; border:1px solid transparent; border-radius:7px; background:transparent; color:var(--text); font:inherit; text-align:left; cursor:pointer; }
+.theme-leader-button:hover { border-color:var(--line); background:var(--panel2); }
+.theme-leader-button:focus-visible { border-color:var(--accent-border); outline:2px solid var(--accent-border); outline-offset:1px; }
+.theme-leader-identity { display:flex; min-width:0; align-items:baseline; gap:5px; overflow:hidden; }
+.theme-leader-identity strong { overflow:hidden; font-size:11px; text-overflow:ellipsis; white-space:nowrap; }
+.theme-leader-identity small { flex-shrink:0; color:var(--muted); font-size:9px; font-variant-numeric:tabular-nums; }
+.theme-leader-badge,.theme-stock-detail-name b { flex-shrink:0; color:var(--accent-text); font-size:9px; font-weight:750; }
+.theme-stock-change { color:var(--muted); font-size:10px; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.theme-stock-change.up { color:var(--red-text); }
+.theme-stock-change.down { color:var(--green-text); }
+.theme-leader-button svg { width:14px; height:14px; fill:none; stroke:currentColor; stroke-width:1.6; transition:transform .15s ease; }
+.theme-leader-button[aria-expanded="true"] svg { transform:rotate(180deg); }
+.theme-stock-details { margin-top:5px; overflow:hidden; border:1px solid var(--line); border-radius:8px; background:var(--panel2); }
+.theme-stock-details-head,.theme-stock-detail-row { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:8px; padding:5px 7px; }
+.theme-stock-details-head { color:var(--muted); font-size:9px; }
+.theme-stock-detail-row { border-top:1px solid var(--line); }
+.theme-stock-detail-name { display:flex; min-width:0; align-items:baseline; gap:5px; }
+.theme-stock-detail-name strong { overflow:hidden; font-size:10px; text-overflow:ellipsis; white-space:nowrap; }
+.theme-stock-detail-name small { color:var(--muted); font-size:9px; font-variant-numeric:tabular-nums; }
 .theme-context { text-align:right; }
 .theme-context strong { display:block; font-size:11px; font-weight:650; }
 .theme-context .risk-text { color:var(--red-text); }
@@ -348,25 +424,53 @@ onBeforeUnmount(deactivateNiuOneMainline)
   .theme-table-head,.theme-row { grid-template-columns:minmax(130px,1.1fr) 62px 56px 72px 78px minmax(130px,1.2fr) minmax(108px,.8fr); column-gap:9px; }
 }
 @media (max-width:720px) {
-  .mainline-hero,.mainline-section { padding:14px; border-radius:14px; }
+  .mainline-page { gap:10px; }
+  .mainline-hero,.mainline-section { padding:13px; border-radius:14px; box-shadow:0 4px 16px rgba(15,23,42,.045); }
   .mainline-heading,.mainline-section-head { align-items:stretch; flex-direction:column; }
+  .mainline-heading { gap:12px; }
+  .mainline-heading h2 { margin-bottom:4px; font-size:22px; }
+  .mainline-heading p,.mainline-section-head p { font-size:12px; line-height:1.55; }
   .mainline-actions { justify-content:space-between; }
-  .mainline-summary-grid { grid-template-columns:1fr; }
-  .mainline-notice { flex-direction:column; gap:3px; }
-  .mainline-filters { justify-content:flex-start; overflow:auto; flex-wrap:nowrap; padding-bottom:2px; }
+  .mainline-actions button { min-width:0; min-height:34px; padding:0 11px; }
+  .mainline-summary-grid { grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; margin-top:14px; }
+  .mainline-summary-card { min-height:94px; padding:11px; border-radius:11px; }
+  .mainline-summary-card > span,.coverage-label-row { font-size:10px; }
+  .mainline-summary-card strong { display:-webkit-box; overflow:hidden; margin:7px 0 3px; font-size:16px; line-height:1.25; text-overflow:clip; white-space:normal; -webkit-box-orient:vertical; -webkit-line-clamp:2; }
+  .mainline-summary-card small { font-size:9px; line-height:1.4; }
+  .coverage-label-row { gap:4px; }
+  .coverage-info > button { width:18px; height:18px; min-width:0; }
+  .coverage-info svg { width:17px; height:17px; }
+  .coverage-popover { top:31px; right:0; left:auto; width:calc(200% + 8px); max-width:calc(100vw - 44px); }
+  .mainline-notice { gap:4px; margin-top:10px; padding:9px 10px; font-size:11px; }
+  .mainline-section { padding-bottom:8px; }
+  .mainline-section-head { gap:10px; margin-bottom:10px; }
+  .mainline-section-head h3 { font-size:17px; }
+  .mainline-filters { justify-content:flex-start; overflow:auto; flex-wrap:nowrap; margin:0 -13px; padding:0 13px 3px; scrollbar-width:none; -webkit-overflow-scrolling:touch; }
+  .mainline-filters::-webkit-scrollbar { display:none; }
   .mainline-filters button { flex-shrink:0; }
   .theme-table { overflow:visible; border-width:1px 0 0; border-radius:0; }
   .theme-table-head { display:none; }
-  .theme-row { grid-template-columns:minmax(0,1fr) auto; gap:10px 16px; min-height:0; padding:14px 0; }
-  .theme-identity { grid-column:1; }
-  .theme-score { grid-column:2; text-align:right; }
-  .theme-data-cell { display:flex; grid-column:span 1; align-items:baseline; justify-content:space-between; gap:8px; padding-top:9px; border-top:1px solid var(--line); }
-  .theme-data-cell::before { content:attr(data-label); color:var(--muted); font-size:10px; }
+  .theme-row { grid-template-columns:repeat(3,minmax(0,1fr)); grid-template-areas:"identity identity score" "strong breadth continuity" "stocks stocks stocks" "context context context"; gap:0 10px; min-height:0; padding:13px 2px 12px; }
+  .theme-identity { grid-area:identity; }
+  .theme-rank { width:20px; flex-basis:20px; }
+  .theme-identity h4 { font-size:14px; }
+  .theme-score { grid-area:score; text-align:right; }
+  .theme-score strong { font-size:19px; }
+  .theme-data-cell { display:block; min-width:0; padding:9px 0 8px; border-top:1px solid var(--line); border-bottom:1px solid var(--line); }
+  .theme-data-cell.strong-count { grid-area:strong; }
+  .theme-data-cell.breadth { grid-area:breadth; text-align:center; }
+  .theme-data-cell.continuity { grid-area:continuity; text-align:right; }
+  .theme-data-cell::before { content:attr(data-label); display:block; margin-bottom:3px; color:var(--muted); font-size:9px; }
+  .theme-data-cell strong { font-size:14px; }
   .theme-data-cell small { display:inline; margin:0 0 0 2px; }
-  .theme-stock-list,.theme-context { grid-column:1 / -1; }
-  .theme-stock-list { padding-top:9px; border-top:1px solid var(--line); }
-  .theme-stock-list::before { content:attr(data-label) "  "; color:var(--muted); font-size:10px; }
-  .theme-context { display:flex; justify-content:space-between; text-align:left; }
+  .theme-stock-list { grid-area:stocks; padding:5px 0 7px; line-height:1.65; }
+  .theme-stock-list::before { content:none; }
+  .theme-leader-button { padding:6px 0; border-width:0; border-radius:0; }
+  .theme-leader-button:hover { background:transparent; }
+  .theme-leader-identity strong { font-size:11px; }
+  .theme-stock-details { margin-top:3px; }
+  .theme-stock-details-head,.theme-stock-detail-row { padding:6px 8px; }
+  .theme-context { display:flex; grid-area:context; justify-content:space-between; gap:10px; padding-top:7px; border-top:1px dashed var(--line); text-align:left; }
   .theme-context small { margin:0; }
 }
 </style>

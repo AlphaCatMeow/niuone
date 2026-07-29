@@ -5,7 +5,7 @@ import math
 from typing import Any, Mapping
 
 
-NIUONE_MAINLINE_VIEW_SCHEMA_VERSION = 3
+NIUONE_MAINLINE_VIEW_SCHEMA_VERSION = 4
 NIUONE_MAINLINE_THEME_LIMIT = 5
 
 
@@ -41,6 +41,8 @@ def _strong_stock_view(value: Any) -> dict[str, Any] | None:
         "code": code,
         "name": name,
         "strong_score": _number(value.get("strong_score")),
+        "change_pct": _number(value.get("change_pct")),
+        "role": _text(value.get("role"), 16),
     }
 
 
@@ -55,6 +57,10 @@ def _theme_view(value: Any) -> dict[str, Any] | None:
         for raw in list(value.get("strong_stocks") or [])[:5]
         if (stock := _strong_stock_view(raw)) is not None
     ]
+    leader_stock = next(
+        (dict(stock) for stock in strong_stocks if stock.get("role") == "leader"),
+        dict(strong_stocks[0]) if strong_stocks else None,
+    )
     continued_codes = [
         _text(code, 12)
         for code in list(value.get("continued_core_codes") or [])[:5]
@@ -92,6 +98,7 @@ def _theme_view(value: Any) -> dict[str, Any] | None:
         "previous_as_of_date": _text(value.get("previous_as_of_date"), 10),
         "score_change": _number(value.get("score_change")),
         "flow_net_yi": _number(value.get("flow_net_yi")),
+        "leader_stock": leader_stock,
         "strong_stocks": strong_stocks,
     }
 

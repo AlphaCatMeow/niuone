@@ -96,7 +96,20 @@ def sample_scan() -> dict[str, object]:
                     "core_overlap_ratio": 0.25,
                     "continued_core_codes": ["603979"],
                     "strong_stocks": [
-                        {"code": "603979", "name": "金诚信", "strong_score": 8.1}
+                        {
+                            "code": "603979",
+                            "name": "金诚信",
+                            "strong_score": 8.1,
+                            "change_pct": 5.26,
+                            "role": "leader",
+                        },
+                        {
+                            "code": "600111",
+                            "name": "北方稀土",
+                            "strong_score": 7.8,
+                            "change_pct": -1.35,
+                            "role": "core",
+                        },
                     ],
                     "internal_samples": [1, 2, 3],
                 },
@@ -142,6 +155,13 @@ class NiuOneMainlineViewTests(unittest.TestCase):
         industrial_metals = next(theme for theme in view["themes"] if theme["industry"] == "工业金属")
         self.assertEqual(industrial_metals["effective_strong_count"], 3.2)
         self.assertEqual(industrial_metals["effective_breadth_pct"], 40)
+        self.assertEqual(industrial_metals["leader_stock"]["code"], "603979")
+        self.assertEqual(industrial_metals["leader_stock"]["role"], "leader")
+        self.assertEqual(industrial_metals["leader_stock"]["change_pct"], 5.26)
+        self.assertEqual(
+            [(stock["code"], stock["change_pct"]) for stock in industrial_metals["strong_stocks"]],
+            [("603979", 5.26), ("600111", -1.35)],
+        )
         self.assertEqual(view["data_quality"]["coverage"], 0.8591)
         self.assertEqual(view["data_quality"]["prepared_stock_count"], 4800)
         self.assertEqual(

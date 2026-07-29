@@ -121,6 +121,7 @@ class NiuOneStrategyTests(unittest.TestCase):
 
     def test_context_confirms_mainline_from_multiple_strong_stocks(self):
         prepared = self._prepared_market()
+        prepared[0]["quote"]["change_pct"] = 7.35
         market_snapshot = {
                 "up": 120,
                 "down": 30,
@@ -158,6 +159,10 @@ class NiuOneStrategyTests(unittest.TestCase):
             delta=0.2,
         )
         self.assertFalse(theme["single_stock_dominated"])
+        self.assertEqual(theme["strong_stocks"][0]["code"], "600000")
+        self.assertEqual(theme["strong_stocks"][0]["role"], "leader")
+        self.assertEqual(theme["strong_stocks"][0]["change_pct"], 7.35)
+        self.assertTrue(all(stock["role"] == "core" for stock in theme["strong_stocks"][1:]))
         self.assertEqual(theme["state"], "mainline")
         self.assertTrue(theme["cross_day_confirmed"])
         self.assertGreaterEqual(theme["core_overlap_count"], 2)

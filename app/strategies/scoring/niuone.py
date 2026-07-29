@@ -618,8 +618,14 @@ def build_niuone_context(
             "confirmation_component": round(confirmation_component, 2),
             "concentration_penalty": round(concentration_penalty, 2),
             "strong_stocks": [
-                {"code": member["code"], "name": member["name"], "strong_score": round(float(member["strong_score"]), 2)}
-                for member in strong_members[:5]
+                {
+                    "code": member["code"],
+                    "name": member["name"],
+                    "strong_score": round(float(member["strong_score"]), 2),
+                    "change_pct": round(float(member["change_pct"]), 2),
+                    "role": "leader" if index == 0 else "core",
+                }
+                for index, member in enumerate(strong_members[:NIUONE_CORE_STOCK_LIMIT])
             ],
         }
 
