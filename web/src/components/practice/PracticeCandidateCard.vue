@@ -102,7 +102,7 @@ const tradeDiscipline = computed(() => [props.item.position_hint, props.item.tim
         <span>主线模式 {{ item.mainline_mode || 'none' }} · 核心 {{ item.mainline_primary || '--' }}<template v-if="item.mainline_secondary"> / {{ item.mainline_secondary }}</template></span>
         <span>强股 {{ item.strong_stock_count ?? '--' }} · 有效强股 {{ formatPracticeNumber(item.effective_strong_count) }}</span>
         <span>龙头集中度 {{ formatPracticeNumber(Number(item.leader_concentration) * 100) }}%</span>
-        <span>个股 {{ item.stock_role || '--' }} · 强度 {{ formatPracticeNumber(item.stock_strong_score) }}</span>
+        <span>龙头梯队 #{{ item.stock_leader_rank ?? '--' }} · 强度 {{ formatPracticeNumber(item.stock_strong_score) }}</span>
         <span>主线内排名 {{ formatPracticeNumber(item.stock_sector_rank) }}</span>
         <span>结构止损 {{ formatPracticeNumber(item.stop_price) }} ({{ formatPracticeNumber(item.stop_distance_pct) }}%)</span>
         <span>有效损失 {{ formatPracticeNumber(item.effective_loss_distance_pct) }}%</span>

@@ -28,7 +28,7 @@ class StrategyPackageTests(unittest.TestCase):
             "zettaranc": ("Z哥评分基准", ("基础策略：", "李大霄")),
             "li_daxiao_bottom": ("李大霄", ("Z哥评分基准", "基础策略：")),
             "sector_tide": ("板块潮汐（市场→行业→个股", ("Z哥评分基准", "基础策略：", "李大霄")),
-            "niuone": ("牛牛战法（强势股→主题共振", ("板块潮汐（市场→行业→个股", "Z哥评分基准", "基础策略：", "李大霄")),
+            "niuone": ("牛牛战法（强势股→强势行业→龙头梯队", ("板块潮汐（市场→行业→个股", "Z哥评分基准", "基础策略：", "李大霄")),
         }
         for suite, (included, excluded) in cases.items():
             sections = build_strategy_prompt_sections(
@@ -59,6 +59,9 @@ class StrategyPackageTests(unittest.TestCase):
         self.assertIn("总仓≤70%/55%/35%", active)
         self.assertIn("主题敞口≤55%/40%/25%", active)
         self.assertIn("策略同时最多持有5只", active)
+        self.assertIn("strong_score前三且仍为强势股", active)
+        self.assertIn("第一名涨停或无有效买点时可顺延", active)
+        self.assertIn("连续两个交易日跌出行业前三龙头梯队时换出", active)
         self.assertNotIn("单笔权益风险≤0.25%/0.18%/0.10%", active)
         self.assertNotIn("总仓≤40%/28%/15%", active)
 
@@ -116,6 +119,7 @@ class StrategyPackageTests(unittest.TestCase):
         )
         self.assertIn("牛牛战法历史持仓退出纪律", niuone_exits)
         self.assertIn("strategy_mark=牛牛领航", niuone_exits)
+        self.assertIn("连续两个交易日跌出强势行业前三龙头梯队时换出", niuone_exits)
 
     def test_legacy_registry_is_a_compatibility_view(self):
         self.assertIs(legacy_registry.STRATEGY_DEFINITIONS, registry.STRATEGY_DEFINITIONS)

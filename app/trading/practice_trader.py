@@ -41,7 +41,9 @@ from screening.stock_universe import (
     STOCK_UNIVERSE_ENV,
     friendly_stock_universe,
     selected_stock_universe,
+    stock_board,
     stock_in_universe,
+    stock_name_is_st,
 )
 from strategies.registry import (
     ACTIVE_STRATEGY_ENV,
@@ -1805,6 +1807,24 @@ def candidate_in_stock_universe(candidate: dict[str, Any] | None) -> bool:
     )
 
 
+def quote_is_at_limit_up(code: str, name: str, quote: dict[str, Any] | None) -> bool:
+    """Conservatively reject buys that have reached the board's price limit."""
+    quote = quote if isinstance(quote, dict) else {}
+    limit_pct = (
+        4.8
+        if stock_name_is_st(name)
+        else 19.8
+        if stock_board(code) in {"chi_next", "star_market"}
+        else 9.8
+    )
+    change_pct = _safe_float(quote.get("change_pct"), -999.0)
+    if change_pct >= limit_pct:
+        return True
+    price = _safe_float(quote.get("price"), 0.0)
+    prev_close = _safe_float(quote.get("prev_close"), 0.0)
+    return bool(price > 0 and prev_close > 0 and (price / prev_close - 1) * 100 >= limit_pct)
+
+
 def add_execution_block(decision: dict[str, Any], code: str, reason: str) -> None:
     blocks = decision.setdefault("execution_blocked_reasons", [])
     text = f"{code}: {reason}" if code else reason
@@ -2169,6 +2189,7 @@ N_STRUCTURE_STOP_LOOKBACK_DAYS = 30  # N型结构前低最多回看交易日
 N_STRUCTURE_LOW_TOLERANCE_PCT = 0.02  # 后低允许比前低低不超过2%
 NO_PROGRESS_HOLD_DAYS = 3         # 买入后没涨，最少观察天数
 NO_PROGRESS_MAX_PNL_PCT = 1.0
+NIUONE_LEADER_LOSS_CONFIRMATIONS = 2
 SHAOFU_SOFT_EXIT_START_TIME = dtime(10, 0)  # 开盘前30分钟仅允许结构性硬退出
 LUZHU_MEDIUM_YANG_PCT = 2.0       # 卤煮：连续中/大阳线的保守量化阈值
 SELL_SCORE_REDUCE_THRESHOLD = 3
@@ -3978,6 +3999,7 @@ def sync_niuone_position_context(state: dict[str, Any], b1_payload: dict[str, An
                     candidates[code] = item
     generated_at = str(payload.get("generated_at") or now_ts())
     context_date = generated_at[:10] if len(generated_at) >= 10 else today_key()
+    previous_trading_day = str(context.get("previous_trading_day") or "")[:10]
     budget = niuone_risk_budget(str(market.get("state") or ""))
     updated = 0
     for code, pos in (state.get("positions") or {}).items():
@@ -3989,9 +4011,9 @@ def sync_niuone_position_context(state: dict[str, Any], b1_payload: dict[str, An
         industry = str(
             candidate.get("industry")
             or candidate.get("sector")
+            or stock.get("industry")
             or pos.get("industry")
             or pos.get("sector")
-            or stock.get("industry")
             or ""
         ).strip()
         theme = themes.get(industry) if isinstance(themes.get(industry), dict) else {}
@@ -4009,6 +4031,34 @@ def sync_niuone_position_context(state: dict[str, Any], b1_payload: dict[str, An
         else:
             pos["mainline_weak_count"] = 0
             pos.pop("mainline_weak_last_date", None)
+        stock_role = str(stock.get("role") or candidate.get("stock_role") or "").strip()
+        stock_strong = stock.get("strong")
+        if stock_strong is None and "stock_strong" in candidate:
+            stock_strong = bool(candidate.get("stock_strong"))
+        stock_leader_tier = stock.get("leader_tier")
+        if stock_leader_tier is None and "stock_leader_tier" in candidate:
+            stock_leader_tier = bool(candidate.get("stock_leader_tier"))
+        stock_leader_rank = stock.get("leader_rank", candidate.get("stock_leader_rank"))
+        leader_status_observed = stock_leader_tier is not None
+        if leader_status_observed:
+            is_current_leader = stock_leader_tier is True and stock_strong is not False
+            if is_current_leader:
+                pos["niu_leader_lost_count"] = 0
+                pos.pop("niu_leader_lost_last_date", None)
+            elif pos.get("niu_leader_lost_last_date") != context_date:
+                last_lost_date = str(pos.get("niu_leader_lost_last_date") or "")[:10]
+                consecutive = bool(previous_trading_day and last_lost_date == previous_trading_day)
+                pos["niu_leader_lost_count"] = (
+                    int(pos.get("niu_leader_lost_count") or 0) + 1
+                    if consecutive
+                    else 1
+                )
+                pos["niu_leader_lost_last_date"] = context_date
+            pos["stock_role"] = stock_role or "unknown"
+            pos["stock_leader_tier"] = bool(stock_leader_tier)
+            pos["stock_leader_rank"] = stock_leader_rank
+            if stock_strong is not None:
+                pos["stock_strong"] = bool(stock_strong)
         pos["mainline_score"] = theme.get("score")
         pos["mainline_state"] = state_name
         pos["mainline_raw_state"] = theme.get("raw_state")
@@ -4458,6 +4508,12 @@ def evaluate_sell_signal(
                 return _sell_signal(
                     f"市场硬停止且主线转弱 ({pos.get('industry') or '-'}分数{theme_score:.1f}，状态{theme_state or '-'})",
                     "niu_market_hard_stop",
+                )
+            if int(pos.get("niu_leader_lost_count") or 0) >= NIUONE_LEADER_LOSS_CONFIRMATIONS:
+                return _sell_signal(
+                    f"连续{NIUONE_LEADER_LOSS_CONFIRMATIONS}个交易日跌出强势行业龙头梯队 "
+                    f"({pos.get('industry') or '-'}，当前排名{pos.get('stock_leader_rank') or '-'})",
+                    "niu_leader_lost",
                 )
             if int(pos.get("mainline_weak_count") or 0) >= 2 or theme_state == "inactive":
                 return _sell_signal(
@@ -5625,8 +5681,8 @@ def current_trade_discipline_text(position_limit_desc: str, adaptive: dict[str, 
                 "\n- 牛牛战法执行层动态风险预算：防守/市场硬停止禁止新仓；进攻/轮动/修复的单笔权益风险分别≤1.50%/1.00%/0.60%，"
                 "策略内组合风险≤4.50%/3.00%/1.80%，总仓≤70%/55%/35%，主题风险≤3.00%/2.00%/1.20%，主题敞口≤55%/40%/25%；"
                 f"领航/回踩/启动单票30%/25%/15%仅为绝对上限，同一主题最多2只、同时最多持有{NIUONE_MAX_OPEN_POSITIONS}只。"
-                "\n- 牛牛战法仅在多只强势股共振并完成状态确认后开仓；允许无明确主线，正面消息不能制造买点。"
-                "\n- 牛牛战法退出：主线连续转弱、市场硬停止叠加退潮、策略时间窗不延续、2R减半和2ATR跟踪。"
+                "\n- 牛牛战法仅在多只强势股共振并完成状态确认后，买入行业strong_score前三且仍为强势股的龙头梯队；第一名优先但涨停或无买点时可顺延。"
+                "\n- 牛牛战法退出：连续两个交易日跌出行业前三龙头梯队、主线连续转弱、市场硬停止叠加退潮、策略时间窗不延续、2R减半和2ATR跟踪。"
             )
         return custom
     adaptive = adaptive or {}
@@ -6170,11 +6226,14 @@ def execute_actions(
             if not allow_market_guidance_buys:
                 add_execution_block(decision, code, f"盘面指引为{market_strategy_ctx.get('tone_label', '防守')}，暂停买入")
                 continue
+            buy_strategy = classify_buy_strategy(reason, candidate)
             blockers = candidate_buy_blockers(candidate)
             if blockers:
                 add_execution_block(decision, code, "买入拦截：" + "、".join(blockers))
                 continue
-            buy_strategy = classify_buy_strategy(reason, candidate)
+            if is_niuone_strategy(buy_strategy) and quote_is_at_limit_up(code, str(name), q):
+                add_execution_block(decision, code, "牛牛战法不在涨停价模拟买入，改选行业龙头梯队后续可交易标的")
+                continue
             existing_pos = positions.get(code)
             old_qty = position_qty(existing_pos or {})
             existing_entry_strategy = position_entry_strategy(existing_pos or {}) if old_qty > 0 else ""
@@ -6497,6 +6556,11 @@ def execute_actions(
                     pos["effective_strong_count"] = candidate.get("effective_strong_count")
                     pos["leader_concentration"] = candidate.get("leader_concentration")
                     pos["mainline_weak_count"] = 0
+                    pos["stock_role"] = candidate.get("stock_role")
+                    pos["stock_leader_rank"] = candidate.get("stock_leader_rank")
+                    pos["stock_leader_tier"] = bool(candidate.get("stock_leader_tier"))
+                    pos["stock_strong"] = bool(candidate.get("stock_strong"))
+                    pos["niu_leader_lost_count"] = 0
                 else:
                     pos["sector_weak_count"] = 0
             if old_qty <= 0 or not pos.get("buy_strategy"):
@@ -7115,7 +7179,7 @@ def build_trade_rule_note() -> str:
         f"总仓位最高{MAX_TOTAL_POSITION_PCT:g}%并至少保留{MIN_CASH_RESERVE_PCT:g}%现金；其他人格仓位由模型结合盘面与风险决定。"
         f"板块潮汐另行按市场状态硬执行单笔/组合/行业动态风险预算、总仓45%/30%/15%、行业敞口12%/10%/6%；"
         f"单票8%/6%/4%仅为绝对天花板。"
-        f"牛牛战法按强势股共振确认主线，最多同时持有{NIUONE_MAX_OPEN_POSITIONS}只，并硬执行单笔/组合/主题风险预算、"
+        f"牛牛战法按强势股共振确认主线且只买行业前三龙头梯队，第一名涨停或无买点时可顺延；最多同时持有{NIUONE_MAX_OPEN_POSITIONS}只，并硬执行单笔/组合/主题风险预算、"
         f"总仓70%/55%/35%、主题敞口55%/40%/25%，领航/回踩/启动单票绝对上限30%/25%/15%；"
         f"允许无明确主线，单只股票独强不得确认主线。"
         f"系统底线风控：峰值回撤/ATR吊灯保护、持仓超25日退出；"
@@ -7123,7 +7187,7 @@ def build_trade_rule_note() -> str:
         f"模型SELL不直接成交。另保留防卖飞5分评分、B3次日不涨离场({B3_EXIT_HHMM}开盘检查)、B2两日不延续离场、超级B1未兑现离场({TIME_EXIT_HHMM}尾盘检查)、"
         f"卤煮半仓、S1/S2/S3逃顶、出货五式、BBI/白线两日破位、白线死叉黄线。"
         f"板块潮汐按行业连续两日退潮、市场硬停止、时间窗、2R减半和2ATR跟踪退出。"
-        f"牛牛战法按主线连续转弱、市场硬停止叠加退潮、时间窗、2R减半和2ATR跟踪退出。"
+        f"牛牛战法按连续两个交易日跌出行业前三龙头梯队、主线连续转弱、市场硬停止叠加退潮、时间窗、2R减半和2ATR跟踪退出。"
         f"买入按万一免五计费。"
     )
 

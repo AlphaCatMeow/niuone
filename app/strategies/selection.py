@@ -27,7 +27,9 @@ def candidate_is_trade_ready(item: dict[str, Any]) -> bool:
     threshold = safe_float(item.get("entry_threshold")) or 8
     blockers = item.get("hard_blockers") or []
     distance = safe_float(item.get("distance_pct"))
-    ema_strategy = str(item.get("best_strategy") or item.get("strategy_id") or "") in {
+    strategy_id = str(item.get("best_strategy") or item.get("strategy_id") or "")
+    niuone_strategy = strategy_id in {"niu_leader", "niu_pullback", "niu_emerging"}
+    ema_strategy = strategy_id in {
         "tide_leader", "tide_rotation", "tide_recovery",
         "niu_leader", "niu_pullback", "niu_emerging",
     }
@@ -35,6 +37,10 @@ def candidate_is_trade_ready(item: dict[str, Any]) -> bool:
         bool(item.get("actionable", score >= threshold))
         and score >= threshold
         and not blockers
+        and (
+            not niuone_strategy
+            or (item.get("stock_leader_tier") is True and item.get("stock_strong") is True)
+        )
         and (ema_strategy or distance is None or distance <= COMMON_MAX_BBI_DISTANCE_PCT)
     )
 

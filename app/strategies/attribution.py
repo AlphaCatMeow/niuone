@@ -53,7 +53,7 @@ def classify_exit_rule(reason: str = "", exit_signal: str | None = None) -> str:
             return "profit_protection"
         if signal == "tide_sector_weak":
             return "sector_retreat"
-        if signal == "niu_mainline_faded":
+        if signal in {"niu_mainline_faded", "niu_leader_lost"}:
             return "sector_retreat"
         if signal == "tide_market_hard_stop":
             return "market_risk"

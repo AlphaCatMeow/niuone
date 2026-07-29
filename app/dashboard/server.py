@@ -1536,6 +1536,8 @@ def refresh_b1_candidate_cache_from_current_pool() -> dict[str, Any]:
                 "leader_concentration": best.get("leader_concentration"),
                 "single_stock_dominated": best.get("single_stock_dominated"),
                 "stock_role": best.get("stock_role"),
+                "stock_leader_rank": best.get("stock_leader_rank"),
+                "stock_leader_tier": best.get("stock_leader_tier"),
                 "stock_strong": best.get("stock_strong"),
                 "stock_strong_score": best.get("stock_strong_score"),
                 "stock_sector_rank": best.get("stock_sector_rank"),

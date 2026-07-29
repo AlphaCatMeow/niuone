@@ -23,6 +23,7 @@ NIUONE_MIN_ROWS = 55
 NIUONE_MIN_THEME_MEMBERS = 3
 NIUONE_STRONG_SCORE_THRESHOLD = 70.0
 NIUONE_CORE_STOCK_LIMIT = 5
+NIUONE_LEADER_TIER_LIMIT = 3
 NIUONE_MIN_CROSS_DAY_CORE_OVERLAP = 2
 
 
@@ -624,6 +625,8 @@ def build_niuone_context(
                     "strong_score": round(float(member["strong_score"]), 2),
                     "change_pct": round(float(member["change_pct"]), 2),
                     "role": "leader" if index == 0 else "core",
+                    "leader_rank": index + 1,
+                    "leader_tier": index < NIUONE_LEADER_TIER_LIMIT,
                 }
                 for index, member in enumerate(strong_members[:NIUONE_CORE_STOCK_LIMIT])
             ],
@@ -643,6 +646,8 @@ def build_niuone_context(
                 "strong_score": round(float(member["strong_score"]), 2),
                 "strong": bool(member["strong"]),
                 "role": role,
+                "leader_rank": rank_index,
+                "leader_tier": bool(member["strong"] and rank_index <= NIUONE_LEADER_TIER_LIMIT),
                 "theme_rank": round(100 - (rank_index - 1) / max(1, len(theme_members) - 1) * 100, 2),
                 "theme_ret5_rank": round(_percentile(float(member["ret5"]), theme_ret5), 2),
                 "theme_ret20_rank": round(_percentile(float(member["ret20"]), theme_ret20), 2),
@@ -724,7 +729,7 @@ def build_niuone_context(
             "description": "未归入已知数据质量分类",
         })
     return {
-        "version": 2,
+        "version": 3,
         "strategy": "niuone",
         "theme_basis": "industry_proxy",
         "as_of_date": as_of_date,
@@ -901,6 +906,8 @@ def _payload(
         "market_hard_stop": bool(market.get("hard_stop")),
         "market_allows_buys": bool(market.get("allow_new_buys")),
         "stock_role": stock.get("role"),
+        "stock_leader_rank": stock.get("leader_rank"),
+        "stock_leader_tier": bool(stock.get("leader_tier")),
         "stock_strong": bool(stock.get("strong")),
         "stock_strong_score": stock.get("strong_score"),
         "stock_sector_rank": stock.get("theme_rank"),
@@ -961,6 +968,8 @@ def _common_risks(metrics: dict[str, Any]) -> list[str]:
         risks.append("结构止损超过1.5ATR或6%")
     if metrics["theme"].get("single_stock_dominated"):
         risks.append("主题由单只强股主导")
+    if metrics["stock"].get("leader_tier") is not True or metrics["stock"].get("strong") is not True:
+        risks.append("个股未进入强势行业龙头梯队")
     news = metrics["stock"].get("news_precheck") or {}
     if news.get("available") and news.get("tone") == "negative":
         risks.append("近3日个股消息面偏利空")
@@ -976,8 +985,6 @@ def score_niu_leader(rows: list[dict[str, Any]], context: dict[str, Any]) -> dic
         risks.append("主题尚未确认为市场主线")
     if not metrics["theme"].get("cross_day_confirmed"):
         risks.append("主线未完成跨交易日核心股延续确认")
-    if not metrics["stock"].get("strong") or float(metrics["stock"].get("theme_rank") or 0) < 80:
-        risks.append("个股不是主线核心强股")
     if not (metrics["breakout"] or metrics["pullback"]):
         risks.append("未形成突破或首次缩量回踩")
     if metrics["change_pct"] > 4 or metrics["extension_atr"] > 1.0:
@@ -995,8 +1002,6 @@ def score_niu_pullback(rows: list[dict[str, Any]], context: dict[str, Any]) -> d
         risks.append("主线强度不足以参与分歧")
     if not metrics["theme"].get("mainline_confirmed"):
         risks.append("主题没有有效的跨交易日主线确认记录")
-    if float(metrics["stock"].get("theme_rank") or 0) < 70:
-        risks.append("个股不是主线第一梯队")
     if not (metrics["pullback"] or metrics["reclaim"]):
         risks.append("未出现EMA20承接或收复买点")
     if metrics["change_pct"] > 4 or metrics["extension_atr"] > 1.0:
@@ -1016,8 +1021,6 @@ def score_niu_emerging(rows: list[dict[str, Any]], context: dict[str, Any]) -> d
         risks.append("启动主题尚未跨交易日延续")
     if int(metrics["theme"].get("strong_stock_count") or 0) < 2:
         risks.append("少于两只强势股共同确认")
-    if not metrics["stock"].get("strong") or float(metrics["stock"].get("theme_rank") or 0) < 80:
-        risks.append("个股不是新主线核心强股")
     if not (metrics["breakout"] or metrics["reclaim"]):
         risks.append("启动买点尚未确认")
     if metrics["change_pct"] > 7 or metrics["extension_atr"] > 1.5:

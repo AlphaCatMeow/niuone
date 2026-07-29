@@ -145,6 +145,10 @@ def strategy_hard_blockers(strategy_name: str, payload: dict[str, Any]) -> list[
             blockers.append("市场风控禁止新开仓")
         if not payload.get("sector_data_eligible"):
             blockers.append("行业有效样本不足")
+        if is_niuone and (
+            payload.get("stock_leader_tier") is not True or payload.get("stock_strong") is not True
+        ):
+            blockers.append("个股未进入强势行业龙头梯队")
         if not payload.get("risk_ok"):
             blockers.append("结构止损超过1.5ATR或6%")
         effective_loss = safe_float(payload.get("effective_loss_distance_pct"))
@@ -169,8 +173,6 @@ def strategy_hard_blockers(strategy_name: str, payload: dict[str, Any]) -> list[
                 blockers.append("主题未进入当前主线/双主线")
             if payload.get("single_stock_dominated"):
                 blockers.append("单只强股不足以确认主线")
-            if not payload.get("stock_strong") or rank < 80:
-                blockers.append("个股不是主线核心强股")
             if not (payload.get("breakout") or payload.get("pullback")):
                 blockers.append("未形成突破/首次缩量回踩")
             if change is not None and change > 4:
@@ -186,8 +188,6 @@ def strategy_hard_blockers(strategy_name: str, payload: dict[str, Any]) -> list[
                 blockers.append("主题没有有效的跨交易日主线确认记录")
             if status == "mainline" and not payload.get("mainline_selected"):
                 blockers.append("主题未进入当前主线/双主线")
-            if rank < 70:
-                blockers.append("个股未进入主线前30%")
             if not (payload.get("pullback") or payload.get("reclaim")):
                 blockers.append("未出现EMA20承接/收复")
             if change is not None and change > 4:
@@ -205,8 +205,6 @@ def strategy_hard_blockers(strategy_name: str, payload: dict[str, Any]) -> list[
                 blockers.append("少于两只强势股共同确认")
             if payload.get("single_stock_dominated"):
                 blockers.append("单只强股主导，启动证据不足")
-            if not payload.get("stock_strong") or rank < 80:
-                blockers.append("个股不是新主线核心强股")
             if not (payload.get("breakout") or payload.get("reclaim")):
                 blockers.append("启动买点未确认")
             if change is not None and change > 7:
