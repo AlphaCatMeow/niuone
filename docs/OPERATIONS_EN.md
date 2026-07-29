@@ -137,7 +137,7 @@ The Practice page no longer derives a separate market-evaluation label from B1 b
 
 | Setting | Default | Scope | Application |
 |---|---|---|---|
-| `DASHBOARD_ACTIVE_STRATEGY` | `zettaranc` | New candidates, model prompt, and entry rules | Hot-applied; used by the next scan |
+| `DASHBOARD_ACTIVE_STRATEGY` | `niuone` | New candidates, model prompt, and entry rules | Hot-applied; used by the next scan |
 | `DASHBOARD_B1_SCHEDULE_ENABLED` | `1` | Starts the Dashboard's built-in candidate scheduler | Dashboard restart required |
 | `DASHBOARD_PRACTICE_SCHEDULE_TIMES` | `09:25,10:00,10:30,11:00,11:20,13:00,13:30,14:00,14:30,14:50` | Practice summary/evaluation, active-strategy scan, and trading-decision times | Hot-applied; legacy `DASHBOARD_B1_SCHEDULE_TIMES` is read only for compatibility |
 | `DASHBOARD_B1_SCHEDULE_CATCHUP_MINUTES` | `35` | Catch-up window after brief Dashboard downtime | Dashboard restart required |

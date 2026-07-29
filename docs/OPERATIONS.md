@@ -138,7 +138,7 @@ NiuOne 需要大模型驱动完整工作流。X 关注列表监控和美股机�
 
 | 配置 | 默认值 | 影响范围 | 生效方式 |
 |---|---|---|---|
-| `DASHBOARD_ACTIVE_STRATEGY` | `zettaranc` | 当前新候选、模型 Prompt 和新买入规则 | 运行时热应用；下一轮扫描生效 |
+| `DASHBOARD_ACTIVE_STRATEGY` | `niuone` | 当前新候选、模型 Prompt 和新买入规则 | 运行时热应用；下一轮扫描生效 |
 | `DASHBOARD_B1_SCHEDULE_ENABLED` | `1` | 是否启动 Dashboard 内置选股调度线程 | 需要重启 Dashboard |
 | `DASHBOARD_PRACTICE_SCHEDULE_TIMES` | `09:25,10:00,10:30,11:00,11:20,13:00,13:30,14:00,14:30,14:50` | 实战盘面总结评价、当前策略选股及买卖决策时间点 | 运行时热应用；旧键 `DASHBOARD_B1_SCHEDULE_TIMES` 仅作兼容读取 |
 | `DASHBOARD_B1_SCHEDULE_CATCHUP_MINUTES` | `35` | Dashboard 短暂离线后的漏触发补跑窗口 | 需要重启 Dashboard |

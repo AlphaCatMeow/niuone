@@ -1041,7 +1041,7 @@ class MultiStrategyRuleTests(unittest.TestCase):
             self.assertNotIn("buffett_value", screen.STRATEGY_SCORERS)
             self.assertEqual(screen.STRATEGY_META["shaofu_b1"]["family"], "persona")
             self.assertEqual(screen.STRATEGY_META["breakout"]["family"], "local")
-            self.assertEqual(screen.enabled_persona_strategy_ids(), {"zettaranc"})
+            self.assertEqual(screen.enabled_persona_strategy_ids(), {"niuone"})
         finally:
             if old is None:
                 os.environ.pop(screen.PERSONA_STRATEGY_ENV, None)

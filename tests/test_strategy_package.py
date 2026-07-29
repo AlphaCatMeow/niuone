@@ -22,6 +22,30 @@ from strategies.prompts import build_position_exit_prompt_section, build_strateg
 
 
 class StrategyPackageTests(unittest.TestCase):
+    def test_niuone_is_the_default_strategy_suite(self):
+        names = (
+            registry.ACTIVE_STRATEGY_ENV,
+            registry.STRATEGY_SOURCE_ENV,
+            registry.PERSONA_STRATEGY_ENV,
+        )
+        saved = {name: os.environ.get(name) for name in names}
+        try:
+            for name in names:
+                os.environ.pop(name, None)
+
+            self.assertEqual(registry.default_enabled_persona_strategies_value(), "niuone")
+            self.assertEqual(registry.active_strategy_suite(), "niuone")
+            self.assertEqual(
+                registry.enabled_strategy_ids(),
+                {"niu_leader", "niu_pullback", "niu_emerging"},
+            )
+        finally:
+            for name, value in saved.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+
     def test_strategy_suite_prompts_do_not_include_inactive_suites(self):
         cases = {
             "base": ("基础策略：", ("Z哥评分基准", "李大霄")),
