@@ -1616,6 +1616,12 @@
     }
     html:not([data-theme="dark"]) .practice-market-evaluation-label,
     html:not([data-theme="dark"]) .indices-cache-notice span:last-child { color:#2457c5; }
+    html:not([data-theme="dark"]) .practice-market-evaluation-text { color:var(--text); }
+    html:not([data-theme="dark"]) .practice-market-evaluation-tone {
+      border-color:var(--accent-border);
+      background:var(--accent-soft);
+      color:var(--accent-text);
+    }
     html:not([data-theme="dark"]) .market-breadth-card {
       --market-breadth-limit-down:#15803d;
       --market-breadth-limit-up:#be123c;
@@ -1694,6 +1700,12 @@
       background:#fff;
       color:#344054;
       box-shadow:none;
+    }
+    html:not([data-theme="dark"]) .practice-market-summary-body { scrollbar-color:#aeb8c7 #f4f6f9; }
+    html:not([data-theme="dark"]) .practice-market-summary-body::-webkit-scrollbar-track { background:#f4f6f9; }
+    html:not([data-theme="dark"]) .practice-market-summary-body::-webkit-scrollbar-thumb {
+      border-color:#f4f6f9;
+      background:#aeb8c7;
     }
     html:not([data-theme="dark"]) .thread-original {
       border-color:#d7dfec;

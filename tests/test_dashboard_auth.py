@@ -4089,6 +4089,37 @@ process.stdout.write(JSON.stringify({{
         self.assertIn('aria-modal="true"', component)
         self.assertIn("event.key === 'Escape'", component)
         self.assertNotIn('class="practice-market-summary-card"', component)
+        self.assertIn(
+            'html:not([data-theme="dark"]) '
+            '.practice-market-evaluation-text { color:var(--text); }',
+            DASHBOARD_FRONTEND,
+        )
+        self.assertRegex(
+            DASHBOARD_FRONTEND,
+            r'html:not\(\[data-theme="dark"\]\) '
+            r'\.practice-market-evaluation-tone \{'
+            r'[^}]*border-color:var\(--accent-border\);'
+            r'[^}]*background:var\(--accent-soft\);'
+            r'[^}]*color:var\(--accent-text\);',
+        )
+        self.assertIn(
+            'html:not([data-theme="dark"]) .practice-market-summary-body '
+            '{ scrollbar-color:#aeb8c7 #f4f6f9; }',
+            DASHBOARD_FRONTEND,
+        )
+        self.assertIn(
+            'html:not([data-theme="dark"]) '
+            '.practice-market-summary-body::-webkit-scrollbar-track '
+            '{ background:#f4f6f9; }',
+            DASHBOARD_FRONTEND,
+        )
+        self.assertRegex(
+            DASHBOARD_FRONTEND,
+            r'html:not\(\[data-theme="dark"\]\) '
+            r'\.practice-market-summary-body::\-webkit-scrollbar-thumb \{'
+            r'[^}]*border-color:#f4f6f9;'
+            r'[^}]*background:#aeb8c7;',
+        )
         self.assertIn('-webkit-line-clamp:2;', DASHBOARD_FRONTEND)
         self.assertIn('body.practice-market-summary-dialog-open { overflow:hidden; }', DASHBOARD_FRONTEND)
         self.assertIn('max-height:84dvh;', DASHBOARD_FRONTEND)
