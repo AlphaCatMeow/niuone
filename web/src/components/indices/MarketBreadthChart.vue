@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { previousDayMarketLabel } from '../../utils/marketDisplay.js'
 
 const props = defineProps({
@@ -25,6 +25,9 @@ const showVolume = ref(true)
 const hoveredAt = ref('')
 const chartElement = ref(null)
 const chartWrapElement = ref(null)
+const marketInfoOpen = ref(false)
+const marketInfoRoot = ref(null)
+const marketInfoTrigger = ref(null)
 const chartWidth = ref(720)
 const chartAvailableHeight = ref(330)
 let chartResizeObserver = null
@@ -378,6 +381,29 @@ function syncChartSize() {
   if (availableHeight > 0) chartAvailableHeight.value = availableHeight
 }
 
+function toggleMarketInfo() {
+  marketInfoOpen.value = !marketInfoOpen.value
+}
+
+async function closeMarketInfo({ restoreFocus = false } = {}) {
+  if (!marketInfoOpen.value) return
+  marketInfoOpen.value = false
+  if (!restoreFocus) return
+  await nextTick()
+  marketInfoTrigger.value?.focus({ preventScroll: true })
+}
+
+function handleMarketInfoPointerDown(event) {
+  if (!marketInfoOpen.value || marketInfoRoot.value?.contains(event.target)) return
+  closeMarketInfo()
+}
+
+function handleMarketInfoKeydown(event) {
+  if (event.key !== 'Escape' || !marketInfoOpen.value) return
+  event.preventDefault()
+  closeMarketInfo({ restoreFocus: true })
+}
+
 watch(chartWrapElement, element => {
   chartResizeObserver?.disconnect()
   chartResizeObserver = null
@@ -393,11 +419,15 @@ onMounted(() => {
   window.addEventListener('pointermove', clearHoverOutside, { passive: true })
   window.addEventListener('resize', syncChartSize, { passive: true })
   window.visualViewport?.addEventListener('resize', syncChartSize, { passive: true })
+  document.addEventListener('pointerdown', handleMarketInfoPointerDown)
+  document.addEventListener('keydown', handleMarketInfoKeydown)
 })
 onBeforeUnmount(() => {
   window.removeEventListener('pointermove', clearHoverOutside)
   window.removeEventListener('resize', syncChartSize)
   window.visualViewport?.removeEventListener('resize', syncChartSize)
+  document.removeEventListener('pointerdown', handleMarketInfoPointerDown)
+  document.removeEventListener('keydown', handleMarketInfoKeydown)
   chartResizeObserver?.disconnect()
 })
 
@@ -453,18 +483,28 @@ const turnoverEstimateText = computed(() => {
       <div class="market-breadth-heading">
         <div class="market-breadth-title-row">
           <h3 id="market-breadth-title">A股市场情绪曲线</h3>
-          <div class="market-breadth-info">
+          <div ref="marketInfoRoot" class="market-breadth-info">
             <button
-              class="market-breadth-info-trigger"
+              ref="marketInfoTrigger"
+              class="market-breadth-info-trigger dashboard-info-trigger"
               type="button"
               aria-label="查看市场情绪数据说明"
+              aria-controls="marketBreadthInfoPopover"
+              :aria-expanded="marketInfoOpen"
+              @click="toggleMarketInfo"
             >
               <svg viewBox="0 0 20 20" aria-hidden="true">
                 <circle cx="10" cy="10" r="8"></circle>
                 <path d="M10 9v5M10 6.2v.1"></path>
               </svg>
             </button>
-            <div class="market-breadth-info-popover" role="tooltip">
+            <div
+              id="marketBreadthInfoPopover"
+              class="market-breadth-info-popover"
+              :class="{ open: marketInfoOpen }"
+              role="dialog"
+              aria-label="市场情绪数据说明"
+            >
               <strong>数据说明</strong>
               <span>{{ payload.universe || '沪深A股' }} · 每分钟真实采样</span>
               <span v-if="latestGeneratedAt">最新采样：{{ latestGeneratedAt }}</span>

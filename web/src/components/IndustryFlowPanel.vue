@@ -207,7 +207,7 @@ onBeforeUnmount(() => {
             <h2>行业主力资金流动</h2>
             <div class="industry-flow-info">
               <button
-                class="industry-flow-info-trigger"
+                class="industry-flow-info-trigger dashboard-info-trigger"
                 type="button"
                 aria-label="查看行业资金流数据说明"
               >

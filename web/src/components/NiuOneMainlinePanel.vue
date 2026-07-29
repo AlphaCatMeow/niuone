@@ -12,6 +12,9 @@ const {
 
 const activeFilter = ref('all')
 const expandedTheme = ref('')
+const coveragePopoverOpen = ref(false)
+const coverageInfoRoot = ref(null)
+const coverageInfoTrigger = ref(null)
 const adminAuth = reactive({ open: false, credential: '', error: '', submitting: false })
 const adminCredentialInput = ref(null)
 const payload = computed(() => state.payload || {})
@@ -101,6 +104,27 @@ function toggleThemeStocks(theme) {
   expandedTheme.value = expandedTheme.value === key ? '' : key
 }
 
+function toggleCoveragePopover() {
+  coveragePopoverOpen.value = !coveragePopoverOpen.value
+}
+
+function closeCoveragePopover({ restoreFocus = false } = {}) {
+  if (!coveragePopoverOpen.value) return
+  coveragePopoverOpen.value = false
+  if (restoreFocus) nextTick(() => coverageInfoTrigger.value?.focus({ preventScroll: true }))
+}
+
+function handleCoveragePointerDown(event) {
+  if (!coveragePopoverOpen.value || coverageInfoRoot.value?.contains(event.target)) return
+  closeCoveragePopover()
+}
+
+function handleCoverageKeydown(event) {
+  if (event.key !== 'Escape' || !coveragePopoverOpen.value) return
+  event.preventDefault()
+  closeCoveragePopover({ restoreFocus: true })
+}
+
 async function requestAdminAuthentication() {
   adminAuth.open = true
   adminAuth.error = ''
@@ -161,8 +185,16 @@ function themeTone(theme) {
   return 'neutral'
 }
 
-onMounted(activateNiuOneMainline)
-onBeforeUnmount(deactivateNiuOneMainline)
+onMounted(() => {
+  activateNiuOneMainline()
+  document.addEventListener('pointerdown', handleCoveragePointerDown)
+  document.addEventListener('keydown', handleCoverageKeydown)
+})
+onBeforeUnmount(() => {
+  deactivateNiuOneMainline()
+  document.removeEventListener('pointerdown', handleCoveragePointerDown)
+  document.removeEventListener('keydown', handleCoverageKeydown)
+})
 </script>
 
 <template>
@@ -210,19 +242,29 @@ onBeforeUnmount(deactivateNiuOneMainline)
           <article class="mainline-summary-card coverage-card">
             <div class="coverage-label-row">
               <span>题材有效覆盖</span>
-              <div v-if="coverageReasons.length" class="coverage-info">
+              <div v-if="coverageReasons.length" ref="coverageInfoRoot" class="coverage-info">
                 <button
+                  ref="coverageInfoTrigger"
+                  class="dashboard-info-trigger"
                   type="button"
                   aria-label="查看未覆盖原因"
-                  aria-describedby="coverageReasonPopover"
+                  aria-controls="coverageReasonPopover"
+                  :aria-expanded="coveragePopoverOpen"
+                  @click="toggleCoveragePopover"
                 >
                   <svg viewBox="0 0 20 20" aria-hidden="true">
                     <circle cx="10" cy="10" r="8"></circle>
                     <path d="M10 9v5M10 6.2v.1"></path>
                   </svg>
                 </button>
-                <div id="coverageReasonPopover" class="coverage-popover" role="tooltip">
-                  <strong>未覆盖原因</strong>
+                <div
+                  id="coverageReasonPopover"
+                  class="coverage-popover"
+                  :class="{ open: coveragePopoverOpen }"
+                  role="dialog"
+                  aria-label="未覆盖原因"
+                >
+                  <strong class="coverage-popover-title">未覆盖原因</strong>
                   <div
                     v-for="reason in coverageReasons"
                     :key="reason.key || reason.label"
@@ -424,12 +466,11 @@ onBeforeUnmount(deactivateNiuOneMainline)
 .coverage-card { position:relative; }
 .coverage-label-row { display:flex; align-items:center; gap:7px; color:var(--muted); font-size:12px; }
 .coverage-info { display:inline-flex; align-items:center; }
-.coverage-info > button { display:grid; width:20px; height:20px; place-items:center; padding:0; border:0; border-radius:999px; background:transparent; color:var(--accent); cursor:pointer; }
-.coverage-info > button:hover,.coverage-info > button:focus-visible { background:var(--accent-soft); outline:none; box-shadow:0 0 0 2px var(--accent-border); }
+.coverage-info > button { display:grid; width:20px; height:20px; place-items:center; padding:0; border:0; border-radius:999px; background:transparent; cursor:pointer; }
 .coverage-info svg { width:19px; height:19px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; }
 .coverage-popover { position:absolute; z-index:20; top:35px; right:10px; left:10px; display:none; padding:12px; border:1px solid var(--accent-border); border-radius:12px; background:var(--panel); color:var(--text); box-shadow:0 16px 34px rgba(15,23,42,.2); }
-.coverage-info:hover .coverage-popover,.coverage-info:focus-within .coverage-popover { display:block; }
-.coverage-popover > strong { display:block; margin-bottom:8px; color:var(--text); font-size:12px; }
+.coverage-popover.open { display:block; }
+.coverage-popover-title { display:block; margin-bottom:8px; color:var(--text); font-size:12px; }
 .coverage-popover-row { display:grid; grid-template-columns:1fr auto; gap:2px 10px; padding:7px 0; border-top:1px solid var(--line); }
 .coverage-popover-row > span { color:var(--text); font-size:11px; }
 .coverage-popover-row > b { color:var(--accent-text); font-size:11px; font-variant-numeric:tabular-nums; }

@@ -942,6 +942,12 @@ class FastApiDashboardTests(unittest.TestCase):
         component = (
             ROOT / "web" / "src" / "components" / "indices" / "MarketBreadthChart.vue"
         ).read_text(encoding="utf-8")
+        industry_component = (
+            ROOT / "web" / "src" / "components" / "IndustryFlowPanel.vue"
+        ).read_text(encoding="utf-8")
+        mainline_component = (
+            ROOT / "web" / "src" / "components" / "NiuOneMainlinePanel.vue"
+        ).read_text(encoding="utf-8")
         stylesheet = (ROOT / "frontend" / "dashboard.css").read_text(encoding="utf-8")
 
         self.assertIn(
@@ -990,10 +996,27 @@ class FastApiDashboardTests(unittest.TestCase):
         self.assertIn(".market-breadth-info-popover { position:absolute;", stylesheet)
         self.assertNotIn("cursor:help", stylesheet)
         self.assertNotIn("outline:2px solid rgba(129,140,248,.42)", stylesheet)
+        self.assertIn(".market-breadth-info-popover.open {", stylesheet)
+        self.assertNotIn(".market-breadth-info:focus-within", stylesheet)
+        self.assertIn('ref="marketInfoRoot"', component)
+        self.assertIn(':aria-expanded="marketInfoOpen"', component)
+        self.assertIn('@click="toggleMarketInfo"', component)
+        self.assertNotIn('aria-label="关闭市场情绪数据说明"', component)
+        self.assertNotIn('market-breadth-info-close', stylesheet)
+        self.assertIn("document.addEventListener('pointerdown', handleMarketInfoPointerDown)", component)
+        self.assertIn("document.addEventListener('keydown', handleMarketInfoKeydown)", component)
+        for info_component in (component, industry_component, mainline_component):
+            self.assertIn("dashboard-info-trigger", info_component)
+        self.assertIn(".dashboard-info-trigger { --dashboard-info-color:#c7d2fe;", stylesheet)
+        self.assertIn(".dashboard-info-trigger:hover { color:#eef2ff;", stylesheet)
+        self.assertIn(".dashboard-info-trigger:focus-visible {", stylesheet)
         self.assertIn(
-            ".market-breadth-info:hover .market-breadth-info-popover, .market-breadth-info:focus-within .market-breadth-info-popover",
+            'html:not([data-theme="dark"]) .dashboard-info-trigger { --dashboard-info-color:#315aa8;',
             stylesheet,
         )
+        self.assertIn('html[data-theme="dark"] .dashboard-info-trigger {', stylesheet)
+        self.assertIn("--dashboard-info-color:#c7d2fe;", stylesheet)
+        self.assertIn(".dashboard-info-trigger:focus-visible {\n        color:var(--dashboard-info-color);", stylesheet)
         self.assertIn("header { position:sticky; top:0; z-index:20;", stylesheet)
         self.assertIn(
             "box-shadow:inset 0 1px 0 rgba(255,255,255,.035), 0 10px 28px rgba(0,0,0,.14); -webkit-user-select:none; user-select:none;",
