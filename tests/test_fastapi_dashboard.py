@@ -1037,11 +1037,41 @@ class FastApiDashboardTests(unittest.TestCase):
         component = (
             ROOT / "web" / "src" / "components" / "DragonTigerPanel.vue"
         ).read_text(encoding="utf-8")
+        stylesheet = (ROOT / "frontend" / "dashboard.css").read_text(
+            encoding="utf-8"
+        )
 
         self.assertIn('aria-label="涨停原因"', component)
         self.assertIn("item.limit_up_reason || item.limit_up_reason_category", component)
         self.assertIn("同花顺问财归纳，仅供研究参考", component)
         self.assertIn('aria-label="上榜理由"', component)
+        self.assertIn(
+            'html:not([data-theme="dark"]) .dragon-tiger-limit-up-reason '
+            "{ border-color:#efc9c5; border-left-color:#c43d35; "
+            "background:#fff7f6; }",
+            stylesheet,
+        )
+        self.assertIn(
+            'html:not([data-theme="dark"]) .dragon-tiger-limit-up-reason p '
+            "{ color:#344054; }",
+            stylesheet,
+        )
+        self.assertIn(
+            'html:not([data-theme="dark"]) .dragon-tiger-limit-up-reason > small '
+            "{ color:#667085; }",
+            stylesheet,
+        )
+        self.assertIn(
+            'html:not([data-theme="dark"]) .dragon-tiger-status.querying '
+            "{ border-color:#b9c9ea; background:#edf3ff; color:#214b9c; }",
+            stylesheet,
+        )
+        self.assertIn(
+            'html:not([data-theme="dark"]) '
+            ".dragon-tiger-continuous-tooltip-head em.negative "
+            "{ border-color:#b9dfd0; background:#eff9f5; color:#087052; }",
+            stylesheet,
+        )
 
     def test_dragon_tiger_collapsed_rows_color_limit_up_reason_names(self):
         component = (

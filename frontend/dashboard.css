@@ -2059,8 +2059,10 @@
       background:#f4f7fc;
       color:#214b9c;
     }
+    html:not([data-theme="dark"]) .dragon-tiger-date-controls button:hover:not(:disabled) { border-color:#8fa9dc; background:#eaf0fb; }
     html:not([data-theme="dark"]) .dragon-tiger-status { border-color:#b9dfd0; background:#eff9f5; color:#087052; }
     html:not([data-theme="dark"]) .dragon-tiger-status.stale { border-color:#ddc27e; background:#fff8e5; color:#845400; }
+    html:not([data-theme="dark"]) .dragon-tiger-status.querying { border-color:#b9c9ea; background:#edf3ff; color:#214b9c; }
     html:not([data-theme="dark"]) .dragon-tiger-list { border-color:#dfe3e8; }
     html:not([data-theme="dark"]) .dragon-tiger-list-head { color:#475467; }
     html:not([data-theme="dark"]) .dragon-tiger-sort-btn:hover { color:#214b9c; background:#edf3ff; }
@@ -2099,6 +2101,11 @@
       background:#fffdf7;
       box-shadow:0 14px 34px rgba(71,52,16,.16);
     }
+    html:not([data-theme="dark"]) .dragon-tiger-continuous-tooltip-head { border-bottom-color:#eadcbf; }
+    html:not([data-theme="dark"]) .dragon-tiger-continuous-tooltip-head em { border-color:#cfd5dd; background:#f7f8fa; color:#475467; }
+    html:not([data-theme="dark"]) .dragon-tiger-continuous-tooltip-head em.positive { border-color:#efc9c5; background:#fff3f2; color:#a8342d; }
+    html:not([data-theme="dark"]) .dragon-tiger-continuous-tooltip-head em.negative { border-color:#b9dfd0; background:#eff9f5; color:#087052; }
+    html:not([data-theme="dark"]) .dragon-tiger-continuous-tooltip-head em.neutral { border-color:#b9c9ea; background:#edf3ff; color:#214b9c; }
     html:not([data-theme="dark"]) .dragon-tiger-continuous-tooltip-head b,
     html:not([data-theme="dark"]) .dragon-tiger-continuous-news .dragon-tiger-reasons-head b { color:#815100; }
     html:not([data-theme="dark"]) .dragon-tiger-continuous-tooltip-summary { color:#344054; }
@@ -2109,8 +2116,15 @@
     html:not([data-theme="dark"]) .dragon-tiger-continuous-tooltip > small,
     html:not([data-theme="dark"]) .dragon-tiger-continuous-news > small { color:#75684f; }
     html:not([data-theme="dark"]) .dragon-tiger-detail { background:#fbfcfd; }
+    html:not([data-theme="dark"]) .dragon-tiger-detail-meta > span,
+    html:not([data-theme="dark"]) .dragon-tiger-detail-values > span { border-color:#e7ebf0; }
     html:not([data-theme="dark"]) .dragon-tiger-reasons,
-    html:not([data-theme="dark"]) .dragon-tiger-seats { border-color:#d7dfec; background:#f7f9fc; }
+    html:not([data-theme="dark"]) .dragon-tiger-seats { border-color:#d5e0f3; border-left-color:#7c9bd5; background:#f8faff; }
+    html:not([data-theme="dark"]) .dragon-tiger-limit-up-reason { border-color:#efc9c5; border-left-color:#c43d35; background:#fff7f6; }
+    html:not([data-theme="dark"]) .dragon-tiger-limit-up-reason .dragon-tiger-reasons-head b { color:#a8342d; }
+    html:not([data-theme="dark"]) .dragon-tiger-limit-up-reason .dragon-tiger-reasons-head span { color:#9c3b35; }
+    html:not([data-theme="dark"]) .dragon-tiger-limit-up-reason p { color:#344054; }
+    html:not([data-theme="dark"]) .dragon-tiger-limit-up-reason > small { color:#667085; }
     html:not([data-theme="dark"]) .dragon-tiger-continuous-news { border-color:#e5c77d; border-left-color:#c88a16; background:#fffaf0; }
     html:not([data-theme="dark"]) .dragon-tiger-continuous-news p { color:#344054; }
     html:not([data-theme="dark"]) .dragon-tiger-reasons-head b,
@@ -2131,6 +2145,11 @@
     html:not([data-theme="dark"]) .dragon-tiger-unavailable { color:#667085; }
     html:not([data-theme="dark"]) .dragon-tiger-reason-list li > b { background:#edf3ff; color:#214b9c; }
     html:not([data-theme="dark"]) .dragon-tiger-seat-notice { background:#fff8e5; color:#845400; }
+    html:not([data-theme="dark"]) .dragon-tiger-seat-group,
+    html:not([data-theme="dark"]) .dragon-tiger-seat-record + .dragon-tiger-seat-record,
+    html:not([data-theme="dark"]) .dragon-tiger-seat-side-head,
+    html:not([data-theme="dark"]) .dragon-tiger-seat-values > span + span,
+    html:not([data-theme="dark"]) .dragon-tiger-detail-values { border-color:#e3e8f0; }
     html:not([data-theme="dark"]) .dragon-tiger-seat-side.buy { border-color:#efc9c5; }
     html:not([data-theme="dark"]) .dragon-tiger-seat-side.sell { border-color:#b9dfd0; }
     html:not([data-theme="dark"]) .dragon-tiger-seat-side-head b { color:var(--text); }
