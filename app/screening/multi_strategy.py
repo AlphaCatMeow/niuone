@@ -92,6 +92,7 @@ from strategies.registry import (
     STRATEGY_DEFINITIONS,
     STRATEGY_META,
     STRATEGY_SCORE_PROFILES,
+    active_strategy_suite,
     enabled_persona_strategy_ids,
     enabled_strategy_ids,
     enabled_strategy_meta,
@@ -2538,6 +2539,12 @@ def main():
     
     output = {
         "generated_at": generated_at,
+        "strategy_suite": active_strategy_suite(
+            active_strategy_setting(),
+            strategy_source_setting(),
+            enabled_persona_strategy_setting(),
+        ),
+        "enabled_strategy_ids": sorted(scorers),
         "configured_stock_universe": list(configured_universe),
         "configured_stock_universe_label": friendly_stock_universe(configured_universe),
         "stock_universe": list(stock_universe),

@@ -10,7 +10,9 @@ import PracticeCandidateCard from './practice/PracticeCandidateCard.vue'
 const { state, activatePracticeCandidates, deactivatePracticeCandidates } = usePracticeCandidatesData()
 const strategyMeta = computed(() => practiceCandidateStrategyMeta(state.strategyMeta))
 const tierCounts = computed(() => practiceCandidateTierCounts(state.items))
-const statusText = computed(() => state.running
+const statusText = computed(() => state.strategyCacheStale
+  ? (state.statusMessage || '策略已切换，等待重新扫描候选股')
+  : state.running
   ? `计算中${state.startedAt ? ` · 开始 ${state.startedAt.slice(11)}` : ''}`
   : `扫描时间：${state.generatedAt || '--'} · 高流动性主板扫描 ${state.count || state.items.length} 只入选`)
 const distribution = computed(() => Object.entries(state.strategyDistribution || {})
@@ -32,6 +34,9 @@ onBeforeUnmount(deactivatePracticeCandidates)
     </div>
     <div v-if="state.running" class="empty" style="border-color:var(--accent-border);color:var(--accent-text);background:var(--accent-soft)">
       多战法正在计算中，完成后页面会自动刷新；当前下方仍显示上一版缓存结果。
+    </div>
+    <div v-if="state.strategyCacheStale" class="empty" style="border-color:var(--accent-border);color:var(--accent-text);background:var(--accent-soft)">
+      {{ state.statusMessage || '策略已切换，等待重新扫描候选股。旧策略候选已隐藏。' }}
     </div>
     <div v-if="state.loading && !state.loaded" class="loading">候选股加载中...</div>
     <div v-else-if="state.error && !state.items.length" class="empty" style="color:#f87171">⚠️ {{ state.error }}</div>
@@ -58,6 +63,6 @@ onBeforeUnmount(deactivatePracticeCandidates)
         />
       </div>
     </template>
-    <div v-else class="empty">暂无多战法结果，请等待扫描完成…</div>
+    <div v-else-if="!state.strategyCacheStale" class="empty">暂无多战法结果，请等待扫描完成…</div>
   </section>
 </template>

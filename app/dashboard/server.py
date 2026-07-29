@@ -113,6 +113,8 @@ from strategies.registry import (
     decode_trade_discipline_text,
     default_trade_discipline_text,
     default_enabled_persona_strategies_value,
+    enabled_strategy_ids,
+    enabled_strategy_meta,
     normalize_preset_strategy_text_update,
     normalize_trade_discipline_text_update,
     normalize_strategy_source_update,
@@ -121,6 +123,7 @@ from strategies.registry import (
     strategy_suite_options,
     strategy_settings_options,
 )
+from strategies.selection import sort_candidates_by_score
 from us_market_summary import fetch_us_market_summary, fetch_us_sector_snapshot, load_cached_summary_for_today
 
 try:
@@ -1738,7 +1741,27 @@ def maybe_run_practice_decision_async(b1_payload: dict[str, Any]) -> None:
     threading.Thread(target=_worker, name="niuniu-practice-decision", daemon=True).start()
 
 def load_practice_candidates_cache() -> dict[str, Any]:
+    strategy_suite = active_strategy_suite(
+        os.environ.get(ACTIVE_STRATEGY_ENV),
+        os.environ.get(STRATEGY_SOURCE_ENV),
+        os.environ.get(PERSONA_STRATEGY_ENV),
+    )
+    active_strategy_ids = enabled_strategy_ids(
+        os.environ.get(PERSONA_STRATEGY_ENV),
+        os.environ.get(STRATEGY_SOURCE_ENV),
+        os.environ.get(ACTIVE_STRATEGY_ENV),
+    )
+    strategy_meta = enabled_strategy_meta(
+        os.environ.get(PERSONA_STRATEGY_ENV),
+        os.environ.get(STRATEGY_SOURCE_ENV),
+        os.environ.get(ACTIVE_STRATEGY_ENV),
+    )
+    suite_labels = {
+        str(item.get("id") or ""): str(item.get("label") or item.get("id") or "")
+        for item in strategy_suite_options()
+    }
     errors: list[str] = []
+    stale_cache_found = False
     for cache_file in (MULTI_STRATEGY_CACHE_FILE, B1_CACHE_FILE):
         try:
             if not cache_file.exists():
@@ -1747,17 +1770,81 @@ def load_practice_candidates_cache() -> dict[str, Any]:
             if not isinstance(parsed, dict):
                 raise ValueError(f"候选缓存格式无效：{cache_file}")
             items = parsed.get("items") or parsed.get("candidates") or []
+            cached_ids: set[str] = set()
+            explicit_ids = parsed.get("enabled_strategy_ids")
+            if isinstance(explicit_ids, list):
+                cached_ids.update(str(value) for value in explicit_ids if str(value or "").strip())
+            cached_meta = parsed.get("strategy_meta")
+            if not cached_ids and isinstance(cached_meta, dict):
+                cached_ids.update(str(value) for value in cached_meta if str(value or "").strip())
+            for field in ("items", "candidates", "trade_items"):
+                rows = parsed.get(field)
+                for item in rows if isinstance(rows, list) else []:
+                    if not isinstance(item, dict):
+                        continue
+                    strategy_id = str(item.get("best_strategy") or item.get("strategy") or "").strip()
+                    if strategy_id:
+                        cached_ids.add(strategy_id)
+            cached_suite = str(parsed.get("strategy_suite") or "").strip()
+            if (
+                (cached_suite and cached_suite != strategy_suite)
+                or (cached_ids and not cached_ids.issubset(active_strategy_ids))
+            ):
+                stale_cache_found = True
+                continue
+            def active_rows(value: Any) -> list[dict[str, Any]]:
+                if not isinstance(value, list):
+                    return []
+                return [
+                    item
+                    for item in value
+                    if isinstance(item, dict)
+                    and (
+                        not str(item.get("best_strategy") or item.get("strategy") or "").strip()
+                        or str(item.get("best_strategy") or item.get("strategy") or "").strip()
+                        in active_strategy_ids
+                    )
+                ]
+
+            display_items = sort_candidates_by_score(active_rows(items))
+            candidates = sort_candidates_by_score(active_rows(parsed.get("candidates") or display_items))
+            trade_items = sort_candidates_by_score(active_rows(parsed.get("trade_items") or display_items))
             return {
                 **parsed,
                 "generated_at": parsed.get("generated_at", ""),
-                "count": parsed.get("count", len(items)),
-                "items": items,
+                "count": len(display_items),
+                "items": display_items,
+                "candidates": candidates,
+                "trade_items": trade_items,
+                "trade_count": len(trade_items),
+                "strategy_suite": strategy_suite,
+                "enabled_strategy_ids": sorted(active_strategy_ids),
+                "strategy_meta": strategy_meta,
+                "strategy_cache_stale": False,
+                "refresh_required": False,
             }
         except (OSError, ValueError) as exc:
             errors.append(f"{cache_file.name}: {exc}")
+    base = {
+        "items": [],
+        "candidates": [],
+        "trade_items": [],
+        "count": 0,
+        "trade_count": 0,
+        "generated_at": "",
+        "strategy_suite": strategy_suite,
+        "enabled_strategy_ids": sorted(active_strategy_ids),
+        "strategy_meta": strategy_meta,
+        "strategy_distribution": {},
+        "strategy_cache_stale": stale_cache_found,
+        "refresh_required": stale_cache_found,
+    }
+    if stale_cache_found:
+        label = suite_labels.get(strategy_suite, strategy_suite)
+        base["status_message"] = f"已切换为{label}，正在等待按当前策略重新扫描候选股"
     if errors:
-        return {"error": "; ".join(errors), "items": [], "count": 0, "generated_at": ""}
-    return {"items": [], "count": 0, "generated_at": ""}
+        base["error"] = "; ".join(errors)
+    return base
 
 
 def load_niuone_mainline_cache_payload() -> dict[str, Any]:
@@ -2056,7 +2143,7 @@ def recent_practice_candidates_for_manual_cycle() -> dict[str, Any] | None:
     if PRACTICE_MANUAL_SCAN_REUSE_SECONDS <= 0:
         return None
     cache = load_practice_candidates_cache()
-    if cache.get("error"):
+    if cache.get("error") or cache.get("refresh_required") or cache.get("strategy_cache_stale"):
         return None
     generated_at = str(cache.get("generated_at") or "")[:19]
     try:

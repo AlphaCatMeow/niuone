@@ -27,6 +27,10 @@ class PublicProjectionTests(unittest.TestCase):
             candidates={
                 "generated_at": "2026-07-21 10:00:00",
                 "running": True,
+                "strategy_suite": "niuone",
+                "strategy_cache_stale": True,
+                "refresh_required": True,
+                "status_message": "等待牛牛战法重新扫描",
                 "strategy_meta": {
                     "trend_pullback": {
                         "label": "趋势回踩",
@@ -85,6 +89,10 @@ class PublicProjectionTests(unittest.TestCase):
         self.assertNotIn("db_path", sections["messages"])
         self.assertNotIn("raw_payload", sections["messages"]["records"][0])
         self.assertTrue(sections["candidates"]["running"])
+        self.assertEqual(sections["candidates"]["strategy_suite"], "niuone")
+        self.assertTrue(sections["candidates"]["strategy_cache_stale"])
+        self.assertTrue(sections["candidates"]["refresh_required"])
+        self.assertEqual(sections["candidates"]["status_message"], "等待牛牛战法重新扫描")
         self.assertEqual(sections["candidates"]["items"][0]["best_score"], 8.5)
         self.assertEqual(sections["candidates"]["items"][0]["industry_flow_rank"], 2)
         self.assertEqual(sections["candidates"]["items"][0]["industry_flow_adjustment"], 0.55)

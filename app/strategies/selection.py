@@ -19,6 +19,24 @@ def configured_candidate_limit(name: str, default: int) -> int:
         return default
 
 
+def candidate_score_sort_key(item: dict[str, Any]) -> tuple[float, float, str]:
+    """Sort by the final score shown on candidate cards, then decision score."""
+    raw_score = item.get("best_score")
+    if raw_score is None:
+        raw_score = item.get("score")
+    score = safe_float(raw_score)
+    decision_score = safe_float(item.get("best_decision_score"))
+    return (
+        -(score if score is not None else -1.0),
+        -(decision_score if decision_score is not None else score if score is not None else -1.0),
+        str(item.get("code") or ""),
+    )
+
+
+def sort_candidates_by_score(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(results, key=candidate_score_sort_key)
+
+
 def candidate_is_trade_ready(item: dict[str, Any]) -> bool:
     raw_score = item.get("best_score")
     if raw_score is None:
@@ -51,7 +69,7 @@ def select_trade_candidates(results: list[dict[str, Any]], limit: int | None = N
         limit = configured_candidate_limit(TRADE_CANDIDATE_LIMIT_ENV, DEFAULT_TRADE_CANDIDATE_LIMIT)
     selected: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for item in results:
+    for item in sort_candidates_by_score(results):
         if len(selected) >= limit:
             break
         code = str(item.get("code") or "")
@@ -69,6 +87,7 @@ def select_display_candidates(
     """Keep top-ranked names while reserving slots for each strategy family."""
     if limit is None:
         limit = configured_candidate_limit(DISPLAY_CANDIDATE_LIMIT_ENV, DEFAULT_DISPLAY_CANDIDATE_LIMIT)
+    ranked_results = sort_candidates_by_score(results)
     selected: list[dict[str, Any]] = []
     seen: set[str] = set()
 
@@ -81,7 +100,7 @@ def select_display_candidates(
         selected.append(item)
         seen.add(code)
 
-    trade_ready = [item for item in results if candidate_is_trade_ready(item)]
+    trade_ready = [item for item in ranked_results if candidate_is_trade_ready(item)]
     trade_head_limit = configured_candidate_limit(TRADE_CANDIDATE_LIMIT_ENV, DEFAULT_TRADE_CANDIDATE_LIMIT)
     for item in trade_ready[:min(limit, trade_head_limit)]:
         add(item)
@@ -95,7 +114,7 @@ def select_display_candidates(
     for item in trade_ready:
         add(item)
 
-    for item in results:
+    for item in ranked_results:
         add(item)
 
-    return selected
+    return sort_candidates_by_score(selected)

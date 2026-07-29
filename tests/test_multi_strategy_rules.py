@@ -758,6 +758,47 @@ class MultiStrategyRuleTests(unittest.TestCase):
 
         self.assertEqual(screen.select_trade_candidates([blocked, good]), [good])
 
+    def test_candidate_lists_sort_by_displayed_score_descending(self):
+        candidates = [
+            {
+                "code": "600001",
+                "best_score": 6.6,
+                "best_decision_score": 9.8,
+                "entry_threshold": 6.0,
+                "distance_pct": 1.0,
+                "actionable": True,
+                "hard_blockers": [],
+            },
+            {
+                "code": "600002",
+                "best_score": 8.3,
+                "best_decision_score": 8.5,
+                "entry_threshold": 6.0,
+                "distance_pct": 1.0,
+                "actionable": True,
+                "hard_blockers": [],
+            },
+            {
+                "code": "600003",
+                "best_score": 7.4,
+                "best_decision_score": 9.0,
+                "entry_threshold": 6.0,
+                "distance_pct": 1.0,
+                "actionable": True,
+                "hard_blockers": [],
+            },
+        ]
+
+        expected = ["600002", "600003", "600001"]
+        self.assertEqual(
+            [item["code"] for item in screen.select_display_candidates(candidates)],
+            expected,
+        )
+        self.assertEqual(
+            [item["code"] for item in screen.select_trade_candidates(candidates)],
+            expected,
+        )
+
     def test_candidate_counts_follow_runtime_settings(self):
         candidates = [
             {
@@ -1071,6 +1112,7 @@ class MultiStrategyRuleTests(unittest.TestCase):
                 "base": {"breakout", "trend_pullback"},
                 "zettaranc": {"b3_accelerate", "b2_confirm", "shaofu_b1", "super_b1"},
                 "li_daxiao_bottom": {"li_daxiao_bottom"},
+                "niuone": {"niu_emerging", "niu_leader", "niu_pullback"},
                 "preset_text": {"breakout", "trend_pullback"},
             }
             for suite, scorer_ids in expected.items():

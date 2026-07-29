@@ -2706,6 +2706,10 @@ console.log(JSON.stringify([
         self.assertIn('item.industry || item.sector || item.board_label || item.board', PRACTICE_CANDIDATE_UTILS)
         self.assertIn('{{ industryLabel }}', PRACTICE_CANDIDATE_COMPONENTS)
         self.assertNotIn('所属板块', PRACTICE_CANDIDATE_COMPONENTS)
+        for label in ('主线与龙头', '风控与执行', '未通过条件', '评分依据', '仓位规则', '退出规则'):
+            self.assertIn(label, PRACTICE_CANDIDATE_COMPONENTS)
+        self.assertIn(".filter((flag) => !blockers.has(flagKey(flag)))", PRACTICE_CANDIDATE_COMPONENTS)
+        self.assertIn('grid-template-columns: repeat(2, minmax(0, 1fr))', PRACTICE_CANDIDATE_COMPONENTS)
 
         for label in ('买入理由', '卖出归因', '最低/最高', '仓位占比', '可卖/持有'):
             self.assertIn(label, PRACTICE_COMPONENTS)
@@ -3336,13 +3340,22 @@ process.stdout.write(JSON.stringify({{
                 encoding='utf-8',
             )
             dashboard.MULTI_STRATEGY_CACHE_FILE.write_text(
-                json.dumps({'items': [{'code': 'multi'}], 'generated_at': 'multi'}),
+                json.dumps({
+                    'items': [
+                        {'code': 'multi-low', 'best_score': 6.6},
+                        {'code': 'multi-high', 'best_score': 8.3},
+                    ],
+                    'generated_at': 'multi',
+                }),
                 encoding='utf-8',
             )
 
             preferred = dashboard.load_practice_candidates_cache()
-            self.assertEqual(preferred['items'], [{'code': 'multi'}])
-            self.assertEqual(preferred['count'], 1)
+            self.assertEqual(
+                [item['code'] for item in preferred['items']],
+                ['multi-high', 'multi-low'],
+            )
+            self.assertEqual(preferred['count'], 2)
             self.assertEqual(preferred['generated_at'], 'multi')
 
             dashboard.MULTI_STRATEGY_CACHE_FILE.unlink()
@@ -3353,6 +3366,66 @@ process.stdout.write(JSON.stringify({{
         finally:
             dashboard.MULTI_STRATEGY_CACHE_FILE = original_multi_strategy_cache_file
             dashboard.B1_CACHE_FILE = original_b1_cache_file
+
+    def test_practice_candidates_cache_hides_candidates_from_inactive_strategy(self):
+        original_multi_strategy_cache_file = dashboard.MULTI_STRATEGY_CACHE_FILE
+        original_b1_cache_file = dashboard.B1_CACHE_FILE
+        saved_active = os.environ.get(dashboard.ACTIVE_STRATEGY_ENV)
+        dashboard.MULTI_STRATEGY_CACHE_FILE = self.tmp_path / 'multi_strategy_latest.json'
+        dashboard.B1_CACHE_FILE = self.tmp_path / 'b1_screen_latest.json'
+        try:
+            os.environ[dashboard.ACTIVE_STRATEGY_ENV] = 'niuone'
+            stale_payload = {
+                'strategy_suite': 'zettaranc',
+                'enabled_strategy_ids': ['shaofu_b1'],
+                'strategy_meta': {'shaofu_b1': {'label': '少妇B1'}},
+                'items': [{'code': '600001', 'best_strategy': 'shaofu_b1'}],
+                'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            }
+            dashboard.MULTI_STRATEGY_CACHE_FILE.write_text(
+                json.dumps(stale_payload),
+                encoding='utf-8',
+            )
+            dashboard.B1_CACHE_FILE.write_text(
+                json.dumps(stale_payload),
+                encoding='utf-8',
+            )
+
+            stale = dashboard.load_practice_candidates_cache()
+
+            self.assertEqual(stale['items'], [])
+            self.assertEqual(stale['strategy_suite'], 'niuone')
+            self.assertTrue(stale['strategy_cache_stale'])
+            self.assertTrue(stale['refresh_required'])
+            self.assertIn('牛牛战法', stale['status_message'])
+            self.assertIsNone(dashboard.recent_practice_candidates_for_manual_cycle())
+
+            niuone_ids = sorted(dashboard.enabled_strategy_ids(None, None, 'niuone'))
+            dashboard.B1_CACHE_FILE.write_text(
+                json.dumps({
+                    'strategy_suite': 'niuone',
+                    'enabled_strategy_ids': niuone_ids,
+                    'strategy_meta': {
+                        strategy_id: {'label': strategy_id}
+                        for strategy_id in niuone_ids
+                    },
+                    'items': [{'code': '600002', 'best_strategy': 'niu_leader'}],
+                    'generated_at': '2026-07-29 10:00:00',
+                }),
+                encoding='utf-8',
+            )
+
+            refreshed = dashboard.load_practice_candidates_cache()
+            self.assertEqual(refreshed['items'][0]['best_strategy'], 'niu_leader')
+            self.assertFalse(refreshed['strategy_cache_stale'])
+            self.assertFalse(refreshed['refresh_required'])
+        finally:
+            dashboard.MULTI_STRATEGY_CACHE_FILE = original_multi_strategy_cache_file
+            dashboard.B1_CACHE_FILE = original_b1_cache_file
+            if saved_active is None:
+                os.environ.pop(dashboard.ACTIVE_STRATEGY_ENV, None)
+            else:
+                os.environ[dashboard.ACTIVE_STRATEGY_ENV] = saved_active
 
     def test_practice_candidates_api_uses_canonical_cache_for_legacy_alias(self):
         original_loader = dashboard.load_practice_candidates_cache

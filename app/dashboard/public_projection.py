@@ -282,6 +282,10 @@ def build_public_sections(
         "running": bool(candidates.get("running")),
         "started_at": _public_scalar(candidates.get("started_at") or ""),
         "generated_at": _public_scalar(candidates.get("generated_at") or ""),
+        "strategy_suite": _public_scalar(candidates.get("strategy_suite") or ""),
+        "strategy_cache_stale": bool(candidates.get("strategy_cache_stale")),
+        "refresh_required": bool(candidates.get("refresh_required")),
+        "status_message": _public_scalar(candidates.get("status_message") or ""),
         "strategy_meta": _candidate_strategy_meta(candidates.get("strategy_meta")),
         "strategy_distribution": _candidate_strategy_distribution(
             candidates.get("strategy_distribution")

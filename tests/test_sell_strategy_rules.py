@@ -583,6 +583,19 @@ class SellStrategyRuleTests(unittest.TestCase):
             else:
                 os.environ[trader.ACTIVE_STRATEGY_ENV] = saved_active
 
+    def test_candidate_matches_active_strategy(self):
+        saved_active = os.environ.get(trader.ACTIVE_STRATEGY_ENV)
+        try:
+            os.environ[trader.ACTIVE_STRATEGY_ENV] = "niuone"
+            self.assertTrue(trader.candidate_matches_active_strategy({"best_strategy": "niu_leader"}))
+            self.assertFalse(trader.candidate_matches_active_strategy({"best_strategy": "shaofu_b1"}))
+            self.assertTrue(trader.candidate_matches_active_strategy({}))
+        finally:
+            if saved_active is None:
+                os.environ.pop(trader.ACTIVE_STRATEGY_ENV, None)
+            else:
+                os.environ[trader.ACTIVE_STRATEGY_ENV] = saved_active
+
     def test_execute_actions_blocks_new_buy_when_position_count_limit_reached(self):
         original_execution_time = trader.is_a_share_execution_time
         original_quote = trader.execution_quote
