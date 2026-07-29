@@ -100,7 +100,8 @@ function toggleThemeStocks(theme) {
 
 function marketLabel(value) {
   return {
-    offensive: '进攻', balanced: '均衡', cautious: '谨慎', defensive: '防守',
+    offensive: '进攻', rotation: '轮动', recovery: '修复',
+    balanced: '均衡', cautious: '谨慎', defensive: '防守',
   }[value] || value || '待评估'
 }
 

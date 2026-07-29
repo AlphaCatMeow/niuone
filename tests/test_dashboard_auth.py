@@ -2802,6 +2802,8 @@ console.log(JSON.stringify([
         self.assertIn('<NiuOneMainlinePanel />', dashboard_page)
         self.assertNotIn('NIUONE THEME STRENGTH', mainline_page)
         self.assertNotIn('.mainline-hero::before', mainline_page)
+        self.assertIn("rotation: '轮动'", mainline_page)
+        self.assertIn("recovery: '修复'", mainline_page)
         self.assertIn('aria-label="查看未覆盖原因"', mainline_page)
         self.assertIn('class="coverage-popover" role="tooltip"', mainline_page)
         self.assertNotIn('class="coverage-breakdown"', mainline_page)
