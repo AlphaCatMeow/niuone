@@ -154,7 +154,7 @@ onBeforeUnmount(deactivateNiuOneMainline)
           <article class="mainline-summary-card primary" :class="{ empty: !mainline.primary }">
             <span>跨日确认主线</span>
             <strong>{{ mainline.primary || '暂无' }}</strong>
-            <small>{{ mainline.primary ? `强度 ${numeric(mainline.primary_score)}` : '未满足连续交易日与核心股重合条件' }}</small>
+            <small>{{ mainline.primary ? `强度 ${numeric(mainline.primary_score)} · 多只强势股跨日延续` : '等待多只强势股及核心股跨日延续' }}</small>
           </article>
           <article class="mainline-summary-card intraday" :class="{ empty: !mainline.intraday_primary }">
             <span>日内观察主线</span>
@@ -200,11 +200,10 @@ onBeforeUnmount(deactivateNiuOneMainline)
           </article>
         </div>
 
-        <div class="mainline-notice" :class="defensiveMarket ? 'warning' : 'info'">
-          <strong>{{ defensiveMarket ? '防守环境：仅作观察' : '题材研究视图' }}</strong>
-          <span v-if="mainline.observation_reason">{{ mainline.observation_reason }}</span>
-          <span v-else-if="mainline.reason">{{ mainline.reason }}</span>
-          <span v-else>题材强度用于建立全市场观察顺序，不代表交易候选或买入信号。</span>
+        <div v-if="defensiveMarket || mainline.observation_reason" class="mainline-notice" :class="defensiveMarket ? 'warning' : 'info'">
+          <strong>{{ defensiveMarket ? '当前仅观察' : '日内强势待确认' }}</strong>
+          <span v-if="defensiveMarket">市场处于防守状态，题材排序暂不作为开仓依据。</span>
+          <span v-else>{{ mainline.observation_reason }}</span>
         </div>
       </template>
     </section>
@@ -370,15 +369,17 @@ onBeforeUnmount(deactivateNiuOneMainline)
 .mainline-filters button span { margin-left:3px; font-variant-numeric:tabular-nums; }
 .mainline-filters button.active { border-color:var(--accent-border); background:var(--accent-soft); color:var(--accent-text); font-weight:750; }
 .theme-table { overflow:visible; border:1px solid var(--line); border-radius:10px; }
-.theme-table-head,.theme-row { display:grid; grid-template-columns:minmax(150px,1.15fr) 68px 62px 78px 84px minmax(170px,1.4fr) minmax(118px,.9fr); align-items:center; column-gap:14px; }
+.theme-table-head,.theme-row { display:grid; grid-template-columns:minmax(200px,260px) 74px 68px 82px 88px minmax(300px,380px) minmax(150px,1fr); align-items:center; column-gap:clamp(12px,1.2vw,22px); }
 .theme-table-head { position:relative; z-index:2; padding:9px 12px; border-radius:9px 9px 0 0; background:var(--panel2); color:var(--muted); font-size:10px; font-weight:700; letter-spacing:.02em; }
+.theme-table-head > :nth-child(n+2):nth-child(-n+5) { justify-self:center; text-align:center; }
+.theme-table-head > :last-child { justify-self:end; text-align:right; }
 .theme-column-help { position:relative; width:max-content; max-width:100%; cursor:help; outline:none; }
 .theme-column-help::after { content:attr(data-tooltip); position:absolute; z-index:5; top:calc(100% + 9px); left:0; width:max-content; max-width:250px; padding:8px 10px; border:1px solid var(--line); border-radius:6px; background:var(--text); color:var(--panel); box-shadow:0 8px 18px rgba(15,23,42,.16); font-size:11px; font-weight:500; letter-spacing:0; line-height:1.5; white-space:normal; opacity:0; pointer-events:none; transform:translateY(-3px); transition:opacity .12s ease,transform .12s ease; }
 .theme-column-help:hover::after,.theme-column-help:focus::after { opacity:1; transform:translateY(0); }
 .theme-column-help:focus-visible { color:var(--accent-text); }
 .theme-column-help:nth-last-child(-n+2)::after { right:0; left:auto; }
 .theme-row { min-height:72px; padding:11px 12px; border-top:1px solid var(--line); background:var(--panel); transition:background-color .15s ease; }
-.theme-row.expanded { align-items:start; }
+.theme-row.expanded { position:relative; z-index:4; }
 .theme-row:last-child { border-radius:0 0 9px 9px; }
 .theme-row:hover { background:var(--panel2); }
 .theme-identity { display:flex; min-width:0; align-items:center; gap:10px; }
@@ -394,11 +395,12 @@ onBeforeUnmount(deactivateNiuOneMainline)
 .theme-row.emerging .theme-state { color:var(--accent-text); }
 .theme-row.emerging .theme-state::before { background:var(--accent); opacity:1; }
 .theme-score,.theme-data-cell,.theme-context { min-width:0; }
+.theme-score,.theme-data-cell { text-align:center; }
 .theme-score strong { display:block; font-size:18px; line-height:1.1; font-variant-numeric:tabular-nums; }
 .theme-score small,.theme-data-cell small,.theme-context small { display:block; margin-top:4px; color:var(--muted); font-size:9px; line-height:1.3; }
 .theme-data-cell strong { font-size:13px; font-variant-numeric:tabular-nums; }
-.theme-stock-list { overflow:visible; min-width:0; color:var(--text); font-size:11px; line-height:1.55; }
-.theme-leader-button { display:grid; width:100%; min-width:0; grid-template-columns:minmax(0,1fr) auto 14px; align-items:center; gap:7px; padding:5px 6px; border:1px solid transparent; border-radius:7px; background:transparent; color:var(--text); font:inherit; text-align:left; cursor:pointer; }
+.theme-stock-list { position:relative; overflow:visible; min-width:0; color:var(--text); font-size:11px; line-height:1.55; }
+.theme-leader-button { display:grid; width:min(100%,380px); min-width:0; grid-template-columns:minmax(0,1fr) auto 14px; align-items:center; gap:7px; padding:5px 6px; border:1px solid transparent; border-radius:7px; background:transparent; color:var(--text); font:inherit; text-align:left; cursor:pointer; }
 .theme-leader-button:hover { border-color:var(--line); background:var(--panel2); }
 .theme-leader-button:focus-visible { border-color:var(--accent-border); outline:2px solid var(--accent-border); outline-offset:1px; }
 .theme-leader-identity { display:flex; min-width:0; align-items:baseline; gap:5px; overflow:hidden; }
@@ -410,7 +412,7 @@ onBeforeUnmount(deactivateNiuOneMainline)
 .theme-stock-change.down { color:var(--green-text); }
 .theme-leader-button svg { width:14px; height:14px; fill:none; stroke:currentColor; stroke-width:1.6; transition:transform .15s ease; }
 .theme-leader-button[aria-expanded="true"] svg { transform:rotate(180deg); }
-.theme-stock-details { margin-top:5px; overflow:hidden; border:1px solid var(--line); border-radius:8px; background:var(--panel2); }
+.theme-stock-details { position:absolute; z-index:10; top:calc(100% + 5px); left:0; width:clamp(240px,24vw,310px); overflow:hidden; border:1px solid var(--line); border-radius:9px; background:var(--panel); box-shadow:0 12px 28px rgba(15,23,42,.18); }
 .theme-stock-details-head,.theme-stock-detail-row { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:8px; padding:5px 7px; }
 .theme-stock-details-head { color:var(--muted); font-size:9px; }
 .theme-stock-detail-row { border-top:1px solid var(--line); }
@@ -420,11 +422,16 @@ onBeforeUnmount(deactivateNiuOneMainline)
 .theme-context { text-align:right; }
 .theme-context strong { display:block; font-size:11px; font-weight:650; }
 .theme-context .risk-text { color:var(--red-text); }
-@media (max-width:1050px) {
+@media (max-width:1450px) {
   .mainline-summary-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
-  .theme-table-head,.theme-row { grid-template-columns:minmax(130px,1.1fr) 62px 56px 72px 78px minmax(130px,1.2fr) minmax(108px,.8fr); column-gap:9px; }
+  .theme-table-head,.theme-row { grid-template-columns:minmax(150px,1fr) 62px 56px 72px 78px minmax(210px,1.1fr) minmax(108px,.7fr); column-gap:9px; }
 }
-@media (max-width:720px) {
+@media (max-width:1000px) and (min-width:841px) {
+  .theme-table-head,.theme-row { grid-template-columns:minmax(118px,1fr) 52px 48px 62px 66px minmax(150px,1.1fr) minmax(84px,.65fr); column-gap:6px; }
+  .theme-leader-button { gap:4px; padding-right:3px; padding-left:3px; }
+  .theme-leader-identity small { display:none; }
+}
+@media (max-width:840px) {
   .mainline-page { gap:10px; }
   .mainline-hero,.mainline-section { padding:13px; border-radius:14px; box-shadow:0 4px 16px rgba(15,23,42,.045); }
   .mainline-heading,.mainline-section-head { align-items:stretch; flex-direction:column; }
@@ -458,7 +465,7 @@ onBeforeUnmount(deactivateNiuOneMainline)
   .theme-score { grid-area:score; text-align:right; }
   .theme-score strong { font-size:19px; }
   .theme-data-cell { display:block; min-width:0; padding:9px 0 8px; border-top:1px solid var(--line); border-bottom:1px solid var(--line); }
-  .theme-data-cell.strong-count { grid-area:strong; }
+  .theme-data-cell.strong-count { grid-area:strong; text-align:left; }
   .theme-data-cell.breadth { grid-area:breadth; text-align:center; }
   .theme-data-cell.continuity { grid-area:continuity; text-align:right; }
   .theme-data-cell::before { content:attr(data-label); display:block; margin-bottom:3px; color:var(--muted); font-size:9px; }
@@ -469,7 +476,8 @@ onBeforeUnmount(deactivateNiuOneMainline)
   .theme-leader-button { padding:6px 0; border-width:0; border-radius:0; }
   .theme-leader-button:hover { background:transparent; }
   .theme-leader-identity strong { font-size:11px; }
-  .theme-stock-details { margin-top:3px; }
+  .theme-leader-identity small { display:inline; }
+  .theme-stock-details { top:calc(100% - 2px); right:0; left:0; width:auto; max-height:min(320px,60vh); overflow-y:auto; }
   .theme-stock-details-head,.theme-stock-detail-row { padding:6px 8px; }
   .theme-context { display:flex; grid-area:context; justify-content:space-between; gap:10px; padding-top:7px; border-top:1px dashed var(--line); text-align:left; }
   .theme-context small { margin:0; }
