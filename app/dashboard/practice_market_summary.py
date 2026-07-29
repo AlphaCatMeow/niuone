@@ -569,7 +569,7 @@ def add_dashboard_market_references(
             ("estimated_turnover_yi", "预测全天"),
             ("previous_turnover_yi", "前日成交"),
             ("turnover_increment_yi", "预测增量"),
-            ("turnover_same_time_delta_yi", "同时点差额"),
+            ("turnover_same_time_delta_yi", "较昨日同期差"),
         ):
             if key in breadth_reference:
                 value = float(breadth_reference[key])
