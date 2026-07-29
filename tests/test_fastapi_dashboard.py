@@ -978,6 +978,13 @@ class FastApiDashboardTests(unittest.TestCase):
         self.assertIn("watch(chartWrapElement, element =>", component)
         self.assertIn('ref="chartWrapElement"', component)
         self.assertIn("chartWidth.value = Math.max(300, availableWidth)", component)
+        self.assertIn("const activeSample = computed(() =>", component)
+        self.assertIn("|| current.samples.at(-1)", component)
+        self.assertIn('v-if="activeSample"', component)
+        self.assertNotIn("spreadEndLabels", component)
+        self.assertNotIn("chart.endLabels", component)
+        self.assertNotIn("market-breadth-end-label", component)
+        self.assertNotIn("market-breadth-end-label", stylesheet)
         self.assertNotIn("Math.min(720", component)
         self.assertIn(
             ".market-breadth-chart { display:block; width:100%; max-width:none; min-width:0;",

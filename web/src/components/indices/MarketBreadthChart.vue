@@ -80,31 +80,6 @@ function turnoverStep(value) {
   return 100
 }
 
-function spreadEndLabels(paths, top, bottom) {
-  const gap = 17
-  const labels = paths
-    .map(path => ({
-      ...path,
-      anchorY: Number(path.lastY),
-      labelY: Number(path.lastY),
-    }))
-    .sort((left, right) => left.labelY - right.labelY)
-  if (!labels.length) return labels
-
-  labels[0].labelY = Math.max(top, labels[0].labelY)
-  for (let index = 1; index < labels.length; index += 1) {
-    labels[index].labelY = Math.max(labels[index].labelY, labels[index - 1].labelY + gap)
-  }
-  const overflow = labels.at(-1).labelY - bottom
-  if (overflow > 0) labels.forEach(label => { label.labelY -= overflow })
-  for (let index = labels.length - 2; index >= 0; index -= 1) {
-    labels[index].labelY = Math.min(labels[index].labelY, labels[index + 1].labelY - gap)
-  }
-  const underflow = top - labels[0].labelY
-  if (underflow > 0) labels.forEach(label => { label.labelY += underflow })
-  return labels
-}
-
 const latest = computed(() => props.payload.latest || {})
 const turnoverComparison = computed(() => props.payload.turnover_comparison || {})
 const turnoverActual = computed(() => props.payload.turnover_actual || {})
@@ -144,8 +119,8 @@ const chart = computed(() => {
     ? Math.max(compactMinHeight, Math.min(baseHeight, chartAvailableHeight.value))
     : Math.max(baseHeight, chartAvailableHeight.value)
   const margin = compact
-    ? { top: 16, right: 88, bottom: 30, left: 42 }
-    : { top: 16, right: 92, bottom: 34, left: 50 }
+    ? { top: 16, right: 38, bottom: 30, left: 42 }
+    : { top: 16, right: 42, bottom: 34, left: 50 }
   const plotWidth = width - margin.left - margin.right
   const sectionGap = showSentiment && showVolume.value ? (compact ? 20 : 24) : 0
   const drawableHeight = height - margin.top - margin.bottom - sectionGap
@@ -209,26 +184,8 @@ const chart = computed(() => {
       lastX: last?.x.toFixed(1),
       lastY: last?.y.toFixed(1),
       lastValue: last?.value,
-      labelWidth: Math.max(31, series.label.length * 10 + 9),
     }
   }).filter(series => series.path)
-  const latestX = Math.max(
-    margin.left,
-    ...paths.map(path => Number(path.lastX)),
-  )
-  const labelRailX = Math.min(latestX + 14, width - margin.right + 11)
-  const endLabels = [
-    ...spreadEndLabels(
-      paths.filter(path => path.axis !== 'volume'),
-      margin.top + 6,
-      sentimentBottom - 6,
-    ),
-    ...spreadEndLabels(
-      paths.filter(path => path.axis === 'volume'),
-      volumeTop + 6,
-      plotBottom - 6,
-    ),
-  ]
   const grid = showSentiment ? Array.from({ length: 5 }, (_, index) => {
     const ratio = index / 4
     return {
@@ -287,8 +244,6 @@ const chart = computed(() => {
     volumeMin,
     plotBottom,
     paths,
-    endLabels,
-    labelRailX,
     morningNotice,
     grid,
     volumeGrid,
@@ -298,10 +253,11 @@ const chart = computed(() => {
   }
 })
 
-const hoveredSample = computed(() => {
+const activeSample = computed(() => {
   const current = chart.value
-  if (!current || !hoveredAt.value) return null
+  if (!current) return null
   const sample = current.samples.find(item => item.point.generated_at === hoveredAt.value)
+    || current.samples.at(-1)
   if (!sample) return null
   const tooltipWidth = 166
   const rows = visibleSeries.value.map(series => ({
@@ -664,32 +620,6 @@ const turnoverEstimateText = computed(() => {
             <title>{{ series.label }} {{ formatSeriesValue(series, series.lastValue, true) }}</title>
           </circle>
         </g>
-        <g
-          v-for="label in chart.endLabels"
-          :key="`${label.key}-end-label`"
-          class="market-breadth-end-label-group"
-          aria-hidden="true"
-        >
-          <path
-            class="market-breadth-end-label-connector"
-            :d="`M ${Number(label.lastX) + 3} ${label.anchorY} L ${chart.labelRailX - 7} ${label.anchorY} L ${chart.labelRailX - 2} ${label.labelY}`"
-            :stroke="label.color"
-          />
-          <rect
-            class="market-breadth-end-label-bg"
-            :x="chart.labelRailX"
-            :y="label.labelY - 7"
-            :width="label.labelWidth"
-            height="14"
-            rx="4"
-          />
-          <text
-            class="market-breadth-end-label"
-            :x="chart.labelRailX + 4"
-            :y="label.labelY + 3"
-            :fill="label.color"
-          >{{ label.label }}</text>
-        </g>
         <rect
           class="market-breadth-hit-area"
           :x="chart.margin.left"
@@ -701,40 +631,40 @@ const turnoverEstimateText = computed(() => {
           @pointerdown="updateHover"
           @pointerleave="clearHover"
         />
-        <g v-if="hoveredSample" class="market-breadth-hover" aria-hidden="true">
+        <g v-if="activeSample" class="market-breadth-hover" aria-hidden="true">
           <line
             class="market-breadth-crosshair"
-            :x1="hoveredSample.x"
-            :x2="hoveredSample.x"
+            :x1="activeSample.x"
+            :x2="activeSample.x"
             :y1="chart.margin.top"
             :y2="chart.plotBottom"
           />
           <circle
-            v-for="marker in hoveredSample.markers"
+            v-for="marker in activeSample.markers"
             :key="marker.key"
             class="market-breadth-hover-point"
-            :cx="hoveredSample.x"
+            :cx="activeSample.x"
             :cy="marker.y"
             r="2.2"
             :fill="marker.color"
           />
-          <g :transform="`translate(${hoveredSample.tooltipX} ${hoveredSample.tooltipY})`">
+          <g :transform="`translate(${activeSample.tooltipX} ${activeSample.tooltipY})`">
             <rect
               class="market-breadth-tooltip-panel"
-              :width="hoveredSample.tooltipWidth"
-              :height="hoveredSample.tooltipHeight"
+              :width="activeSample.tooltipWidth"
+              :height="activeSample.tooltipHeight"
               rx="7"
             />
-            <text class="market-breadth-tooltip-time" x="10" y="17">{{ hoveredSample.time }}</text>
-            <line class="market-breadth-tooltip-divider" x1="10" :x2="hoveredSample.tooltipWidth - 10" y1="25" y2="25" />
+            <text class="market-breadth-tooltip-time" x="10" y="17">{{ activeSample.time }}</text>
+            <line class="market-breadth-tooltip-divider" x1="10" :x2="activeSample.tooltipWidth - 10" y1="25" y2="25" />
             <g
-              v-for="(row, index) in hoveredSample.rows"
+              v-for="(row, index) in activeSample.rows"
               :key="row.key"
               :transform="`translate(0 ${39 + index * 14})`"
             >
               <circle cx="11" cy="0" r="2.1" :fill="row.color" />
               <text class="market-breadth-tooltip-label" x="18" y="3">{{ row.label }}</text>
-              <text class="market-breadth-tooltip-value" :x="hoveredSample.tooltipWidth - 10" y="3" text-anchor="end">{{ row.displayValue }}</text>
+              <text class="market-breadth-tooltip-value" :x="activeSample.tooltipWidth - 10" y="3" text-anchor="end">{{ row.displayValue }}</text>
             </g>
           </g>
         </g>
