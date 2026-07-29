@@ -979,6 +979,7 @@ class DashboardAuthTests(unittest.TestCase):
             'refresh_practice_market_summary_for_decision': dashboard.refresh_practice_market_summary_for_decision,
             'trigger_b1_scan': dashboard.trigger_b1_scan,
             'run_practice_decision_logged': dashboard.run_practice_decision_logged,
+            'start_independent_niuone_mainline_scan': dashboard.start_independent_niuone_mainline_scan,
         }
         try:
             dashboard.b1_cache_generated_for_slot = lambda _slot: False
@@ -992,6 +993,9 @@ class DashboardAuthTests(unittest.TestCase):
             dashboard.trigger_b1_scan = lambda **kwargs: (
                 calls.append(('scan', kwargs['decision_mode']))
                 or {'items': [], 'count': 0, 'generated_at': '2026-07-10 10:00:05', 'error': ''}
+            )
+            dashboard.start_independent_niuone_mainline_scan = lambda slot='': (
+                calls.append(('mainline', slot)) or True
             )
 
             def fake_decision(payload, *, record_start=False, refresh_market_summary=True):
@@ -1012,8 +1016,92 @@ class DashboardAuthTests(unittest.TestCase):
 
         self.assertLess(calls.index(('summary', 'scheduled')), calls.index(('scan', 'none')))
         self.assertIn(('scan', 'none'), calls)
+        self.assertIn(('mainline', '2026-07-10 10:00'), calls)
         self.assertIn(('decision', True, False, '2026-07-10 10:00:01'), calls)
         self.assertEqual(calls[-1][0:2], ('mark', 'ok'))
+
+    def test_independent_mainline_scan_uses_research_only_mode(self):
+        calls = []
+
+        class Result:
+            returncode = 0
+            stderr = ''
+
+        def fake_runner(args, **kwargs):
+            calls.append((args, kwargs))
+            return Result()
+
+        original_lock = dashboard.NIUONE_MAINLINE_SCAN_LOCK
+        original_invalidate = dashboard.invalidate_api_cache
+        try:
+            dashboard.NIUONE_MAINLINE_SCAN_LOCK = threading.Lock()
+            dashboard.invalidate_api_cache = lambda *keys: calls.append(('invalidate', keys))
+
+            result = dashboard.run_independent_niuone_mainline_scan(runner=fake_runner)
+        finally:
+            dashboard.NIUONE_MAINLINE_SCAN_LOCK = original_lock
+            dashboard.invalidate_api_cache = original_invalidate
+
+        args, kwargs = calls[0]
+        self.assertEqual(args[-2:], ['--json', '--niuone-mainline-only'])
+        self.assertEqual(kwargs['timeout'], dashboard.B1_SCAN_TIMEOUT_SECONDS)
+        self.assertEqual(calls[1], ('invalidate', (dashboard.NIUONE_MAINLINE_CACHE_KEY,)))
+        self.assertTrue(result['updated'])
+
+    def test_kline_prewarm_scan_uses_cache_only_mode(self):
+        calls = []
+
+        class Result:
+            returncode = 0
+            stderr = ''
+
+        def fake_runner(args, **kwargs):
+            calls.append((args, kwargs))
+            return Result()
+
+        originals = {
+            'KLINE_PREWARM_LOCK': dashboard.KLINE_PREWARM_LOCK,
+            'KLINE_PREWARM_LAST_ATTEMPT_TS': dashboard.KLINE_PREWARM_LAST_ATTEMPT_TS,
+            'prewarm_completed_for_date': dashboard.prewarm_completed_for_date,
+        }
+        try:
+            dashboard.KLINE_PREWARM_LOCK = threading.Lock()
+            dashboard.KLINE_PREWARM_LAST_ATTEMPT_TS = 0
+            dashboard.prewarm_completed_for_date = lambda *_args, **_kwargs: False
+
+            result = dashboard.run_kline_prewarm('2026-07-29', runner=fake_runner)
+        finally:
+            for name, value in originals.items():
+                setattr(dashboard, name, value)
+
+        args, kwargs = calls[0]
+        self.assertEqual(args[-2:], ['--json', '--prewarm-kline-cache'])
+        self.assertEqual(kwargs['timeout'], dashboard.KLINE_PREWARM_TIMEOUT_SECONDS)
+        self.assertTrue(result['updated'])
+
+    def test_kline_prewarm_due_is_bounded_to_trading_day_window(self):
+        originals = {
+            'KLINE_PREWARM_ENABLED': dashboard.KLINE_PREWARM_ENABLED,
+            'KLINE_PREWARM_TIME': dashboard.KLINE_PREWARM_TIME,
+            'KLINE_PREWARM_CATCHUP_MINUTES': dashboard.KLINE_PREWARM_CATCHUP_MINUTES,
+            'KLINE_PREWARM_LAST_ATTEMPT_TS': dashboard.KLINE_PREWARM_LAST_ATTEMPT_TS,
+            'is_a_share_trading_day_for_dashboard': dashboard.is_a_share_trading_day_for_dashboard,
+            'prewarm_completed_for_date': dashboard.prewarm_completed_for_date,
+        }
+        try:
+            dashboard.KLINE_PREWARM_ENABLED = True
+            dashboard.KLINE_PREWARM_TIME = '09:10'
+            dashboard.KLINE_PREWARM_CATCHUP_MINUTES = 15
+            dashboard.KLINE_PREWARM_LAST_ATTEMPT_TS = 0
+            dashboard.is_a_share_trading_day_for_dashboard = lambda _now: True
+            dashboard.prewarm_completed_for_date = lambda *_args, **_kwargs: False
+
+            self.assertFalse(dashboard.kline_prewarm_due(datetime(2026, 7, 29, 9, 9)))
+            self.assertTrue(dashboard.kline_prewarm_due(datetime(2026, 7, 29, 9, 12)))
+            self.assertFalse(dashboard.kline_prewarm_due(datetime(2026, 7, 29, 9, 26)))
+        finally:
+            for name, value in originals.items():
+                setattr(dashboard, name, value)
 
     def test_manual_practice_cycle_stays_locked_until_trade_decision_finishes(self):
         scan_started = threading.Event()
@@ -1040,12 +1128,16 @@ class DashboardAuthTests(unittest.TestCase):
         original_scan = dashboard.trigger_b1_scan
         original_decision = dashboard.run_practice_decision_logged
         original_recent_candidates = dashboard.recent_practice_candidates_for_manual_cycle
+        original_mainline_scan = dashboard.start_independent_niuone_mainline_scan
         original_lock = dashboard.PRACTICE_MANUAL_CYCLE_LOCK
         original_state = dashboard.PRACTICE_MANUAL_CYCLE_STATE
         try:
             dashboard.trigger_b1_scan = fake_scan
             dashboard.run_practice_decision_logged = fake_decision
             dashboard.recent_practice_candidates_for_manual_cycle = lambda: None
+            dashboard.start_independent_niuone_mainline_scan = lambda slot='': (
+                calls.append(('mainline', slot)) or True
+            )
             dashboard.PRACTICE_MANUAL_CYCLE_LOCK = threading.Lock()
             dashboard.PRACTICE_MANUAL_CYCLE_STATE = {'running': False, 'stage': 'idle'}
 
@@ -1075,6 +1167,7 @@ class DashboardAuthTests(unittest.TestCase):
             self.assertEqual(status['candidate_count'], 1)
             self.assertEqual(calls, [
                 ('scan', True, 'none'),
+                ('mainline', ''),
                 ('decision', '000001', True),
             ])
         finally:
@@ -1083,6 +1176,7 @@ class DashboardAuthTests(unittest.TestCase):
             dashboard.trigger_b1_scan = original_scan
             dashboard.run_practice_decision_logged = original_decision
             dashboard.recent_practice_candidates_for_manual_cycle = original_recent_candidates
+            dashboard.start_independent_niuone_mainline_scan = original_mainline_scan
             dashboard.PRACTICE_MANUAL_CYCLE_LOCK = original_lock
             dashboard.PRACTICE_MANUAL_CYCLE_STATE = original_state
 

@@ -87,6 +87,7 @@ from market_data.iwencai_client import (
     normalize_base_url as normalize_iwencai_base_url,
 )
 from market_data.tencent_market_breadth import fetch_tencent_market_breadth
+from market_data.tencent_kline_cache import kline_cache_path, prewarm_completed_for_date
 from niuone_paths import apply_container_runtime_overrides, get_dashboard_env_file, get_dashboard_home, get_local_data_dir
 import push_history
 from screening.stock_universe import (
@@ -273,6 +274,19 @@ B1_SCHEDULE_STALE_SECONDS = int(os.environ.get("DASHBOARD_B1_SCHEDULE_STALE_SECO
 B1_SCHEDULE_RUN_KEYS: set[str] = set()
 B1_SCHEDULE_LOCK = threading.RLock()
 B1_SCHEDULE_THREAD: threading.Thread | None = None
+NIUONE_MAINLINE_SCAN_LOCK = threading.Lock()
+NIUONE_MAINLINE_SCAN_THREAD: threading.Thread | None = None
+DEFAULT_KLINE_PREWARM_TIME = "09:10"
+KLINE_CACHE_ENABLED = os.environ.get("DASHBOARD_KLINE_CACHE_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
+KLINE_PREWARM_ENABLED = KLINE_CACHE_ENABLED and os.environ.get("DASHBOARD_KLINE_PREWARM_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
+KLINE_PREWARM_TIME = os.environ.get("DASHBOARD_KLINE_PREWARM_TIME", DEFAULT_KLINE_PREWARM_TIME).strip() or DEFAULT_KLINE_PREWARM_TIME
+KLINE_PREWARM_CATCHUP_MINUTES = int(os.environ.get("DASHBOARD_KLINE_PREWARM_CATCHUP_MINUTES", "15") or "15")
+KLINE_PREWARM_TIMEOUT_SECONDS = int(os.environ.get("DASHBOARD_KLINE_PREWARM_TIMEOUT_SECONDS", "600") or "600")
+KLINE_PREWARM_RETRY_SECONDS = int(os.environ.get("DASHBOARD_KLINE_PREWARM_RETRY_SECONDS", "300") or "300")
+KLINE_PREWARM_LOCK = threading.Lock()
+KLINE_PREWARM_RUN_THREAD: threading.Thread | None = None
+KLINE_PREWARM_SCHEDULER_THREAD: threading.Thread | None = None
+KLINE_PREWARM_LAST_ATTEMPT_TS = 0.0
 PENDING_DECISION_THREAD: threading.Thread | None = None
 PENDING_DECISION_POLL_SECONDS = float(os.environ.get("DASHBOARD_PENDING_DECISION_POLL_SECONDS", "5") or "5")
 PRACTICE_EQUITY_HEARTBEAT_LOCK = threading.Lock()
@@ -493,6 +507,12 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
     {"name": PRESET_STRATEGY_TEXT_ENV, "label": "预设文字策略", "group": "选股与交易策略", "kind": "preset_strategy_text", "default": "", "effect": "runtime"},
     {"name": "DASHBOARD_B1_SCAN_TIMEOUT_SECONDS", "label": "实战选股扫描超时秒数", "group": "任务调度", "kind": "int", "default": "480", "effect": "restart"},
     {"name": "DASHBOARD_B1_SCAN_WORKERS", "label": "实战选股并发数", "group": "任务调度", "kind": "int", "default": "6", "effect": "restart"},
+    {"name": "DASHBOARD_KLINE_CACHE_ENABLED", "label": "启用本地日K缓存", "group": "任务调度", "kind": "bool", "default": "1", "effect": "restart"},
+    {"name": "DASHBOARD_KLINE_PREWARM_ENABLED", "label": "启用盘前日K预热", "group": "任务调度", "kind": "bool", "default": "1", "effect": "restart"},
+    {"name": "DASHBOARD_KLINE_PREWARM_TIME", "label": "盘前日K预热时间", "group": "任务调度", "kind": "time", "default": DEFAULT_KLINE_PREWARM_TIME, "effect": "restart"},
+    {"name": "DASHBOARD_KLINE_PREWARM_WORKERS", "label": "盘前日K预热并发数", "group": "任务调度", "kind": "int", "default": "12", "effect": "restart"},
+    {"name": "DASHBOARD_KLINE_PREWARM_TIMEOUT_SECONDS", "label": "盘前日K预热超时秒数", "group": "任务调度", "kind": "int", "default": "600", "effect": "restart"},
+    {"name": "DASHBOARD_KLINE_PREWARM_CATCHUP_MINUTES", "label": "盘前日K预热补跑窗口分钟", "group": "任务调度", "kind": "int", "default": "15", "effect": "restart"},
     {"name": "DASHBOARD_MANUAL_SCAN_REUSE_SECONDS", "label": "手动选股复用候选秒数", "group": "任务调度", "kind": "int", "default": "0", "effect": "restart"},
     {"name": "DASHBOARD_B1_SCHEDULE_CATCHUP_MINUTES", "label": "实战选股漏触发补跑窗口分钟", "group": "任务调度", "kind": "int", "default": "35", "effect": "restart"},
     {"name": "DASHBOARD_B1_SCHEDULE_STALE_SECONDS", "label": "实战选股运行中陈旧秒数", "group": "任务调度", "kind": "int", "default": "900", "effect": "restart"},
@@ -1771,6 +1791,175 @@ def summarize_b1_scan_failure(stderr: str, stdout: str, limit: int = 900) -> str
     return detail
 
 
+def niuone_mainline_cache_generated_for_slot(slot_key: str) -> bool:
+    """Return whether the independent cache already covers a schedule slot."""
+    if not slot_key:
+        return False
+    try:
+        payload = json.loads(NIUONE_MAINLINE_CACHE_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return False
+    generated_at = str(payload.get("generated_at") or "")[:16]
+    return generated_at[:10] == slot_key[:10] and generated_at >= slot_key[:16]
+
+
+def run_independent_niuone_mainline_scan(
+    schedule_slot: str = "",
+    *,
+    runner: Any | None = None,
+) -> dict[str, Any]:
+    """Refresh only the full-market theme cache without touching trade caches."""
+    if schedule_slot and niuone_mainline_cache_generated_for_slot(schedule_slot):
+        return {"skipped": True, "reason": "slot_already_generated"}
+    if not NIUONE_MAINLINE_SCAN_LOCK.acquire(blocking=False):
+        return {"skipped": True, "reason": "scan_in_progress"}
+    try:
+        script = Path(
+            os.environ.get("DASHBOARD_B1_SCANNER", ENTRYPOINT_DIR / "multi_strategy_screen.py")
+        ).expanduser()
+        if not script.exists():
+            return {"error": f"扫描脚本不存在：{script}"}
+        active_runner = runner or subprocess.run
+        result = active_runner(
+            [sys.executable, str(script), "--json", "--niuone-mainline-only"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=B1_SCAN_TIMEOUT_SECONDS,
+        )
+        if result.returncode != 0:
+            error = summarize_b1_scan_failure(str(result.stderr or ""), "")
+            print(f"[WARN] Independent theme-strength scan failed: {error}", file=sys.stderr, flush=True)
+            return {"error": error}
+        if runner is None and not NIUONE_MAINLINE_CACHE_FILE.exists():
+            return {"error": "独立题材扫描完成但未生成缓存"}
+        invalidate_api_cache(NIUONE_MAINLINE_CACHE_KEY)
+        print(
+            f"[Theme strength] independent scan updated for {schedule_slot or 'manual'}",
+            flush=True,
+        )
+        return {"updated": True, "schedule_slot": schedule_slot}
+    except subprocess.TimeoutExpired:
+        error = f"独立题材扫描超时（{B1_SCAN_TIMEOUT_SECONDS}s）"
+        print(f"[WARN] {error}", file=sys.stderr, flush=True)
+        return {"error": error}
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        print(f"[WARN] Independent theme-strength scan error: {error}", file=sys.stderr, flush=True)
+        return {"error": error}
+    finally:
+        NIUONE_MAINLINE_SCAN_LOCK.release()
+
+
+def start_independent_niuone_mainline_scan(schedule_slot: str = "") -> bool:
+    """Start the research scan in the background when no equivalent run exists."""
+    global NIUONE_MAINLINE_SCAN_THREAD
+    if schedule_slot and niuone_mainline_cache_generated_for_slot(schedule_slot):
+        return False
+    if NIUONE_MAINLINE_SCAN_LOCK.locked():
+        return False
+    thread = threading.Thread(
+        target=run_independent_niuone_mainline_scan,
+        args=(schedule_slot,),
+        name="niuone-mainline-scan",
+        daemon=True,
+    )
+    NIUONE_MAINLINE_SCAN_THREAD = thread
+    thread.start()
+    return True
+
+
+def kline_prewarm_due(now: datetime | None = None) -> bool:
+    """Return whether today's bounded pre-market cache refresh should start."""
+    if not KLINE_PREWARM_ENABLED:
+        return False
+    current = now or datetime.now()
+    if not is_a_share_trading_day_for_dashboard(current):
+        return False
+    scheduled = _b1_schedule_slot_datetime(current, KLINE_PREWARM_TIME)
+    if scheduled is None:
+        return False
+    age_seconds = (current - scheduled).total_seconds()
+    if age_seconds < 0 or age_seconds > max(0, KLINE_PREWARM_CATCHUP_MINUTES) * 60:
+        return False
+    if prewarm_completed_for_date(current.strftime("%Y-%m-%d"), path=kline_cache_path()):
+        return False
+    if KLINE_PREWARM_LOCK.locked():
+        return False
+    return time.time() - KLINE_PREWARM_LAST_ATTEMPT_TS >= max(30, KLINE_PREWARM_RETRY_SECONDS)
+
+
+def run_kline_prewarm(
+    target_date: str = "",
+    *,
+    runner: Any | None = None,
+) -> dict[str, Any]:
+    """Run the full-market prewarm subprocess without touching trading caches."""
+    global KLINE_PREWARM_LAST_ATTEMPT_TS
+    if not KLINE_PREWARM_LOCK.acquire(blocking=False):
+        return {"skipped": True, "reason": "prewarm_in_progress"}
+    KLINE_PREWARM_LAST_ATTEMPT_TS = time.time()
+    try:
+        run_date = str(target_date or datetime.now().strftime("%Y-%m-%d"))[:10]
+        if prewarm_completed_for_date(run_date, path=kline_cache_path()):
+            return {"skipped": True, "reason": "already_completed", "target_date": run_date}
+        script = Path(
+            os.environ.get("DASHBOARD_B1_SCANNER", ENTRYPOINT_DIR / "multi_strategy_screen.py")
+        ).expanduser()
+        if not script.exists():
+            return {"error": f"扫描脚本不存在：{script}"}
+        active_runner = runner or subprocess.run
+        result = active_runner(
+            [sys.executable, str(script), "--json", "--prewarm-kline-cache"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=KLINE_PREWARM_TIMEOUT_SECONDS,
+        )
+        if result.returncode != 0:
+            error = summarize_b1_scan_failure(str(result.stderr or ""), "")
+            print(f"[WARN] Pre-market K-line prewarm failed: {error}", file=sys.stderr, flush=True)
+            return {"error": error, "target_date": run_date}
+        if runner is None and not prewarm_completed_for_date(run_date, path=kline_cache_path()):
+            return {"error": "盘前日K预热完成但有效覆盖率不足", "target_date": run_date}
+        print(f"[K-line cache] pre-market refresh completed for {run_date}", flush=True)
+        return {"updated": True, "target_date": run_date}
+    except subprocess.TimeoutExpired:
+        error = f"盘前日K预热超时（{KLINE_PREWARM_TIMEOUT_SECONDS}s）"
+        print(f"[WARN] {error}", file=sys.stderr, flush=True)
+        return {"error": error, "target_date": str(target_date or "")[:10]}
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        print(f"[WARN] Pre-market K-line prewarm error: {error}", file=sys.stderr, flush=True)
+        return {"error": error, "target_date": str(target_date or "")[:10]}
+    finally:
+        KLINE_PREWARM_LOCK.release()
+
+
+def start_kline_prewarm(target_date: str = "") -> bool:
+    """Start one pre-market cache refresh in the background."""
+    global KLINE_PREWARM_RUN_THREAD
+    if KLINE_PREWARM_LOCK.locked():
+        return False
+    thread = threading.Thread(
+        target=run_kline_prewarm,
+        args=(target_date,),
+        name="kline-cache-prewarm",
+        daemon=True,
+    )
+    KLINE_PREWARM_RUN_THREAD = thread
+    thread.start()
+    return True
+
+
+def kline_prewarm_schedule_loop() -> None:
+    while True:
+        current = datetime.now()
+        if kline_prewarm_due(current):
+            start_kline_prewarm(current.strftime("%Y-%m-%d"))
+        time.sleep(15)
+
+
 def _trigger_b1_scan_unlocked(
     force: bool = False,
     decision_mode: str = "async",
@@ -1890,6 +2079,8 @@ def _run_practice_manual_cycle() -> None:
             cache = trigger_b1_scan(force=True, decision_mode="none")
         if cache.get("error"):
             raise RuntimeError(str(cache.get("error")))
+        if not isinstance(cache.get("niuone_context"), dict):
+            start_independent_niuone_mainline_scan()
 
         _set_practice_manual_cycle_state(
             stage="trading",
@@ -2107,6 +2298,7 @@ def run_scheduled_b1_scan(slot_key: str) -> None:
         _mark_b1_schedule_slot(slot_key, "running", lag_seconds=round(lag_seconds, 1), run_kind=run_kind)
         summary = refresh_practice_market_summary_for_decision("scheduled")
         if b1_cache_generated_for_slot(slot_key):
+            start_independent_niuone_mainline_scan(slot_key)
             _mark_b1_schedule_slot(
                 slot_key,
                 "ok",
@@ -2123,6 +2315,7 @@ def run_scheduled_b1_scan(slot_key: str) -> None:
         )
         with API_RESPONSE_LOCK:
             API_RESPONSE_CACHE.pop(PRACTICE_CANDIDATES_CACHE_KEY, None)
+        start_independent_niuone_mainline_scan(slot_key)
         if cache.get("error"):
             _mark_b1_schedule_slot(slot_key, "error", error=str(cache.get("error") or "")[:500])
             print(f"[Practice schedule] {slot_key} failed: {cache.get('error')}", flush=True)
@@ -2826,6 +3019,21 @@ def start_b1_scheduler() -> None:
     B1_SCHEDULE_THREAD = threading.Thread(target=b1_schedule_loop, name="b1-scheduler", daemon=True)
     B1_SCHEDULE_THREAD.start()
     print(f"Practice schedule enabled: {', '.join(PRACTICE_SCHEDULE_TIMES)}", flush=True)
+
+
+def start_kline_prewarm_scheduler() -> None:
+    global KLINE_PREWARM_SCHEDULER_THREAD
+    if not KLINE_PREWARM_ENABLED:
+        return
+    if KLINE_PREWARM_SCHEDULER_THREAD and KLINE_PREWARM_SCHEDULER_THREAD.is_alive():
+        return
+    KLINE_PREWARM_SCHEDULER_THREAD = threading.Thread(
+        target=kline_prewarm_schedule_loop,
+        name="kline-prewarm-scheduler",
+        daemon=True,
+    )
+    KLINE_PREWARM_SCHEDULER_THREAD.start()
+    print(f"K-line prewarm schedule enabled: {KLINE_PREWARM_TIME}", flush=True)
 
 
 def trade_minute_from_hhmm(hhmm: str) -> int | None:
@@ -4284,9 +4492,23 @@ def validate_business_updates(updates: dict[str, str]) -> None:
             "DASHBOARD_B3_EXIT_TIME",
             "DASHBOARD_TIME_EXIT_TIME",
             "DASHBOARD_TIME_STOP_EXIT_TIME",
+            "DASHBOARD_KLINE_PREWARM_TIME",
             *INDUSTRY_FLOW_WINDOW_CONFIG_NAMES,
         }:
             normalize_env_update(name, value, "time")
+        elif name in {
+            "DASHBOARD_KLINE_PREWARM_WORKERS",
+            "DASHBOARD_KLINE_PREWARM_TIMEOUT_SECONDS",
+            "DASHBOARD_KLINE_PREWARM_CATCHUP_MINUTES",
+        } and str(value or "").strip():
+            number = int(value)
+            minimum, maximum = {
+                "DASHBOARD_KLINE_PREWARM_WORKERS": (1, 16),
+                "DASHBOARD_KLINE_PREWARM_TIMEOUT_SECONDS": (60, 1800),
+                "DASHBOARD_KLINE_PREWARM_CATCHUP_MINUTES": (0, 120),
+            }[name]
+            if number < minimum or number > maximum:
+                raise ValueError(f"{name} 必须在 {minimum} 到 {maximum} 之间")
         elif name == "X_WATCHLIST_ACCOUNTS":
             normalize_handle_list_update(value)
         elif name == STOCK_UNIVERSE_ENV:

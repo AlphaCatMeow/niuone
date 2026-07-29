@@ -34,6 +34,7 @@
 | `.local-data/runtime/dashboard_users.db` | 本地访问用户和认证数据 |
 | `.local-data/runtime/push_history.db` | 消息历史 |
 | `.local-data/runtime/niuniu.db` | 实战页面交易和账户数据 |
+| `.local-data/runtime/market_data/tencent_daily_klines.sqlite3` | 盘前预热并由盘中扫描增量补齐的全市场日 K 缓存 |
 | `.local-data/runtime/config.yaml` | 模型服务商、模型和模型密钥配置 |
 | `.local-data/runtime/cron/state/` | 定时任务、X 监控和补跑状态 |
 | `.local-data/runtime/cron/output/` | 实战选股缓存、模拟账户状态和其他非消息类运行缓存 |

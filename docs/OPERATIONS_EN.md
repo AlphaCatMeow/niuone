@@ -131,7 +131,7 @@ Industry fund-flow snapshots, samples, and the market-sentiment curve use 09:00 
 
 ### 3.2 Practice-Strategy Scheduling and Process Ownership
 
-Individual practice strategies do not own separate candidate-scan timers. At every configured time, the B1 scheduler inside the Dashboard first generates one unified **Current Market Summary and Evaluation** from live indexes, industry performance, industry main-fund flow, market breadth/turnover, and existing market scans, then starts the shared scanner. The scanner reads `DASHBOARD_ACTIVE_STRATEGY` and runs only the scorers in that active suite. After a successful scan, the scheduled path passes that same artifact into the model assessment and simulated execution-layer checks without regenerating it.
+Individual practice strategies do not own separate candidate-scan timers. At 09:10 on every A-share trading day, the Dashboard prewarms the latest 120 Tencent qfq daily bars for every supported non-ST stock into private SQLite. Only successful downloads replace a symbol's cached series, so failures retain the latest valid history. At every configured time, the B1 scheduler inside the Dashboard first generates one unified **Current Market Summary and Evaluation** from live indexes, industry performance, industry main-fund flow, market breadth/turnover, and existing market scans, then starts the shared scanner. Intraday scans bulk-read date-valid local history, merge the live batch quote into today's bar, and fetch only missing or stale symbols online before incrementally filling the cache. The scanner reads `DASHBOARD_ACTIVE_STRATEGY` and runs only the scorers in that active suite. When that scan finishes, the scheduled path both passes the same artifact into model assessment and simulated execution checks and starts a background full-market Theme Strength research scan. The latter ignores `DASHBOARD_ACTIVE_STRATEGY`, updates only the dedicated theme cache, and cannot create candidates or trades.
 
 The Practice page no longer derives a separate market-evaluation label from B1 breadth thresholds. The summary artifact's `tone` / `tone_label` is both the displayed evaluation and the trading-context risk level; when the model is unavailable, the same module's local summarizer is used. Clicking **Generate Current Market Summary and Evaluation** or **Manually run candidate scan and trading strategy** refreshes this artifact, while scheduled refreshes reuse `DASHBOARD_PRACTICE_SCHEDULE_TIMES`. A failed generation preserves the latest valid same-day artifact instead of replacing it with an incomplete snapshot.
 
@@ -141,6 +141,12 @@ The Practice page no longer derives a separate market-evaluation label from B1 b
 | `DASHBOARD_B1_SCHEDULE_ENABLED` | `1` | Starts the Dashboard's built-in candidate scheduler | Dashboard restart required |
 | `DASHBOARD_PRACTICE_SCHEDULE_TIMES` | `09:25,10:00,10:30,11:00,11:20,13:00,13:30,14:00,14:30,14:50` | Practice summary/evaluation, active-strategy scan, and trading-decision times | Hot-applied; legacy `DASHBOARD_B1_SCHEDULE_TIMES` is read only for compatibility |
 | `DASHBOARD_B1_SCHEDULE_CATCHUP_MINUTES` | `35` | Catch-up window after brief Dashboard downtime | Dashboard restart required |
+| `DASHBOARD_KLINE_CACHE_ENABLED` | `1` | Prefer and incrementally fill the local daily-K-line SQLite cache during scans | Dashboard restart required |
+| `DASHBOARD_KLINE_PREWARM_ENABLED` | `1` | Starts the pre-market full-universe daily-K-line refresh | Dashboard restart required |
+| `DASHBOARD_KLINE_PREWARM_TIME` | `09:10` | Prewarm time on A-share trading days | Dashboard restart required |
+| `DASHBOARD_KLINE_PREWARM_WORKERS` | `12` | Download concurrency, capped at 16 | Dashboard restart required |
+| `DASHBOARD_KLINE_PREWARM_TIMEOUT_SECONDS` | `600` | Total timeout for one prewarm run | Dashboard restart required |
+| `DASHBOARD_KLINE_PREWARM_CATCHUP_MINUTES` | `15` | Catch-up window after brief Dashboard downtime | Dashboard restart required |
 | `DASHBOARD_B3_EXIT_TIME` | `09:37` | Opening automatic-exit check | Read by a subsequent Cron cycle |
 | `DASHBOARD_TIME_EXIT_TIME` | `14:45` | End-of-day automatic exits and time-box checks | Read by a subsequent Cron cycle |
 
@@ -160,8 +166,9 @@ When a strategy appears not to trigger, check in this order:
 2. Confirm that `DASHBOARD_B1_SCHEDULE_ENABLED` is enabled and the Dashboard process is still running.
 3. Confirm that the current time is at a `DASHBOARD_PRACTICE_SCHEDULE_TIMES` slot or within the catch-up window.
 4. Inspect `.local-data/runtime/cron/state/b1_schedule_state.json` for an `ok`, `error`, or `skipped` status for the slot.
-5. Inspect `.local-data/runtime/cron/output/multi_strategy_latest.json` for a recent `generated_at`, the active suite's candidates, and required context fields.
-6. If automatic exits did not run, inspect the Cron Scheduler process and `.local-data/runtime/logs/niuone_cron_scheduler.log`.
+5. Confirm that `.local-data/runtime/market_data/tencent_daily_klines.sqlite3` exists and today's `prewarm_runs` row is `completed`.
+6. Inspect `.local-data/runtime/cron/output/multi_strategy_latest.json` for a recent `generated_at`, the active suite's candidates, and required context fields.
+7. If automatic exits did not run, inspect the Cron Scheduler process and `.local-data/runtime/logs/niuone_cron_scheduler.log`.
 
 See the [Strategy Research Guide](strategies/README_EN.md#34-sector-tide) for Sector Tide user rules, risk budgets, and the developer data contract.
 

@@ -158,6 +158,7 @@ def create_app(
                 pass
             legacy.get_or_create_admin_token()
             legacy.start_b1_scheduler()
+            legacy.start_kline_prewarm_scheduler()
             legacy.start_pending_decision_executor()
             legacy.start_practice_equity_heartbeat()
             legacy.start_daily_market_history_reset()

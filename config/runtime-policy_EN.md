@@ -34,6 +34,7 @@ Private runtime directory:
 | `.local-data/runtime/dashboard_users.db` | Local users and authentication data |
 | `.local-data/runtime/push_history.db` | Message history |
 | `.local-data/runtime/niuniu.db` | Simulated-trading page trade and account data |
+| `.local-data/runtime/market_data/tencent_daily_klines.sqlite3` | Full-market daily-K-line cache populated before the open and incrementally filled by intraday scans |
 | `.local-data/runtime/config.yaml` | Model provider, model, and model-key configuration |
 | `.local-data/runtime/cron/state/` | Scheduled-task, X-monitoring, and catch-up-run state |
 | `.local-data/runtime/cron/output/` | Practice-trading candidate-scan cache, simulated-account state, and other non-message runtime caches |

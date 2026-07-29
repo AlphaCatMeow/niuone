@@ -132,7 +132,7 @@ NiuOne 需要大模型驱动完整工作流。X 关注列表监控和美股机�
 
 ### 3.2 实战策略调度与进程归属
 
-实战策略没有各自独立的选股定时任务。Dashboard 内置的 B1 调度器在每个计划时间先使用实时指数、行业涨跌、行业主力资金、市场宽度/量能与已有盘面扫描生成统一的“此刻盘面总结与评价”，再启动共享扫描器。扫描器读取 `DASHBOARD_ACTIVE_STRATEGY`，只运行当前策略套件的评分器；扫描成功后，定时流程把同一份总结与评价传入模型判断和模拟执行层复核，不重复生成。
+实战策略没有各自独立的选股定时任务。Dashboard 默认在交易日 09:10 启动全量非 ST 股票日 K 预热，把最近 120 根腾讯前复权日线保存到私有 SQLite；只有成功下载的股票会替换缓存，失败时继续保留旧序列。Dashboard 内置的 B1 调度器在每个计划时间先使用实时指数、行业涨跌、行业主力资金、市场宽度/量能与已有盘面扫描生成统一的“此刻盘面总结与评价”，再启动共享扫描器。盘中扫描批量读取日期有效的本地历史并合并实时行情，只对缺失或日期过期的股票在线回源并增量回填。扫描器读取 `DASHBOARD_ACTIVE_STRATEGY`，只运行当前策略套件的评分器；扫描结束后，定时流程一方面把同一份总结与评价传入模型判断和模拟执行层复核，另一方面在后台启动独立的全市场题材强度研究扫描。后者忽略 `DASHBOARD_ACTIVE_STRATEGY`，只更新题材专用缓存，不参与候选或买卖。
 
 实战页不再用 B1 涨跌家数的独立阈值规则生成另一个“盘面评价”。总结产物的 `tone` / `tone_label` 同时作为页面评价和交易上下文风险级别；模型不可用时调用同一模块的本地汇总规则。手动点击“生成此刻盘面总结与评价”或“手动运行选股与交易策略”会刷新该产物；定时运行则复用 `DASHBOARD_PRACTICE_SCHEDULE_TIMES`。生成失败时保留当日上一份有效总结和评价，不用不完整快照覆盖。
 
@@ -142,6 +142,12 @@ NiuOne 需要大模型驱动完整工作流。X 关注列表监控和美股机�
 | `DASHBOARD_B1_SCHEDULE_ENABLED` | `1` | 是否启动 Dashboard 内置选股调度线程 | 需要重启 Dashboard |
 | `DASHBOARD_PRACTICE_SCHEDULE_TIMES` | `09:25,10:00,10:30,11:00,11:20,13:00,13:30,14:00,14:30,14:50` | 实战盘面总结评价、当前策略选股及买卖决策时间点 | 运行时热应用；旧键 `DASHBOARD_B1_SCHEDULE_TIMES` 仅作兼容读取 |
 | `DASHBOARD_B1_SCHEDULE_CATCHUP_MINUTES` | `35` | Dashboard 短暂离线后的漏触发补跑窗口 | 需要重启 Dashboard |
+| `DASHBOARD_KLINE_CACHE_ENABLED` | `1` | 盘中扫描是否优先读取并增量回填本地日 K SQLite | 需要重启 Dashboard |
+| `DASHBOARD_KLINE_PREWARM_ENABLED` | `1` | 是否启动盘前全市场日 K 预热线程 | 需要重启 Dashboard |
+| `DASHBOARD_KLINE_PREWARM_TIME` | `09:10` | A 股交易日盘前预热时间 | 需要重启 Dashboard |
+| `DASHBOARD_KLINE_PREWARM_WORKERS` | `12` | 盘前下载并发数，服务端硬上限为 16 | 需要重启 Dashboard |
+| `DASHBOARD_KLINE_PREWARM_TIMEOUT_SECONDS` | `600` | 单次盘前预热总超时 | 需要重启 Dashboard |
+| `DASHBOARD_KLINE_PREWARM_CATCHUP_MINUTES` | `15` | Dashboard 短暂离线后的预热补跑窗口 | 需要重启 Dashboard |
 | `DASHBOARD_B3_EXIT_TIME` | `09:37` | 开盘自动离场检查 | 后续 Cron 周期读取 |
 | `DASHBOARD_TIME_EXIT_TIME` | `14:45` | 尾盘自动离场和时间窗检查 | 后续 Cron 周期读取 |
 
@@ -161,8 +167,9 @@ NiuOne 需要大模型驱动完整工作流。X 关注列表监控和美股机�
 2. `DASHBOARD_B1_SCHEDULE_ENABLED` 是否开启，Dashboard 进程是否仍在运行；
 3. 当前时间是否进入 `DASHBOARD_PRACTICE_SCHEDULE_TIMES` 的时间点或补跑窗口；
 4. `.local-data/runtime/cron/state/b1_schedule_state.json` 中对应时间槽是 `ok`、`error` 还是 `skipped`；
-5. `.local-data/runtime/cron/output/multi_strategy_latest.json` 是否包含最新 `generated_at`、当前策略候选和所需上下文字段；
-6. 自动退出未运行时，确认 Cron Scheduler 进程及 `.local-data/runtime/logs/niuone_cron_scheduler.log`。
+5. `.local-data/runtime/market_data/tencent_daily_klines.sqlite3` 是否存在且当日 `prewarm_runs` 状态为 `completed`；
+6. `.local-data/runtime/cron/output/multi_strategy_latest.json` 是否包含最新 `generated_at`、当前策略候选和所需上下文字段；
+7. 自动退出未运行时，确认 Cron Scheduler 进程及 `.local-data/runtime/logs/niuone_cron_scheduler.log`。
 
 板块潮汐的用户规则、风险预算和开发者数据契约见[策略研究说明](strategies/README.md#34-板块潮汐)。
 
