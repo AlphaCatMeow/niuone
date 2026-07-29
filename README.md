@@ -219,7 +219,7 @@ docker compose down
 从 Docker Hub 部署指定版本：
 
 ```bash
-export NIUONE_IMAGE=kunkundi/niuone:v0.0.4
+export NIUONE_IMAGE=kunkundi/niuone:v0.0.5
 docker compose pull
 docker compose up -d --no-build
 ```
