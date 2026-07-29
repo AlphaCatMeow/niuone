@@ -1,6 +1,7 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useNiuOneMainlineData } from '../composables/useNiuOneMainlineData.js'
+import { authenticateAdmin } from '../utils/adminSession.js'
 
 const {
   state,
@@ -11,6 +12,8 @@ const {
 
 const activeFilter = ref('all')
 const expandedTheme = ref('')
+const adminAuth = reactive({ open: false, credential: '', error: '', submitting: false })
+const adminCredentialInput = ref(null)
 const payload = computed(() => state.payload || {})
 const market = computed(() => payload.value.market || {})
 const mainline = computed(() => payload.value.mainline || {})
@@ -98,6 +101,44 @@ function toggleThemeStocks(theme) {
   expandedTheme.value = expandedTheme.value === key ? '' : key
 }
 
+async function requestAdminAuthentication() {
+  adminAuth.open = true
+  adminAuth.error = ''
+  adminAuth.credential = ''
+  await nextTick()
+  adminCredentialInput.value?.focus()
+}
+
+function cancelAdminAuthentication() {
+  adminAuth.open = false
+  adminAuth.credential = ''
+  adminAuth.error = ''
+}
+
+async function refreshData() {
+  const result = await refreshNiuOneMainline()
+  if (result === 'admin_password_required') await requestAdminAuthentication()
+}
+
+async function submitAdminAuthentication() {
+  if (adminAuth.submitting) return
+  adminAuth.submitting = true
+  adminAuth.error = ''
+  try {
+    await authenticateAdmin(adminAuth.credential)
+    adminAuth.open = false
+    adminAuth.credential = ''
+    await refreshData()
+  } catch (error) {
+    adminAuth.error = error instanceof Error ? error.message : '管理员凭据错误'
+    adminAuth.credential = ''
+    await nextTick()
+    adminCredentialInput.value?.focus()
+  } finally {
+    adminAuth.submitting = false
+  }
+}
+
 function marketLabel(value) {
   return {
     offensive: '进攻', rotation: '轮动', recovery: '修复',
@@ -134,7 +175,7 @@ onBeforeUnmount(deactivateNiuOneMainline)
         </div>
         <div class="mainline-actions">
           <span class="mainline-time">{{ payload.generated_at || '尚无扫描时间' }}</span>
-          <button type="button" :disabled="state.loading" @click="refreshNiuOneMainline">
+          <button type="button" :disabled="state.loading" @click="refreshData">
             {{ state.loading ? '读取中…' : '刷新数据' }}
           </button>
         </div>
@@ -315,6 +356,44 @@ onBeforeUnmount(deactivateNiuOneMainline)
 
     </template>
   </div>
+
+  <Teleport to="body">
+    <div
+      v-if="adminAuth.open"
+      class="dragon-tiger-admin-backdrop"
+      role="presentation"
+      @click.self="cancelAdminAuthentication"
+    >
+      <form
+        class="dragon-tiger-admin-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="mainlineRefreshAdminTitle"
+        @submit.prevent="submitAdminAuthentication"
+      >
+        <h2 id="mainlineRefreshAdminTitle">刷新题材强度数据</h2>
+        <p>手动刷新题材强度数据需要管理员身份验证。</p>
+        <div v-if="adminAuth.error" class="dragon-tiger-admin-error">{{ adminAuth.error }}</div>
+        <label for="mainlineRefreshAdminCredential">管理员密码</label>
+        <input
+          id="mainlineRefreshAdminCredential"
+          ref="adminCredentialInput"
+          v-model="adminAuth.credential"
+          name="admin_password"
+          type="password"
+          autocomplete="current-password"
+          required
+          :disabled="adminAuth.submitting"
+        >
+        <div class="dragon-tiger-admin-actions">
+          <button type="button" :disabled="adminAuth.submitting" @click="cancelAdminAuthentication">取消</button>
+          <button type="submit" :disabled="adminAuth.submitting">
+            {{ adminAuth.submitting ? '验证中…' : '验证并刷新' }}
+          </button>
+        </div>
+      </form>
+    </div>
+  </Teleport>
 </template>
 
 <style scoped>

@@ -48,20 +48,28 @@ function restoreCache() {
   } catch {}
 }
 
-async function fetchMainline(controller) {
+async function fetchMainline(controller, { manual = false } = {}) {
   let timedOut = false
   const timeout = window.setTimeout(() => {
     timedOut = true
     controller.abort()
   }, REQUEST_TIMEOUT_MS)
   try {
-    const response = await fetch('/api/niuone/mainline', {
+    const response = await fetch(manual ? '/api/niuone/mainline/refresh' : '/api/niuone/mainline', {
+      method: manual ? 'POST' : 'GET',
       signal: controller.signal,
       credentials: 'same-origin',
       cache: 'no-store',
+      headers: manual ? { 'X-NiuOne-Action': '1' } : {},
     })
-    if (!response.ok) throw new Error(`HTTP ${response.status}`)
-    return await response.json()
+    const payload = await response.json().catch(() => ({}))
+    if (!response.ok) {
+      const error = new Error(payload?.error || `HTTP ${response.status}`)
+      error.code = String(payload?.error || '')
+      error.status = response.status
+      throw error
+    }
+    return payload
   } catch (error) {
     if (timedOut) throw new Error('题材强度请求超时')
     throw error
@@ -70,14 +78,14 @@ async function fetchMainline(controller) {
   }
 }
 
-async function loadMainline({ background = false } = {}) {
+async function loadMainline({ background = false, manual = false } = {}) {
   const sequence = ++loadSequence
   requestController?.abort()
   const controller = new AbortController()
   requestController = controller
   if (!background || !state.payload?.available) state.loading = true
   try {
-    const payload = await fetchMainline(controller)
+    const payload = await fetchMainline(controller, { manual })
     if (sequence !== loadSequence) return false
     state.payload = payload && typeof payload === 'object' ? payload : {}
     state.error = ''
@@ -87,6 +95,12 @@ async function loadMainline({ background = false } = {}) {
     return true
   } catch (error) {
     if (error?.name === 'AbortError' || sequence !== loadSequence) return false
+    if (error?.status === 403 && error?.code === 'admin_password_required') {
+      state.error = ''
+      state.loading = false
+      state.loaded = true
+      return 'admin_password_required'
+    }
     state.error = String(error?.message || error)
     state.loading = false
     state.loaded = true
@@ -96,10 +110,13 @@ async function loadMainline({ background = false } = {}) {
   }
 }
 
-async function syncMainline({ background = state.payload?.available === true } = {}) {
+async function syncMainline({
+  background = state.payload?.available === true,
+  manual = false,
+} = {}) {
   if (requestController) return false
-  const loaded = await loadMainline({ background })
-  if (!loaded) return false
+  const loaded = await loadMainline({ background, manual })
+  if (loaded !== true) return loaded
   if (pendingDigest) {
     sectionDigest = pendingDigest
     pendingDigest = ''
@@ -146,6 +163,6 @@ export function useNiuOneMainlineData() {
     state,
     activateNiuOneMainline,
     deactivateNiuOneMainline,
-    refreshNiuOneMainline: () => syncMainline({ background: false }),
+    refreshNiuOneMainline: () => syncMainline({ background: false, manual: true }),
   }
 }

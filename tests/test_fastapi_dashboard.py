@@ -890,6 +890,43 @@ class FastApiDashboardTests(unittest.TestCase):
         invalidate.assert_any_call(self.legacy.PRACTICE_CANDIDATES_CACHE_KEY)
         invalidate.assert_any_call("niuniu_practice", self.legacy.PRACTICE_FAST_CACHE_KEY)
 
+    def test_niuone_mainline_manual_refresh_requires_admin(self):
+        action_headers = {"X-NiuOne-Action": "1"}
+        payload = {"available": True, "generated_at": "2026-07-29 10:00:00"}
+
+        with patch.object(self.legacy, "validate_admin_session", return_value=False):
+            unauthorized = self.client.post(
+                "/api/niuone/mainline/refresh",
+                headers=action_headers,
+            )
+
+        with patch.object(self.legacy, "validate_admin_session", return_value=True):
+            missing_action = self.client.post("/api/niuone/mainline/refresh")
+
+        with (
+            patch.object(self.legacy, "validate_admin_session", return_value=True),
+            patch.object(
+                self.legacy,
+                "load_niuone_mainline_view",
+                return_value=payload,
+            ) as load_view,
+            patch.object(self.legacy, "invalidate_api_cache") as invalidate,
+        ):
+            refreshed = self.client.post(
+                "/api/niuone/mainline/refresh",
+                headers=action_headers,
+            )
+
+        self.assertEqual(unauthorized.status_code, 403)
+        self.assertEqual(unauthorized.json(), {"error": "admin_password_required"})
+        self.assertEqual(missing_action.status_code, 403)
+        self.assertEqual(missing_action.json(), {"error": "action_header_required"})
+        self.assertEqual(refreshed.status_code, 200)
+        self.assertEqual(refreshed.json(), payload)
+        self.assertEqual(refreshed.headers["Cache-Control"], "no-store")
+        invalidate.assert_called_once_with(self.legacy.NIUONE_MAINLINE_CACHE_KEY)
+        load_view.assert_called_once_with()
+
     def test_missing_vue_build_has_diagnostic_503(self):
         app = create_app(
             legacy_module=self.legacy,
