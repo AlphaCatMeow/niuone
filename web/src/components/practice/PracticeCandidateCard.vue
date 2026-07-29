@@ -1,5 +1,5 @@
 <script setup>
-import { computed } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import {
   formatPracticeNumber,
   PRACTICE_TIDE_STATUS_LABELS,
@@ -72,11 +72,58 @@ const mainlineStateLabel = computed(() => (
 const mainlineThemes = computed(() => [props.item.mainline_primary, props.item.mainline_secondary]
   .filter(Boolean)
   .join(' / ') || '--')
+const mobileCandidateLayout = ref(false)
+const detailsExpanded = ref(false)
+const candidateDetailsId = computed(() => (
+  `practice-candidate-details-${String(props.item.code || props.item.name || 'unknown')
+    .replace(/[^a-zA-Z0-9_-]/g, '-')}-${strategyName.value || 'general'}`
+))
+let mobileLayoutMediaQuery
+
+function syncMobileCandidateLayout(event) {
+  mobileCandidateLayout.value = Boolean(event.matches)
+  if (!mobileCandidateLayout.value) detailsExpanded.value = false
+}
+
+function toggleCandidateDetails() {
+  if (mobileCandidateLayout.value && niuoneStrategy.value) {
+    detailsExpanded.value = !detailsExpanded.value
+  }
+}
+
+onMounted(() => {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return
+  mobileLayoutMediaQuery = window.matchMedia('(max-width: 560px)')
+  syncMobileCandidateLayout(mobileLayoutMediaQuery)
+  mobileLayoutMediaQuery.addEventListener('change', syncMobileCandidateLayout)
+})
+
+onBeforeUnmount(() => {
+  mobileLayoutMediaQuery?.removeEventListener('change', syncMobileCandidateLayout)
+})
 </script>
 
 <template>
-  <article style="background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px">
-    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:10px">
+  <article
+    class="practice-candidate-card"
+    :class="{
+      'niuone-candidate-card': niuoneStrategy,
+      'details-expanded': detailsExpanded,
+    }"
+  >
+    <div
+      class="candidate-summary"
+      :role="mobileCandidateLayout && niuoneStrategy ? 'button' : undefined"
+      :tabindex="mobileCandidateLayout && niuoneStrategy ? 0 : undefined"
+      :aria-expanded="mobileCandidateLayout && niuoneStrategy ? detailsExpanded : undefined"
+      :aria-controls="mobileCandidateLayout && niuoneStrategy ? candidateDetailsId : undefined"
+      :aria-label="mobileCandidateLayout && niuoneStrategy
+        ? `${item.code || ''} ${item.name || ''}，${detailsExpanded ? '收起' : '查看'}详情`
+        : undefined"
+      @click="toggleCandidateDetails"
+      @keydown.enter.prevent="toggleCandidateDetails"
+      @keydown.space.prevent="toggleCandidateDetails"
+    >
       <div style="min-width:0;flex:1 1 auto">
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0">
           <span style="font-weight:780;font-size:17px;color:var(--text)">{{ item.code }} {{ item.name }}</span>
@@ -90,134 +137,151 @@ const mainlineThemes = computed(() => [props.item.mainline_primary, props.item.m
       </div>
       <span :style="tierStyle">{{ tierLabel }}</span>
     </div>
-    <div class="candidate-metric-grid">
-      <div class="candidate-metric">
-        <div style="color:var(--muted);font-size:11px">价格 / 涨跌</div>
-        <div style="color:var(--text);font-size:14px;font-weight:600">
-          {{ formatPracticeNumber(item.price) }} <span class="index-change" :class="changeClass" style="font-size:13px">{{ changeText }}</span>
-        </div>
-      </div>
-      <div class="candidate-metric">
-        <div style="color:var(--muted);font-size:11px">{{ strategy.label }}评分</div>
-        <div style="color:var(--text);font-size:14px;font-weight:600">{{ score }}/{{ item.score_total || 10 }} · 基准≥{{ threshold }}</div>
-      </div>
-      <div class="candidate-metric">
-        <div style="color:var(--muted);font-size:11px">{{ dynamicStrategy ? 'EMA20 / 距EMA20' : 'BBI / 距BBI' }}</div>
-        <div style="color:var(--text);font-size:14px;font-weight:600">{{ formatPracticeNumber(dynamicStrategy ? item.ema20 : item.bbi) }} / {{ distanceText }}</div>
-      </div>
-      <div class="candidate-metric">
-        <div style="color:var(--muted);font-size:11px">成交额</div>
-        <div style="color:var(--text);font-size:14px;font-weight:600">{{ item.amount_yi != null ? `${item.amount_yi}亿` : '--' }}</div>
-      </div>
-    </div>
-    <div v-if="niuoneStrategy" class="niuone-details">
-      <section class="niuone-detail-section">
-        <h4>主线与龙头</h4>
-        <div class="niuone-fact-grid">
-          <div class="niuone-fact">
-            <span>市场环境</span>
-            <strong>{{ marketRegimeLabel }} · {{ formatPracticeNumber(item.market_score) }}</strong>
-          </div>
-          <div class="niuone-fact">
-            <span>主线状态</span>
-            <strong>{{ mainlineStateLabel }} · {{ formatPracticeNumber(item.mainline_score) }}</strong>
-          </div>
-          <div class="niuone-fact">
-            <span>核心题材</span>
-            <strong>{{ mainlineThemes }}</strong>
-          </div>
-          <div class="niuone-fact">
-            <span>主线结构</span>
-            <strong>{{ mainlineModeLabel }}</strong>
-          </div>
-          <div class="niuone-fact">
-            <span>跨日确认 / 延续核心</span>
-            <strong>{{ item.mainline_cross_day_confirmed ? '已完成' : '待完成' }} · {{ item.mainline_core_overlap_count ?? 0 }}只</strong>
-          </div>
-          <div class="niuone-fact">
-            <span>强势股 / 有效强势股</span>
-            <strong>{{ item.strong_stock_count ?? '--' }}只 · {{ formatPracticeNumber(item.effective_strong_count) }}只</strong>
-          </div>
-          <div class="niuone-fact">
-            <span>龙头梯队</span>
-            <strong>#{{ item.stock_leader_rank ?? '--' }} · 强度 {{ formatPracticeNumber(item.stock_strong_score) }}</strong>
-          </div>
-          <div class="niuone-fact">
-            <span>主线内排名 / 龙头集中度</span>
-            <strong>#{{ formatPracticeNumber(item.stock_sector_rank) }} · {{ formatPracticeNumber(Number(item.leader_concentration) * 100) }}%</strong>
+    <div :id="niuoneStrategy ? candidateDetailsId : undefined" class="candidate-details">
+      <div class="candidate-metric-grid">
+        <div class="candidate-metric">
+          <div style="color:var(--muted);font-size:11px">价格 / 涨跌</div>
+          <div style="color:var(--text);font-size:14px;font-weight:600">
+            {{ formatPracticeNumber(item.price) }} <span class="index-change" :class="changeClass" style="font-size:13px">{{ changeText }}</span>
           </div>
         </div>
-        <p v-if="item.mainline_intraday_state === 'intraday_mainline'" class="niuone-observation-note">
-          日内强势仅用于观察，不直接触发买入。
-        </p>
-      </section>
-
-      <section class="niuone-detail-section">
-        <h4>风控与执行</h4>
-        <div class="niuone-fact-grid risk-grid">
-          <div class="niuone-fact">
-            <span>结构止损</span>
-            <strong>{{ formatPracticeNumber(item.stop_price) }} · {{ formatPracticeNumber(item.stop_distance_pct) }}%</strong>
-          </div>
-          <div class="niuone-fact">
-            <span>有效损失</span>
-            <strong>{{ formatPracticeNumber(item.effective_loss_distance_pct) }}%</strong>
-          </div>
-          <div class="niuone-fact">
-            <span>单笔风险预算</span>
-            <strong>{{ formatPracticeNumber(item.per_trade_risk_budget_pct) }}%</strong>
-          </div>
-          <div class="niuone-fact">
-            <span>动态仓位上限</span>
-            <strong>{{ formatPracticeNumber(item.max_position_pct_by_risk) }}%</strong>
-          </div>
+        <div class="candidate-metric">
+          <div style="color:var(--muted);font-size:11px">{{ strategy.label }}评分</div>
+          <div style="color:var(--text);font-size:14px;font-weight:600">{{ score }}/{{ item.score_total || 10 }} · 基准≥{{ threshold }}</div>
         </div>
-        <dl class="niuone-rules">
-          <div v-if="scoreBasis"><dt>评分依据</dt><dd>{{ scoreBasis }}</dd></div>
-          <div v-if="item.position_hint"><dt>仓位规则</dt><dd>{{ item.position_hint }}</dd></div>
-          <div v-if="item.time_stop"><dt>退出规则</dt><dd>{{ item.time_stop }}</dd></div>
-        </dl>
-      </section>
+        <div class="candidate-metric">
+          <div style="color:var(--muted);font-size:11px">{{ dynamicStrategy ? 'EMA20 / 距EMA20' : 'BBI / 距BBI' }}</div>
+          <div style="color:var(--text);font-size:14px;font-weight:600">{{ formatPracticeNumber(dynamicStrategy ? item.ema20 : item.bbi) }} / {{ distanceText }}</div>
+        </div>
+        <div class="candidate-metric">
+          <div style="color:var(--muted);font-size:11px">成交额</div>
+          <div style="color:var(--text);font-size:14px;font-weight:600">{{ item.amount_yi != null ? `${item.amount_yi}亿` : '--' }}</div>
+        </div>
+      </div>
+      <div v-if="niuoneStrategy" class="niuone-details">
+        <section class="niuone-detail-section">
+          <h4>主线与龙头</h4>
+          <div class="niuone-fact-grid">
+            <div class="niuone-fact">
+              <span>市场环境</span>
+              <strong>{{ marketRegimeLabel }} · {{ formatPracticeNumber(item.market_score) }}</strong>
+            </div>
+            <div class="niuone-fact">
+              <span>主线状态</span>
+              <strong>{{ mainlineStateLabel }} · {{ formatPracticeNumber(item.mainline_score) }}</strong>
+            </div>
+            <div class="niuone-fact">
+              <span>核心题材</span>
+              <strong>{{ mainlineThemes }}</strong>
+            </div>
+            <div class="niuone-fact">
+              <span>主线结构</span>
+              <strong>{{ mainlineModeLabel }}</strong>
+            </div>
+            <div class="niuone-fact">
+              <span>跨日确认 / 延续核心</span>
+              <strong>{{ item.mainline_cross_day_confirmed ? '已完成' : '待完成' }} · {{ item.mainline_core_overlap_count ?? 0 }}只</strong>
+            </div>
+            <div class="niuone-fact">
+              <span>强势股 / 有效强势股</span>
+              <strong>{{ item.strong_stock_count ?? '--' }}只 · {{ formatPracticeNumber(item.effective_strong_count) }}只</strong>
+            </div>
+            <div class="niuone-fact">
+              <span>龙头梯队</span>
+              <strong>#{{ item.stock_leader_rank ?? '--' }} · 强度 {{ formatPracticeNumber(item.stock_strong_score) }}</strong>
+            </div>
+            <div class="niuone-fact">
+              <span>主线内排名 / 龙头集中度</span>
+              <strong>#{{ formatPracticeNumber(item.stock_sector_rank) }} · {{ formatPracticeNumber(Number(item.leader_concentration) * 100) }}%</strong>
+            </div>
+          </div>
+          <p v-if="item.mainline_intraday_state === 'intraday_mainline'" class="niuone-observation-note">
+            日内强势仅用于观察，不直接触发买入。
+          </p>
+        </section>
 
-      <section v-if="hardBlockers.length || riskFlags.length" class="niuone-detail-section niuone-conditions">
-        <h4>未通过条件 <span>{{ hardBlockers.length + riskFlags.length }}</span></h4>
-        <ul v-if="hardBlockers.length" class="niuone-condition-list blockers">
-          <li v-for="flag in hardBlockers" :key="`hard-${flag}`">{{ flag }}</li>
-        </ul>
-        <ul v-if="riskFlags.length" class="niuone-condition-list risks">
-          <li v-for="flag in riskFlags" :key="`risk-${flag}`">{{ flag }}</li>
-        </ul>
-      </section>
-    </div>
+        <section class="niuone-detail-section">
+          <h4>风控与执行</h4>
+          <div class="niuone-fact-grid risk-grid">
+            <div class="niuone-fact">
+              <span>结构止损</span>
+              <strong>{{ formatPracticeNumber(item.stop_price) }} · {{ formatPracticeNumber(item.stop_distance_pct) }}%</strong>
+            </div>
+            <div class="niuone-fact">
+              <span>有效损失</span>
+              <strong>{{ formatPracticeNumber(item.effective_loss_distance_pct) }}%</strong>
+            </div>
+            <div class="niuone-fact">
+              <span>单笔风险预算</span>
+              <strong>{{ formatPracticeNumber(item.per_trade_risk_budget_pct) }}%</strong>
+            </div>
+            <div class="niuone-fact">
+              <span>动态仓位上限</span>
+              <strong>{{ formatPracticeNumber(item.max_position_pct_by_risk) }}%</strong>
+            </div>
+          </div>
+          <dl class="niuone-rules">
+            <div v-if="scoreBasis"><dt>评分依据</dt><dd>{{ scoreBasis }}</dd></div>
+            <div v-if="item.position_hint"><dt>仓位规则</dt><dd>{{ item.position_hint }}</dd></div>
+            <div v-if="item.time_stop"><dt>退出规则</dt><dd>{{ item.time_stop }}</dd></div>
+          </dl>
+        </section>
 
-    <div v-else style="display:flex;flex-wrap:wrap;gap:6px;color:var(--muted);font-size:12px">
-      <template v-if="tideStrategy">
-        <span>市场 {{ item.market_regime || '--' }} {{ formatPracticeNumber(item.market_score) }}</span>
-        <span>行业潮位 {{ PRACTICE_TIDE_STATUS_LABELS[item.sector_status] || item.sector_status || '--' }} / {{ formatPracticeNumber(item.sector_score) }}</span>
-        <span>板块内排名 {{ formatPracticeNumber(item.stock_sector_rank) }}</span>
-        <span>结构止损 {{ formatPracticeNumber(item.stop_price) }} ({{ formatPracticeNumber(item.stop_distance_pct) }}%)</span>
-        <span>跳空缓冲 {{ formatPracticeNumber(item.gap_buffer_pct) }}%</span>
-        <span>有效损失 {{ formatPracticeNumber(item.effective_loss_distance_pct) }}%</span>
-        <span>单笔预算 {{ formatPracticeNumber(item.per_trade_risk_budget_pct) }}%</span>
-        <span>动态仓位上限 {{ formatPracticeNumber(item.max_position_pct_by_risk) }}%</span>
-      </template>
-      <template v-else>
-        <span>BBI上行 {{ item.bbi_upward ? '✅' : '❌' }}</span>
-        <span>站上BBI {{ item.above_bbi ? '✅' : '❌' }}</span>
-        <span v-if="item.min_j_10d != null">J最低 {{ Number(item.min_j_10d).toFixed(1) }} {{ item.j_recovering ? '📈回升' : item.j_oversold ? '📉续降' : '--' }}</span>
-        <span v-if="zettarancStrategy && item.industry_flow_matched" style="color:var(--green-text)">
-          行业主力净流入第{{ item.industry_flow_rank }}名 · 评分+{{ Number(item.industry_flow_adjustment || 0).toFixed(2) }}
-        </span>
-      </template>
-      <span v-if="scoreBasis">{{ scoreBasis }}</span>
-      <span v-if="tradeDiscipline">{{ tradeDiscipline }}</span>
-      <span v-for="flag in hardBlockers" :key="`hard-${flag}`" style="color:#fbbf24;font-size:11px;margin-left:6px">硬过滤:{{ flag }}</span>
-      <span v-for="flag in riskFlags" :key="`risk-${flag}`" style="color:#f87171;font-size:11px;margin-left:6px">⚠️{{ flag }}</span>
+        <section v-if="hardBlockers.length || riskFlags.length" class="niuone-detail-section niuone-conditions">
+          <h4>未通过条件 <span>{{ hardBlockers.length + riskFlags.length }}</span></h4>
+          <ul v-if="hardBlockers.length" class="niuone-condition-list blockers">
+            <li v-for="flag in hardBlockers" :key="`hard-${flag}`">{{ flag }}</li>
+          </ul>
+          <ul v-if="riskFlags.length" class="niuone-condition-list risks">
+            <li v-for="flag in riskFlags" :key="`risk-${flag}`">{{ flag }}</li>
+          </ul>
+        </section>
+      </div>
+
+      <div v-else style="display:flex;flex-wrap:wrap;gap:6px;color:var(--muted);font-size:12px">
+        <template v-if="tideStrategy">
+          <span>市场 {{ item.market_regime || '--' }} {{ formatPracticeNumber(item.market_score) }}</span>
+          <span>行业潮位 {{ PRACTICE_TIDE_STATUS_LABELS[item.sector_status] || item.sector_status || '--' }} / {{ formatPracticeNumber(item.sector_score) }}</span>
+          <span>板块内排名 {{ formatPracticeNumber(item.stock_sector_rank) }}</span>
+          <span>结构止损 {{ formatPracticeNumber(item.stop_price) }} ({{ formatPracticeNumber(item.stop_distance_pct) }}%)</span>
+          <span>跳空缓冲 {{ formatPracticeNumber(item.gap_buffer_pct) }}%</span>
+          <span>有效损失 {{ formatPracticeNumber(item.effective_loss_distance_pct) }}%</span>
+          <span>单笔预算 {{ formatPracticeNumber(item.per_trade_risk_budget_pct) }}%</span>
+          <span>动态仓位上限 {{ formatPracticeNumber(item.max_position_pct_by_risk) }}%</span>
+        </template>
+        <template v-else>
+          <span>BBI上行 {{ item.bbi_upward ? '✅' : '❌' }}</span>
+          <span>站上BBI {{ item.above_bbi ? '✅' : '❌' }}</span>
+          <span v-if="item.min_j_10d != null">J最低 {{ Number(item.min_j_10d).toFixed(1) }} {{ item.j_recovering ? '📈回升' : item.j_oversold ? '📉续降' : '--' }}</span>
+          <span v-if="zettarancStrategy && item.industry_flow_matched" style="color:var(--green-text)">
+            行业主力净流入第{{ item.industry_flow_rank }}名 · 评分+{{ Number(item.industry_flow_adjustment || 0).toFixed(2) }}
+          </span>
+        </template>
+        <span v-if="scoreBasis">{{ scoreBasis }}</span>
+        <span v-if="tradeDiscipline">{{ tradeDiscipline }}</span>
+        <span v-for="flag in hardBlockers" :key="`hard-${flag}`" style="color:#fbbf24;font-size:11px;margin-left:6px">硬过滤:{{ flag }}</span>
+        <span v-for="flag in riskFlags" :key="`risk-${flag}`" style="color:#f87171;font-size:11px;margin-left:6px">⚠️{{ flag }}</span>
+      </div>
     </div>
   </article>
 </template>
 
 <style scoped>
+.practice-candidate-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 16px;
+}
+
+.candidate-summary {
+  align-items: flex-start;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
 .candidate-metric-grid {
   display: grid;
   gap: 8px;
@@ -380,6 +444,18 @@ const mainlineThemes = computed(() => [props.item.mainline_primary, props.item.m
 }
 
 @media (max-width: 560px) {
+  .niuone-candidate-card .candidate-summary {
+    cursor: pointer;
+  }
+
+  .niuone-candidate-card:not(.details-expanded) .candidate-summary {
+    margin-bottom: 0;
+  }
+
+  .niuone-candidate-card:not(.details-expanded) .candidate-details {
+    display: none;
+  }
+
   .niuone-fact-grid {
     gap: 10px 14px;
   }

@@ -2714,6 +2714,10 @@ console.log(JSON.stringify([
         self.assertNotIn("hardBlockers.value.length ? '硬过滤'", PRACTICE_CANDIDATE_COMPONENTS)
         self.assertNotIn("hardBlockers.value.length ? '未通过交易条件'", PRACTICE_CANDIDATE_COMPONENTS)
         self.assertIn(".filter((flag) => !blockers.has(flagKey(flag)))", PRACTICE_CANDIDATE_COMPONENTS)
+        self.assertIn("window.matchMedia('(max-width: 560px)')", PRACTICE_CANDIDATE_COMPONENTS)
+        self.assertIn("'niuone-candidate-card': niuoneStrategy", PRACTICE_CANDIDATE_COMPONENTS)
+        self.assertIn(':aria-expanded="mobileCandidateLayout && niuoneStrategy ? detailsExpanded : undefined"', PRACTICE_CANDIDATE_COMPONENTS)
+        self.assertIn('.niuone-candidate-card:not(.details-expanded) .candidate-details', PRACTICE_CANDIDATE_COMPONENTS)
         self.assertIn('grid-template-columns: repeat(2, minmax(0, 1fr))', PRACTICE_CANDIDATE_COMPONENTS)
 
         for label in ('买入理由', '卖出归因', '最低/最高', '仓位占比', '可卖/持有'):
