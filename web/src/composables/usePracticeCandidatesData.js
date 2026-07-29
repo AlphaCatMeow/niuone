@@ -15,6 +15,7 @@ const state = reactive({
   strategyMeta: {},
   strategyDistribution: {},
   strategySuite: '',
+  stockUniverseLabel: '',
   strategyCacheStale: false,
   refreshRequired: false,
   statusMessage: '',
@@ -52,6 +53,7 @@ function saveCache() {
       strategyMeta: state.strategyMeta,
       strategyDistribution: state.strategyDistribution,
       strategySuite: state.strategySuite,
+      stockUniverseLabel: state.stockUniverseLabel,
       strategyCacheStale: state.strategyCacheStale,
       refreshRequired: state.refreshRequired,
       statusMessage: state.statusMessage,
@@ -73,6 +75,7 @@ function restoreCache() {
     state.strategyMeta = cached.strategyMeta || {}
     state.strategyDistribution = cached.strategyDistribution || {}
     state.strategySuite = String(cached.strategySuite || '')
+    state.stockUniverseLabel = String(cached.stockUniverseLabel || '')
     state.strategyCacheStale = cached.strategyCacheStale === true
     state.refreshRequired = cached.refreshRequired === true
     state.statusMessage = String(cached.statusMessage || '')
@@ -117,6 +120,9 @@ function applyCandidates(payload) {
   state.strategyMeta = payload?.strategy_meta || {}
   state.strategyDistribution = payload?.strategy_distribution || {}
   state.strategySuite = String(payload?.strategy_suite || '')
+  state.stockUniverseLabel = String(
+    payload?.stock_universe_label || payload?.configured_stock_universe_label || '',
+  )
   state.strategyCacheStale = payload?.strategy_cache_stale === true
   state.refreshRequired = payload?.refresh_required === true
   state.statusMessage = String(payload?.status_message || '')

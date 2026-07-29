@@ -1743,6 +1743,7 @@ console.log(JSON.stringify({
         scenario = r"""
 import {
   practiceCandidateIndustryLabel,
+  practiceCandidateScanDescription,
   practiceCandidateStrategyMeta,
   practiceCandidateTier,
   practiceCandidateTierCounts,
@@ -1759,6 +1760,8 @@ process.stdout.write(JSON.stringify({
   override:meta.trend_pullback,
   fallback:meta.breakout,
   boardLabel:practiceCandidateIndustryLabel({industry:'main_board'}),
+  niuoneScan:practiceCandidateScanDescription('niuone', '主板'),
+  generalScan:practiceCandidateScanDescription('zettaranc', '创业板、主板'),
 }));
 """
         output = subprocess.check_output(
@@ -1775,6 +1778,8 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(result['override'], {'label': '自定义趋势', 'color': '#123456'})
         self.assertEqual(result['fallback']['label'], '突破确认')
         self.assertEqual(result['boardLabel'], '主板')
+        self.assertEqual(result['niuoneScan'], '全市场非ST主线识别 · 主板入选')
+        self.assertEqual(result['generalScan'], '高流动性扫描 · 创业板、主板入选')
 
     def test_market_monitor_uses_vue_cache_and_revision_polling(self):
         self.assertIn("const CACHE_KEY = 'niuniu-dashboard-market-page-v2'", MARKET_MONITOR_DATA)
@@ -2698,6 +2703,26 @@ console.log(JSON.stringify([
         self.assertIn('rel="noopener noreferrer"', DASHBOARD_FRONTEND)
         self.assertIn('<svg viewBox="0 0 16 16" aria-hidden="true"', DASHBOARD_FRONTEND)
         self.assertNotIn('<span class="header-text" title="开源仓库">GitHub</span>', DASHBOARD_FRONTEND)
+        self.assertIn('--header-control-height:34px', DASHBOARD_FRONTEND)
+        self.assertIn('--header-control-height:28px', DASHBOARD_FRONTEND)
+        self.assertIn('height:var(--header-control-height)', DASHBOARD_FRONTEND)
+
+    def test_mobile_theme_toggle_does_not_keep_focus_or_hover_highlight(self):
+        self.assertIn('.theme-toggle { -webkit-tap-highlight-color:transparent; }', DASHBOARD_FRONTEND)
+        self.assertIn('html[data-theme="dark"] .theme-toggle:focus-visible {', DASHBOARD_FRONTEND)
+        self.assertIn('border-color:var(--line);\n        background:var(--panel);\n        outline:none;', DASHBOARD_FRONTEND)
+
+    def test_compliance_dialog_stays_compact_and_visible_in_dark_mode(self):
+        self.assertIn('.compliance-dialog { width:min(560px, 100%);', DASHBOARD_FRONTEND)
+        self.assertIn('.compliance-dialog { width:min(520px, 100%);', DASHBOARD_FRONTEND)
+        self.assertIn('.compliance-dialog-close { width:auto; min-width:112px;', DASHBOARD_FRONTEND)
+        self.assertIn('html[data-theme="dark"] .compliance-dialog {', DASHBOARD_FRONTEND)
+        self.assertIn('border-color:#536176', DASHBOARD_FRONTEND)
+        self.assertIn('html[data-theme="dark"] .compliance-row {', DASHBOARD_FRONTEND)
+        self.assertIn('html[data-theme="dark"] .compliance-dialog-close {', DASHBOARD_FRONTEND)
+        self.assertIn('.compliance-dialog-close { -webkit-tap-highlight-color:transparent; }', DASHBOARD_FRONTEND)
+        self.assertIn('html[data-theme="dark"] .compliance-dialog-close:focus-visible {', DASHBOARD_FRONTEND)
+        self.assertIn('border-color:#596a82;\n        background:#242c38;\n        color:#f3f6fa;\n        outline:none;', DASHBOARD_FRONTEND)
 
     def test_practice_vue_components_preserve_account_chart_and_calendar_details(self):
         self.assertNotIn('renderPracticePage', DASHBOARD_FRONTEND)
@@ -2714,16 +2739,57 @@ console.log(JSON.stringify([
         self.assertNotIn("hardBlockers.value.length ? '硬过滤'", PRACTICE_CANDIDATE_COMPONENTS)
         self.assertNotIn("hardBlockers.value.length ? '未通过交易条件'", PRACTICE_CANDIDATE_COMPONENTS)
         self.assertIn(".filter((flag) => !blockers.has(flagKey(flag)))", PRACTICE_CANDIDATE_COMPONENTS)
-        self.assertIn("window.matchMedia('(max-width: 560px)')", PRACTICE_CANDIDATE_COMPONENTS)
         self.assertIn("'niuone-candidate-card': niuoneStrategy", PRACTICE_CANDIDATE_COMPONENTS)
-        self.assertIn(':aria-expanded="mobileCandidateLayout && niuoneStrategy ? detailsExpanded : undefined"', PRACTICE_CANDIDATE_COMPONENTS)
+        self.assertNotIn('mobileCandidateLayout', PRACTICE_CANDIDATE_COMPONENTS)
+        self.assertIn(':role="niuoneStrategy ? \'button\' : undefined"', PRACTICE_CANDIDATE_COMPONENTS)
+        self.assertIn(':aria-expanded="niuoneStrategy ? detailsExpanded : undefined"', PRACTICE_CANDIDATE_COMPONENTS)
         self.assertIn('.niuone-candidate-card:not(.details-expanded) .candidate-details', PRACTICE_CANDIDATE_COMPONENTS)
+        self.assertIn('.niuone-candidate-card.details-expanded .candidate-details', PRACTICE_CANDIDATE_COMPONENTS)
+        self.assertIn('--candidate-card-expanded-border:', PRACTICE_CANDIDATE_COMPONENTS)
+        self.assertIn('--candidate-card-expanded-shadow:', PRACTICE_CANDIDATE_COMPONENTS)
+        self.assertIn('var(--candidate-card-divider', PRACTICE_CANDIDATE_COMPONENTS)
+        self.assertIn('.niuone-candidate-card .candidate-summary:focus-visible', PRACTICE_CANDIDATE_COMPONENTS)
+        self.assertIn('.niuone-candidate-card .candidate-identity', PRACTICE_CANDIDATE_COMPONENTS)
+        self.assertIn('flex-direction: column', PRACTICE_CANDIDATE_COMPONENTS)
+        self.assertIn("'primary industry'", PRACTICE_CANDIDATE_COMPONENTS)
+        self.assertIn("'primary tier'", PRACTICE_CANDIDATE_COMPONENTS)
+        self.assertIn('class="candidate-industry"', PRACTICE_CANDIDATE_COMPONENTS)
+        self.assertIn('class="candidate-tier"', PRACTICE_CANDIDATE_COMPONENTS)
+        self.assertIn('font-size: 15px', PRACTICE_CANDIDATE_COMPONENTS)
+        self.assertIn('padding: 12px', PRACTICE_CANDIDATE_COMPONENTS)
+        self.assertIn('padding: 4px 7px', PRACTICE_CANDIDATE_COMPONENTS)
+        self.assertIn('class="practice-candidates-launcher-button"', PRACTICE_CANDIDATE_COMPONENTS)
+        self.assertIn('aria-haspopup="dialog"', PRACTICE_CANDIDATE_COMPONENTS)
+        self.assertIn(':aria-expanded="dialogOpen"', PRACTICE_CANDIDATE_COMPONENTS)
+        self.assertIn('id="practiceCandidatesDialog"', PRACTICE_CANDIDATE_COMPONENTS)
+        self.assertIn('aria-modal="true"', PRACTICE_CANDIDATE_COMPONENTS)
+        self.assertIn('@click.self="closeCandidatesDialog()"', PRACTICE_CANDIDATE_COMPONENTS)
+        self.assertIn("event.key === 'Escape'", PRACTICE_CANDIDATE_COMPONENTS)
+        self.assertIn('padding: 12px clamp(16px, 5vw, 24px)', PRACTICE_CANDIDATE_COMPONENTS)
+        self.assertIn('width: min(100%, 440px)', PRACTICE_CANDIDATE_COMPONENTS)
+        self.assertIn('--candidate-dialog-surface:', PRACTICE_CANDIDATE_COMPONENTS)
+        self.assertIn('--candidate-card-surface:', PRACTICE_CANDIDATE_COMPONENTS)
+        self.assertIn('--candidate-niuone-text: #a99bb5', PRACTICE_CANDIDATE_COMPONENTS)
+        self.assertNotIn('practice-candidates-distribution', PRACTICE_CANDIDATE_COMPONENTS)
+        self.assertIn('${scanDescription.value} ${candidateCount.value}只', PRACTICE_CANDIDATE_COMPONENTS)
+        self.assertIn('payload?.stock_universe_label || payload?.configured_stock_universe_label', PRACTICE_CANDIDATE_DATA)
+        self.assertIn(':global(html[data-theme="dark"] .practice-candidates-backdrop)', PRACTICE_CANDIDATE_COMPONENTS)
+        self.assertIn('var(--candidate-card-surface, var(--panel))', PRACTICE_CANDIDATE_COMPONENTS)
         self.assertIn('grid-template-columns: repeat(2, minmax(0, 1fr))', PRACTICE_CANDIDATE_COMPONENTS)
 
         for label in ('买入理由', '卖出归因', '最低/最高', '仓位占比', '可卖/持有'):
             self.assertIn(label, PRACTICE_COMPONENTS)
         self.assertIn('<PracticePositionCard', PRACTICE_COMPONENTS)
         self.assertIn('<PracticeSoldCard', PRACTICE_COMPONENTS)
+        self.assertIn('<template #candidates>', PRACTICE_COMPONENTS)
+        self.assertIn('<template #candidate-entry>', PRACTICE_COMPONENTS)
+        self.assertIn('<slot name="candidate-entry" />', PRACTICE_COMPONENTS)
+        self.assertNotIn('建仓标的来自候选池', PRACTICE_COMPONENTS)
+        self.assertIn('<h4 id="practicePositionsTitle">模拟持仓</h4>', PRACTICE_COMPONENTS)
+        self.assertIn('class="practice-position-bar"', PRACTICE_COMPONENTS)
+        self.assertNotIn('<header class="practice-position-heading">', PRACTICE_COMPONENTS)
+        self.assertIn("'single-control': showSold", PRACTICE_COMPONENTS)
+        self.assertIn('practice-candidates-launcher-chevron', PRACTICE_CANDIDATE_COMPONENTS)
         self.assertIn("next.searchParams.set('holdings', 'sold')", PRACTICE_COMPONENTS)
         self.assertIn("next.searchParams.set('brief', '1')", PRACTICE_COMPONENTS)
 

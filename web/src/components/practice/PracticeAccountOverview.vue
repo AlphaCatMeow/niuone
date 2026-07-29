@@ -64,7 +64,9 @@ const manualButtonText = computed(() => manualRunning.value
       :sold-stocks="practice.today_sold_stocks || []"
       :total-equity="Number(practice.total_equity || 0)"
       :strategy-meta="strategyMeta"
-    />
+    >
+      <template #candidate-entry><slot name="candidates" /></template>
+    </PracticePositions>
     <slot name="activity" />
     <slot name="rule" />
     <div v-if="practice.last_error" class="empty" style="color:#f87171;margin-top:10px">模型/交易错误：{{ practice.last_error }}</div>

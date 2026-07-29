@@ -55,6 +55,13 @@ export function practiceCandidateTierCounts(items) {
   return counts
 }
 
+export function practiceCandidateScanDescription(strategySuite, stockUniverseLabel) {
+  const universeLabel = String(stockUniverseLabel || '').trim() || '配置范围'
+  return String(strategySuite || '').trim() === 'niuone'
+    ? `全市场非ST主线识别 · ${universeLabel}入选`
+    : `高流动性扫描 · ${universeLabel}入选`
+}
+
 export function practiceCandidateStrategyMeta(payloadMeta = {}) {
   const merged = { ...PRACTICE_STRATEGY_META, ...(payloadMeta || {}) }
   for (const strategyId of ['niu_leader', 'niu_pullback', 'niu_emerging']) {

@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, ref } from 'vue'
 import {
   formatPracticeNumber,
   PRACTICE_TIDE_STATUS_LABELS,
@@ -34,12 +34,6 @@ const riskFlags = computed(() => {
 })
 const tier = computed(() => practiceCandidateTier(props.item))
 const tierLabel = computed(() => ({ high: '交易达标', mid: hardBlockers.value.length ? '未达标' : '等确认', low: '仅观察' })[tier.value])
-const tierStyle = computed(() => {
-  const common = 'display:inline-flex;align-items:center;flex:0 0 auto;white-space:nowrap;line-height:1;padding:6px 9px;border-radius:6px;font-size:11px;font-weight:600'
-  if (tier.value === 'high') return `${common};background:var(--green-soft);color:var(--green-text);border:1px solid var(--green-border)`
-  if (tier.value === 'mid') return `${common};background:var(--yellow-soft);color:var(--yellow-text);border:1px solid var(--yellow-border)`
-  return `${common};background:var(--panel2);color:var(--muted);border:1px solid var(--line)`
-})
 const industryLabel = computed(() => practiceCandidateIndustryLabel(props.item))
 const change = computed(() => Number(props.item.change_pct))
 const changeText = computed(() => Number.isFinite(change.value)
@@ -72,35 +66,16 @@ const mainlineStateLabel = computed(() => (
 const mainlineThemes = computed(() => [props.item.mainline_primary, props.item.mainline_secondary]
   .filter(Boolean)
   .join(' / ') || '--')
-const mobileCandidateLayout = ref(false)
 const detailsExpanded = ref(false)
 const candidateDetailsId = computed(() => (
   `practice-candidate-details-${String(props.item.code || props.item.name || 'unknown')
     .replace(/[^a-zA-Z0-9_-]/g, '-')}-${strategyName.value || 'general'}`
 ))
-let mobileLayoutMediaQuery
-
-function syncMobileCandidateLayout(event) {
-  mobileCandidateLayout.value = Boolean(event.matches)
-  if (!mobileCandidateLayout.value) detailsExpanded.value = false
-}
-
 function toggleCandidateDetails() {
-  if (mobileCandidateLayout.value && niuoneStrategy.value) {
+  if (niuoneStrategy.value) {
     detailsExpanded.value = !detailsExpanded.value
   }
 }
-
-onMounted(() => {
-  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return
-  mobileLayoutMediaQuery = window.matchMedia('(max-width: 560px)')
-  syncMobileCandidateLayout(mobileLayoutMediaQuery)
-  mobileLayoutMediaQuery.addEventListener('change', syncMobileCandidateLayout)
-})
-
-onBeforeUnmount(() => {
-  mobileLayoutMediaQuery?.removeEventListener('change', syncMobileCandidateLayout)
-})
 </script>
 
 <template>
@@ -113,29 +88,35 @@ onBeforeUnmount(() => {
   >
     <div
       class="candidate-summary"
-      :role="mobileCandidateLayout && niuoneStrategy ? 'button' : undefined"
-      :tabindex="mobileCandidateLayout && niuoneStrategy ? 0 : undefined"
-      :aria-expanded="mobileCandidateLayout && niuoneStrategy ? detailsExpanded : undefined"
-      :aria-controls="mobileCandidateLayout && niuoneStrategy ? candidateDetailsId : undefined"
-      :aria-label="mobileCandidateLayout && niuoneStrategy
+      :class="{ 'has-industry': industryLabel }"
+      :role="niuoneStrategy ? 'button' : undefined"
+      :tabindex="niuoneStrategy ? 0 : undefined"
+      :aria-expanded="niuoneStrategy ? detailsExpanded : undefined"
+      :aria-controls="niuoneStrategy ? candidateDetailsId : undefined"
+      :aria-label="niuoneStrategy
         ? `${item.code || ''} ${item.name || ''}，${detailsExpanded ? '收起' : '查看'}详情`
         : undefined"
       @click="toggleCandidateDetails"
       @keydown.enter.prevent="toggleCandidateDetails"
       @keydown.space.prevent="toggleCandidateDetails"
     >
-      <div style="min-width:0;flex:1 1 auto">
-        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0">
-          <span style="font-weight:780;font-size:17px;color:var(--text)">{{ item.code }} {{ item.name }}</span>
+      <div class="candidate-primary">
+        <div class="candidate-identity">
+          <span class="candidate-stock-name">{{ item.code }} {{ item.name }}</span>
           <span
-            :style="`display:inline-flex;align-items:center;white-space:nowrap;padding:2px 8px;border-radius:999px;background:${strategy.color}22;color:${strategy.color};font-size:12px;border:1px solid ${strategy.color}44`"
+            class="candidate-strategy-badge"
+            :style="{
+              '--candidate-strategy-bg': `${strategy.color}22`,
+              '--candidate-strategy-border': `${strategy.color}44`,
+              '--candidate-strategy-text': strategy.color,
+            }"
           >{{ strategy.label }}</span>
         </div>
-        <div v-if="industryLabel" style="margin-top:8px">
-          <span style="display:inline-flex;align-items:center;max-width:100%;white-space:nowrap;padding:2px 8px;border-radius:6px;background:var(--accent-soft);color:var(--accent-text);font-size:12px">{{ industryLabel }}</span>
-        </div>
       </div>
-      <span :style="tierStyle">{{ tierLabel }}</span>
+      <div v-if="industryLabel" class="candidate-industry">
+        <span class="candidate-industry-badge">{{ industryLabel }}</span>
+      </div>
+      <span class="candidate-tier" :class="tier">{{ tierLabel }}</span>
     </div>
     <div :id="niuoneStrategy ? candidateDetailsId : undefined" class="candidate-details">
       <div class="candidate-metric-grid">
@@ -268,18 +249,149 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .practice-candidate-card {
-  background: var(--panel);
-  border: 1px solid var(--line);
+  background: var(--candidate-card-surface, var(--panel));
+  border: 1px solid var(--candidate-card-border, var(--line));
   border-radius: 10px;
+  box-shadow: var(--candidate-card-shadow, none);
   padding: 16px;
+  transition: border-color .18s ease, box-shadow .18s ease;
 }
 
 .candidate-summary {
   align-items: flex-start;
-  display: flex;
-  gap: 12px;
-  justify-content: space-between;
+  column-gap: 12px;
+  display: grid;
+  grid-template-areas: 'primary tier';
+  grid-template-columns: minmax(0, 1fr) auto;
   margin-bottom: 10px;
+  row-gap: 8px;
+}
+
+.candidate-summary.has-industry {
+  grid-template-areas:
+    'primary tier'
+    'industry tier';
+}
+
+.niuone-candidate-card .candidate-summary {
+  cursor: pointer;
+}
+
+.niuone-candidate-card .candidate-summary:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 4px;
+}
+
+.niuone-candidate-card:not(.details-expanded) .candidate-summary {
+  margin-bottom: 0;
+}
+
+.niuone-candidate-card:not(.details-expanded) .candidate-details {
+  display: none;
+}
+
+.niuone-candidate-card.details-expanded {
+  border-color: var(--candidate-card-expanded-border, var(--accent-border));
+  box-shadow: var(--candidate-card-expanded-shadow, var(--candidate-card-shadow, none));
+}
+
+.niuone-candidate-card.details-expanded .candidate-summary {
+  margin-bottom: 0;
+  padding-bottom: 12px;
+}
+
+.niuone-candidate-card.details-expanded .candidate-details {
+  border-top: 1px solid var(--candidate-card-divider, var(--candidate-card-border, var(--line)));
+  padding-top: 12px;
+}
+
+.candidate-primary {
+  grid-area: primary;
+  min-width: 0;
+}
+
+.candidate-identity {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.candidate-stock-name {
+  color: var(--text);
+  font-size: 17px;
+  font-weight: 780;
+}
+
+.candidate-strategy-badge {
+  align-items: center;
+  background: var(--candidate-strategy-bg);
+  border: 1px solid;
+  border-color: var(--candidate-strategy-border);
+  border-radius: 999px;
+  color: var(--candidate-strategy-text);
+  display: inline-flex;
+  font-size: 12px;
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+
+.niuone-candidate-card .candidate-strategy-badge {
+  background: var(--candidate-niuone-bg, var(--candidate-strategy-bg));
+  border-color: var(--candidate-niuone-border, var(--candidate-strategy-border));
+  color: var(--candidate-niuone-text, var(--candidate-strategy-text));
+}
+
+.candidate-industry {
+  grid-area: industry;
+  justify-self: start;
+  min-width: 0;
+}
+
+.candidate-industry-badge {
+  align-items: center;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-border);
+  border-radius: 6px;
+  color: var(--accent-text);
+  display: inline-flex;
+  font-size: 12px;
+  max-width: 100%;
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+
+.candidate-tier {
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  display: inline-flex;
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 600;
+  grid-area: tier;
+  justify-self: end;
+  line-height: 1;
+  padding: 6px 9px;
+  white-space: nowrap;
+}
+
+.candidate-tier.high {
+  background: var(--green-soft);
+  border-color: var(--green-border);
+  color: var(--green-text);
+}
+
+.candidate-tier.mid {
+  background: var(--yellow-soft);
+  border-color: var(--yellow-border);
+  color: var(--yellow-text);
+}
+
+.candidate-tier.low {
+  background: var(--candidate-card-subtle, var(--panel2));
+  color: var(--muted);
 }
 
 .candidate-metric-grid {
@@ -290,8 +402,8 @@ onBeforeUnmount(() => {
 }
 
 .candidate-metric {
-  background: var(--panel2);
-  border: 1px solid var(--line);
+  background: var(--candidate-card-subtle, var(--panel2));
+  border: 1px solid var(--candidate-card-border, var(--line));
   border-radius: 7px;
   min-width: 0;
   padding: 8px 10px;
@@ -303,7 +415,7 @@ onBeforeUnmount(() => {
 }
 
 .niuone-detail-section {
-  border-top: 1px solid var(--line);
+  border-top: 1px solid var(--candidate-card-border, var(--line));
   padding-top: 12px;
 }
 
@@ -363,7 +475,7 @@ onBeforeUnmount(() => {
 }
 
 .niuone-rules {
-  background: var(--panel2);
+  background: var(--candidate-card-subtle, var(--panel2));
   border-radius: 7px;
   margin: 11px 0 0;
   padding: 8px 11px;
@@ -377,7 +489,7 @@ onBeforeUnmount(() => {
 }
 
 .niuone-rules > div + div {
-  border-top: 1px solid var(--line);
+  border-top: 1px solid var(--candidate-card-border, var(--line));
   margin-top: 6px;
   padding-top: 6px;
 }
@@ -444,16 +556,55 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 560px) {
+  .practice-candidate-card {
+    border-radius: 9px;
+    padding: 12px;
+  }
+
   .niuone-candidate-card .candidate-summary {
-    cursor: pointer;
+    column-gap: 8px;
+    row-gap: 6px;
   }
 
-  .niuone-candidate-card:not(.details-expanded) .candidate-summary {
-    margin-bottom: 0;
+  .niuone-candidate-card .candidate-summary.has-industry {
+    grid-template-areas:
+      'primary industry'
+      'primary tier';
   }
 
-  .niuone-candidate-card:not(.details-expanded) .candidate-details {
-    display: none;
+  .niuone-candidate-card .candidate-identity {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .niuone-candidate-card .candidate-stock-name {
+    font-size: 15px;
+    line-height: 1.35;
+  }
+
+  .niuone-candidate-card .candidate-strategy-badge,
+  .niuone-candidate-card .candidate-industry-badge {
+    font-size: 11px;
+    padding: 1px 6px;
+  }
+
+  .niuone-candidate-card .candidate-tier {
+    font-size: 10px;
+    padding: 4px 7px;
+  }
+
+  .niuone-candidate-card .candidate-industry,
+  .niuone-candidate-card .candidate-tier {
+    justify-self: end;
+  }
+
+  .niuone-candidate-card.details-expanded .candidate-summary {
+    padding-bottom: 10px;
+  }
+
+  .niuone-candidate-card.details-expanded .candidate-details {
+    padding-top: 10px;
   }
 
   .niuone-fact-grid {

@@ -111,6 +111,9 @@ onBeforeUnmount(deactivatePractice)
           @open-calendar="calendarOpen = true"
         />
       </template>
+      <template #candidates>
+        <PracticeCandidatesPanel />
+      </template>
       <template #activity>
         <PracticeOperationLog :practice="state.practice" />
       </template>
@@ -121,7 +124,6 @@ onBeforeUnmount(deactivatePractice)
         />
       </template>
     </PracticeAccountOverview>
-    <PracticeCandidatesPanel />
     <PracticeCalendar
       :open="calendarOpen"
       :practice="state.practice"

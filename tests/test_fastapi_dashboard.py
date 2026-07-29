@@ -1014,7 +1014,7 @@ class FastApiDashboardTests(unittest.TestCase):
         stylesheet = (ROOT / "frontend" / "dashboard.css").read_text(encoding="utf-8")
 
         self.assertIn(
-            ".compliance-dialog-backdrop { place-items:center; padding:12px; }",
+            ".compliance-dialog-backdrop { place-items:center; padding:16px; }",
             stylesheet,
         )
         self.assertNotIn(
