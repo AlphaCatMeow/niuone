@@ -4,8 +4,27 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-PYTHON_BIN="${PYTHON_BIN:-python3}"
+if [[ -z "${PYTHON_BIN:-}" ]]; then
+  if [[ -x "$ROOT/.venv/bin/python" ]]; then
+    PYTHON_BIN="$ROOT/.venv/bin/python"
+  elif [[ -x "$ROOT/.local-data/.venv/bin/python" ]]; then
+    PYTHON_BIN="$ROOT/.local-data/.venv/bin/python"
+  else
+    PYTHON_BIN="python3"
+  fi
+fi
 
+PYTHON_BIN_REQUESTED="$PYTHON_BIN"
+if ! PYTHON_BIN="$(command -v "$PYTHON_BIN_REQUESTED")"; then
+  echo "Python interpreter is unavailable: $PYTHON_BIN_REQUESTED" >&2
+  exit 1
+fi
+PYTHON_BIN_DIR="$(cd "$(dirname "$PYTHON_BIN")" && pwd)"
+PYTHON_BIN="$PYTHON_BIN_DIR/$(basename "$PYTHON_BIN")"
+export PYTHON_BIN
+export PATH="$PYTHON_BIN_DIR:$PATH"
+
+echo "== Python interpreter: $PYTHON_BIN =="
 echo "== Python syntax checks =="
 "$PYTHON_BIN" - <<'PY'
 from pathlib import Path

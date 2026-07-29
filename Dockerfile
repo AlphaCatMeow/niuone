@@ -44,7 +44,7 @@ WORKDIR /app
 
 COPY requirements.txt ./requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python -m pip install --disable-pip-version-check --requirement requirements.txt
+    python3 -m pip install --disable-pip-version-check --requirement requirements.txt
 
 COPY app/ ./app/
 COPY frontend/ ./frontend/
@@ -61,7 +61,7 @@ EXPOSE 8787
 STOPSIGNAL SIGTERM
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD ["python", "-c", "import os, urllib.request; u='http://127.0.0.1:%s/healthz' % os.environ.get('NIUONE_CONTAINER_PORT', '8787'); urllib.request.urlopen(u, timeout=3).close()"]
+    CMD ["python3", "-c", "import os, urllib.request; u='http://127.0.0.1:%s/healthz' % os.environ.get('NIUONE_CONTAINER_PORT', '8787'); urllib.request.urlopen(u, timeout=3).close()"]
 
 ENTRYPOINT ["/app/scripts/docker-entrypoint.sh"]
 CMD ["dashboard"]

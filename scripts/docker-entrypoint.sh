@@ -8,6 +8,18 @@ CONTAINER_PORT="${NIUONE_CONTAINER_PORT:-8787}"
 CONTAINER_TZ="${NIUONE_CONTAINER_TZ:-Asia/Shanghai}"
 SOURCE_ENV_FILE="${DASHBOARD_ENV_FILE:-$CONTAINER_DATA_DIR/dashboard.env}"
 
+_NIUONE_CONTAINER_PYTHON_BIN="${PYTHON_BIN:-}"
+if [[ -n "$_NIUONE_CONTAINER_PYTHON_BIN" ]]; then
+  _NIUONE_CONTAINER_PYTHON_BIN="$(command -v "$_NIUONE_CONTAINER_PYTHON_BIN" || true)"
+fi
+if [[ -z "$_NIUONE_CONTAINER_PYTHON_BIN" ]]; then
+  if ! _NIUONE_CONTAINER_PYTHON_BIN="$(command -v python3)"; then
+    echo "python3 is required but was not found in PATH." >&2
+    exit 1
+  fi
+fi
+readonly _NIUONE_CONTAINER_PYTHON_BIN
+
 if [[ -f "$SOURCE_ENV_FILE" ]]; then
   set -a
   source "$SOURCE_ENV_FILE"
@@ -21,7 +33,7 @@ export HOME=/home/niuone
 export TZ="$CONTAINER_TZ"
 export PYTHONUNBUFFERED=1
 export PYTHONDONTWRITEBYTECODE=1
-export PYTHON_BIN="$(command -v python)"
+export PYTHON_BIN="$_NIUONE_CONTAINER_PYTHON_BIN"
 export NIUONE_CONTAINER_DATA_DIR="$CONTAINER_DATA_DIR"
 export NIUONE_CONTAINER_HOST="$CONTAINER_HOST"
 export NIUONE_CONTAINER_PORT="$CONTAINER_PORT"

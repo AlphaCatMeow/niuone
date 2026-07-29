@@ -38,6 +38,8 @@ class ContainerDeploymentTests(unittest.TestCase):
         self.assertIn("!web/src/**", dockerignore)
         self.assertIn("ARG NIUONE_VERSION=dev", dockerfile)
         self.assertIn("NIUONE_VERSION=${NIUONE_VERSION}", dockerfile)
+        self.assertIn("python3 -m pip install", dockerfile)
+        self.assertIn('CMD ["python3", "-c"', dockerfile)
 
     def test_compose_runs_all_long_lived_processes_with_shared_storage(self):
         config = yaml.safe_load((ROOT / "compose.yaml").read_text(encoding="utf-8"))
@@ -76,8 +78,10 @@ class ContainerDeploymentTests(unittest.TestCase):
                     "NIUONE_CONTAINER_DATA_DIR": str(data_dir),
                     "NIUONE_CONTAINER_HOST": "0.0.0.0",
                     "NIUONE_CONTAINER_PORT": "8787",
+                    "PYTHON_BIN": sys.executable,
                 }
             )
+            container_python = Path(sys.executable).resolve()
             code = """
 import json, os, sys
 from pathlib import Path
@@ -103,7 +107,7 @@ print(json.dumps(result))
                 [
                     "bash",
                     str(ROOT / "scripts" / "docker-entrypoint.sh"),
-                    sys.executable,
+                    str(container_python),
                     "-c",
                     code,
                 ],
@@ -118,7 +122,10 @@ print(json.dumps(result))
                 self.assertEqual(runtime_values["DASHBOARD_HOME"], str(data_dir / "runtime"))
                 self.assertEqual(runtime_values["DASHBOARD_HOST"], "0.0.0.0")
                 self.assertEqual(runtime_values["DASHBOARD_PORT"], "8787")
-                self.assertEqual(Path(runtime_values["PYTHON_BIN"]).resolve(), Path(sys.executable).resolve())
+                self.assertEqual(
+                    Path(runtime_values["PYTHON_BIN"]).resolve(),
+                    Path(container_python).resolve(),
+                )
                 self.assertEqual(runtime_values["DASHBOARD_CONFIG"], str(data_dir / "runtime" / "config.yaml"))
                 self.assertEqual(runtime_values["DASHBOARD_NIUNIU_DB"], str(data_dir / "runtime" / "niuniu.db"))
                 self.assertEqual(runtime_values["CUSTOM_FROM_ENV"], "loaded")
