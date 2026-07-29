@@ -33,7 +33,7 @@ const riskFlags = computed(() => {
   return uniqueFlags(props.item.risk_flags).filter((flag) => !blockers.has(flagKey(flag)))
 })
 const tier = computed(() => practiceCandidateTier(props.item))
-const tierLabel = computed(() => ({ high: '交易达标', mid: hardBlockers.value.length ? '硬过滤' : '等确认', low: '仅观察' })[tier.value])
+const tierLabel = computed(() => ({ high: '交易达标', mid: hardBlockers.value.length ? '未达标' : '等确认', low: '仅观察' })[tier.value])
 const tierStyle = computed(() => {
   const common = 'display:inline-flex;align-items:center;flex:0 0 auto;white-space:nowrap;line-height:1;padding:6px 9px;border-radius:6px;font-size:11px;font-weight:600'
   if (tier.value === 'high') return `${common};background:var(--green-soft);color:var(--green-text);border:1px solid var(--green-border)`

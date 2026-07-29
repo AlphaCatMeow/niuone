@@ -2703,11 +2703,16 @@ console.log(JSON.stringify([
         self.assertNotIn('renderPracticePage', DASHBOARD_FRONTEND)
         self.assertNotIn('loadPracticePage', DASHBOARD_FRONTEND)
         self.assertIn("main_board: '主板'", PRACTICE_CANDIDATE_UTILS)
+        for label in ('牛牛战法 · 领航', '牛牛战法 · 回踩', '牛牛战法 · 启动'):
+            self.assertIn(label, PRACTICE_CANDIDATE_UTILS)
         self.assertIn('item.industry || item.sector || item.board_label || item.board', PRACTICE_CANDIDATE_UTILS)
         self.assertIn('{{ industryLabel }}', PRACTICE_CANDIDATE_COMPONENTS)
         self.assertNotIn('所属板块', PRACTICE_CANDIDATE_COMPONENTS)
         for label in ('主线与龙头', '风控与执行', '未通过条件', '评分依据', '仓位规则', '退出规则'):
             self.assertIn(label, PRACTICE_CANDIDATE_COMPONENTS)
+        self.assertIn("hardBlockers.value.length ? '未达标' : '等确认'", PRACTICE_CANDIDATE_COMPONENTS)
+        self.assertNotIn("hardBlockers.value.length ? '硬过滤'", PRACTICE_CANDIDATE_COMPONENTS)
+        self.assertNotIn("hardBlockers.value.length ? '未通过交易条件'", PRACTICE_CANDIDATE_COMPONENTS)
         self.assertIn(".filter((flag) => !blockers.has(flagKey(flag)))", PRACTICE_CANDIDATE_COMPONENTS)
         self.assertIn('grid-template-columns: repeat(2, minmax(0, 1fr))', PRACTICE_CANDIDATE_COMPONENTS)
 

@@ -8,9 +8,9 @@ export const PRACTICE_STRATEGY_META = {
   tide_leader: { label: '主线领航', color: '#06b6d4' },
   tide_rotation: { label: '轮动初升', color: '#14b8a6' },
   tide_recovery: { label: '冰点修复', color: '#22d3ee' },
-  niu_leader: { label: '牛牛领航', color: '#8b5cf6' },
-  niu_pullback: { label: '牛牛回踩', color: '#a78bfa' },
-  niu_emerging: { label: '牛牛启动', color: '#c084fc' },
+  niu_leader: { label: '牛牛战法 · 领航', color: '#8b5cf6' },
+  niu_pullback: { label: '牛牛战法 · 回踩', color: '#a78bfa' },
+  niu_emerging: { label: '牛牛战法 · 启动', color: '#c084fc' },
 }
 
 export const PRACTICE_STOCK_BOARD_LABELS = {
@@ -56,7 +56,14 @@ export function practiceCandidateTierCounts(items) {
 }
 
 export function practiceCandidateStrategyMeta(payloadMeta = {}) {
-  return { ...PRACTICE_STRATEGY_META, ...(payloadMeta || {}) }
+  const merged = { ...PRACTICE_STRATEGY_META, ...(payloadMeta || {}) }
+  for (const strategyId of ['niu_leader', 'niu_pullback', 'niu_emerging']) {
+    merged[strategyId] = {
+      ...(merged[strategyId] || {}),
+      label: PRACTICE_STRATEGY_META[strategyId].label,
+    }
+  }
+  return merged
 }
 
 export function practiceCandidateIndustryLabel(item = {}) {
