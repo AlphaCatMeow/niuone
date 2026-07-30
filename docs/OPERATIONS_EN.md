@@ -117,7 +117,7 @@ The **Market Data and Fund-Flow Settings** page groups index refresh and industr
 | `DASHBOARD_INDICES_TTL_SECONDS` | `60` | Greater than 0 seconds | Hot-applied |
 | `DASHBOARD_NIUONE_MAINLINE_MINUTE_REFRESH_ENABLED` | `1` | `0` or `1` | Dashboard restart required |
 | `DASHBOARD_MARKET_BREADTH_SAMPLE_INTERVAL_SECONDS` | `30` | `30`–`600` seconds | Dashboard restart required |
-| `DASHBOARD_INDUSTRY_FLOW_PLAYBACK_SPEED` | `0.5` | `0.5`, `0.75`, `1`, `1.5`, or `2` | Hot-applied; used on the next fund-flow page load |
+| `DASHBOARD_INDUSTRY_FLOW_PLAYBACK_SPEED` | `0.5` | `0.5`, `0.75`, `1`, `1.5`, `2`, `5`, or `10` | Hot-applied; used on the next fund-flow page load |
 | `DASHBOARD_INDUSTRY_FLOW_SIDE_LIMIT` | `10` | `1`–`10` industries per side | Hot-applied; used by the next fund-flow request |
 | `DASHBOARD_INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS` | `60` | `60`–`600` seconds | Hot-applied; used by the next sampler cycle |
 | `DASHBOARD_INDUSTRY_FLOW_MORNING_START` | `09:25` | China-time `HH:MM` | Hot-applied; used by the next sampler check |

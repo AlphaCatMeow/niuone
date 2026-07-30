@@ -118,7 +118,7 @@ NiuOne 需要大模型驱动完整工作流。X 关注列表监控和美股机�
 | `DASHBOARD_INDICES_TTL_SECONDS` | `60` | 大于 0 秒 | 运行时热应用 |
 | `DASHBOARD_NIUONE_MAINLINE_MINUTE_REFRESH_ENABLED` | `1` | `0` 或 `1` | 重启 Dashboard 后生效 |
 | `DASHBOARD_MARKET_BREADTH_SAMPLE_INTERVAL_SECONDS` | `30` | `30`～`600` 秒 | 重启 Dashboard 后生效 |
-| `DASHBOARD_INDUSTRY_FLOW_PLAYBACK_SPEED` | `0.5` | `0.5`、`0.75`、`1`、`1.5`、`2` | 运行时热应用；资金流页面下一次加载生效 |
+| `DASHBOARD_INDUSTRY_FLOW_PLAYBACK_SPEED` | `0.5` | `0.5`、`0.75`、`1`、`1.5`、`2`、`5`、`10` | 运行时热应用；资金流页面下一次加载生效 |
 | `DASHBOARD_INDUSTRY_FLOW_SIDE_LIMIT` | `10` | 每侧 `1`～`10` 个行业 | 运行时热应用；下一次资金流请求生效 |
 | `DASHBOARD_INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS` | `60` | `60`～`600` 秒 | 运行时热应用；后台下一轮采样生效 |
 | `DASHBOARD_INDUSTRY_FLOW_MORNING_START` | `09:25` | 北京时间 `HH:MM` | 运行时热应用；后台下一轮判断生效 |

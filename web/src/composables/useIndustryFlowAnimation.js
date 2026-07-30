@@ -1,7 +1,7 @@
 import { computed, reactive } from 'vue'
 import { formatNumber } from '../utils/marketDisplay.js'
 
-const SPEED_OPTIONS = [0.5, 0.75, 1, 1.5, 2]
+const SPEED_OPTIONS = [0.5, 0.75, 1, 1.5, 2, 5, 10]
 const SIDE_LIMIT = 10
 const SAMPLE_PLAYBACK_MS = 460
 const MIN_PLAYBACK_MS = 9000

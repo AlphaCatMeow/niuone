@@ -26,7 +26,7 @@ const apiMode = computed(() => (
   ['auto', 'responses', 'chat'].includes(value.value) ? value.value : 'auto'
 ))
 const playbackSpeed = computed(() => (
-  ['0.5', '0.75', '1', '1.5', '2'].includes(value.value) ? value.value : '0.5'
+  ['0.5', '0.75', '1', '1.5', '2', '5', '10'].includes(value.value) ? value.value : '0.5'
 ))
 const listValues = ref([
   ...(String(props.item.kind || '') === 'time_list'
@@ -95,7 +95,7 @@ async function removeListValue(index) {
 
   <template v-else-if="kind === 'playback_speed'">
     <select :name="fieldName" :aria-label="label" :value="playbackSpeed">
-      <option v-for="speed in ['0.5', '0.75', '1', '1.5', '2']" :key="speed" :value="speed">
+      <option v-for="speed in ['0.5', '0.75', '1', '1.5', '2', '5', '10']" :key="speed" :value="speed">
         {{ speed }}x
       </option>
     </select>

@@ -360,7 +360,7 @@ def build_industry_flow_payload(
     source = money_flow if isinstance(money_flow, dict) else {}
     limit = max(1, min(10, int(side_limit)))
     interval = max(DEFAULT_SAMPLE_INTERVAL_SECONDS, min(600, int(sample_interval_seconds)))
-    speed = max(0.5, min(2.0, float(playback_speed)))
+    speed = max(0.5, min(10.0, float(playback_speed)))
     windows = normalize_industry_flow_sampling_windows(sampling_windows)
     rows = _visible_rows(source, limit)
     generated_at = str(source.get("generated_at") or "")

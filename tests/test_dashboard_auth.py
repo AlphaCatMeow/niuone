@@ -2150,7 +2150,43 @@ console.log(JSON.stringify(result));
         self.assertIn('export function frameAt', animation_source)
         self.assertIn('export function seekValueFromClientX', animation_source)
         self.assertIn('export function splitSortedNodes', animation_source)
-        self.assertIn('const SPEED_OPTIONS = [0.5, 0.75, 1, 1.5, 2]', animation_source)
+        self.assertIn('const SPEED_OPTIONS = [0.5, 0.75, 1, 1.5, 2, 5, 10]', animation_source)
+        self.assertIn(
+            "['0.5', '0.75', '1', '1.5', '2', '5', '10']",
+            ADMIN_FRONTEND,
+        )
+
+    def test_industry_flow_accepts_ten_x_playback_speed(self):
+        self.assertEqual(
+            dashboard.normalize_env_update(
+                'DASHBOARD_INDUSTRY_FLOW_PLAYBACK_SPEED',
+                '10',
+                'playback_speed',
+            ),
+            '10',
+        )
+        scenario = r"""
+globalThis.window = {matchMedia:() => ({matches:false})};
+const {configureIndustryFlowAnimation,useIndustryFlowAnimation} = await import(SOURCE);
+const payload = {nodes:[], timeline:[], settings:{playback_speed:10}};
+configureIndustryFlowAnimation(payload, false);
+const controller = useIndustryFlowAnimation({value:payload});
+console.log(JSON.stringify({
+  speed: controller.animation.speed,
+  options: controller.speedOptions,
+}));
+"""
+        output = subprocess.check_output(
+            ['node', '--input-type=module', '-e', scenario.replace(
+                'SOURCE', json.dumps(INDUSTRY_FLOW_ANIMATION_PATH.as_uri()),
+            )],
+            cwd=ROOT,
+            text=True,
+        )
+        self.assertEqual(json.loads(output), {
+            'speed': 10,
+            'options': [0.5, 0.75, 1, 1.5, 2, 5, 10],
+        })
 
     def test_industry_flow_seek_track_is_thin_and_pointer_position_is_clamped(self):
         stylesheet = (ROOT / 'frontend' / 'dashboard.css').read_text(encoding='utf-8')

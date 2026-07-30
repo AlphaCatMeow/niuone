@@ -250,14 +250,14 @@ class IndustryFlowPayloadTests(unittest.TestCase):
             side_limit=2,
             history_samples=[latest],
             sample_interval_seconds=120,
-            playback_speed=0.75,
+            playback_speed=10,
         )
         history = append_industry_flow_sample({}, latest, interval_seconds=120)
 
         self.assertEqual(len(payload["nodes"]), 4)
         self.assertEqual(payload["settings"], {
             "side_limit": 2,
-            "playback_speed": 0.75,
+            "playback_speed": 10,
         })
         self.assertEqual(payload["sampling"]["interval_seconds"], 120)
         self.assertEqual(payload["sampling"]["expected_full_day_points"], 125)
