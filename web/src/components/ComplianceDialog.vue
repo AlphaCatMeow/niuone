@@ -47,7 +47,7 @@ onBeforeUnmount(() => {
         <div class="compliance-row"><span class="compliance-badge risk">入市风险提示</span><span class="compliance-text">证券、期货等投资存在本金损失风险，市场有涨有跌；请通过正规持牌机构独立判断、自主决策、风险自担。投资有风险，入市需谨慎。</span></div>
       </div>
       <div class="compliance-dialog-actions">
-        <button id="complianceDialogClose" type="button" class="compliance-dialog-close" autofocus @click="closeDialog">关闭</button>
+        <button id="complianceDialogClose" type="button" class="compliance-dialog-close" @click="closeDialog">关闭</button>
       </div>
     </section>
   </div>

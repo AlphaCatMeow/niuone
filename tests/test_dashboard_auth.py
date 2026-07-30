@@ -2866,6 +2866,11 @@ console.log(JSON.stringify([
         self.assertIn('event?.detail === 0', DASHBOARD_FRONTEND)
 
     def test_compliance_dialog_stays_compact_and_visible_in_dark_mode(self):
+        compliance_source = (
+            ROOT / 'web' / 'src' / 'components' / 'ComplianceDialog.vue'
+        ).read_text(encoding='utf-8')
+
+        self.assertNotIn('autofocus', compliance_source)
         self.assertIn('.compliance-dialog { width:min(560px, 100%);', DASHBOARD_FRONTEND)
         self.assertIn('.compliance-dialog { width:min(520px, 100%);', DASHBOARD_FRONTEND)
         self.assertIn('.compliance-dialog-close { width:auto; min-width:112px;', DASHBOARD_FRONTEND)
