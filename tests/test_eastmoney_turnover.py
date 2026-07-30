@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 import datetime as dt
 import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from app.market_data import eastmoney_turnover
 
@@ -129,6 +131,132 @@ class EastmoneyTurnoverTests(unittest.TestCase):
             eastmoney_turnover._PROFILE_CACHE.clear()
 
         self.assertEqual(len(calls), 2)
+
+    def test_persistent_profile_survives_process_memory_reset(self):
+        bodies = profile_bodies()
+        calls = []
+        eastmoney_turnover._PROFILE_CACHE.clear()
+        try:
+            with tempfile.TemporaryDirectory(prefix="niuone-turnover-profile-") as temp_dir:
+                cache_path = Path(temp_dir) / "profile.json"
+
+                def downloader(secid, _interval, _limit, _timeout):
+                    calls.append(secid)
+                    return bodies[secid]
+
+                first = eastmoney_turnover.fetch_turnover_profile(
+                    dt.date(2026, 7, 1),
+                    downloader=downloader,
+                    persistent_cache_path=cache_path,
+                )
+                self.assertTrue(cache_path.exists())
+                eastmoney_turnover._PROFILE_CACHE.clear()
+
+                second = eastmoney_turnover.fetch_turnover_profile(
+                    dt.date(2026, 7, 1),
+                    downloader=lambda *_args: (_ for _ in ()).throw(
+                        AssertionError("persistent cache should avoid the network")
+                    ),
+                    persistent_cache_path=cache_path,
+                )
+
+                self.assertEqual(second, first)
+                self.assertEqual(len(calls), 2)
+        finally:
+            eastmoney_turnover._PROFILE_CACHE.clear()
+
+    def test_restored_profile_recomputes_estimate_from_latest_actual(self):
+        bodies = profile_bodies()
+        eastmoney_turnover._PROFILE_CACHE.clear()
+        try:
+            with tempfile.TemporaryDirectory(prefix="niuone-turnover-profile-") as temp_dir:
+                cache_path = Path(temp_dir) / "profile.json"
+                eastmoney_turnover.fetch_turnover_profile(
+                    dt.date(2026, 7, 1),
+                    downloader=lambda secid, *_args: bodies[secid],
+                    persistent_cache_path=cache_path,
+                )
+                eastmoney_turnover._PROFILE_CACHE.clear()
+
+                result = eastmoney_turnover.fetch_market_turnover_estimate(
+                    dt.datetime(2026, 7, 1, 10, 30),
+                    9_999,
+                    profile_fetcher=lambda before_date: (
+                        eastmoney_turnover.fetch_turnover_profile(
+                            before_date,
+                            downloader=lambda *_args: (_ for _ in ()).throw(
+                                AssertionError("restored profile should avoid the network")
+                            ),
+                            persistent_cache_path=cache_path,
+                        )
+                    ),
+                    current_fetcher=lambda _moment: 6_000,
+                )
+
+                self.assertEqual(result["actual_turnover_yi"], 6_000)
+                self.assertEqual(result["estimated_turnover_yi"], 24_000)
+        finally:
+            eastmoney_turnover._PROFILE_CACHE.clear()
+
+    def test_failed_next_day_refresh_preserves_previous_persistent_profile(self):
+        bodies = profile_bodies()
+        eastmoney_turnover._PROFILE_CACHE.clear()
+        try:
+            with tempfile.TemporaryDirectory(prefix="niuone-turnover-profile-") as temp_dir:
+                cache_path = Path(temp_dir) / "profile.json"
+                first = eastmoney_turnover.fetch_turnover_profile(
+                    dt.date(2026, 7, 1),
+                    downloader=lambda secid, *_args: bodies[secid],
+                    persistent_cache_path=cache_path,
+                )
+                persisted = cache_path.read_text(encoding="utf-8")
+                eastmoney_turnover._PROFILE_CACHE.clear()
+
+                with self.assertRaises(TimeoutError):
+                    eastmoney_turnover.fetch_turnover_profile(
+                        dt.date(2026, 7, 2),
+                        downloader=lambda *_args: (_ for _ in ()).throw(
+                            TimeoutError("upstream timeout")
+                        ),
+                        persistent_cache_path=cache_path,
+                    )
+
+                self.assertEqual(cache_path.read_text(encoding="utf-8"), persisted)
+                eastmoney_turnover._PROFILE_CACHE.clear()
+                restored = eastmoney_turnover.fetch_turnover_profile(
+                    dt.date(2026, 7, 1),
+                    downloader=lambda *_args: (_ for _ in ()).throw(
+                        AssertionError("preserved cache should be reusable")
+                    ),
+                    persistent_cache_path=cache_path,
+                )
+                self.assertEqual(restored, first)
+        finally:
+            eastmoney_turnover._PROFILE_CACHE.clear()
+
+    def test_invalid_persistent_profile_is_ignored(self):
+        bodies = profile_bodies()
+        calls = []
+        eastmoney_turnover._PROFILE_CACHE.clear()
+        try:
+            with tempfile.TemporaryDirectory(prefix="niuone-turnover-profile-") as temp_dir:
+                cache_path = Path(temp_dir) / "profile.json"
+                cache_path.write_text(json.dumps({
+                    "schema_version": eastmoney_turnover.PROFILE_CACHE_SCHEMA_VERSION,
+                    "before_date": "2026-07-01",
+                    "profile": {"model": eastmoney_turnover.ESTIMATE_MODEL},
+                }), encoding="utf-8")
+
+                result = eastmoney_turnover.fetch_turnover_profile(
+                    dt.date(2026, 7, 1),
+                    downloader=lambda secid, *_args: calls.append(secid) or bodies[secid],
+                    persistent_cache_path=cache_path,
+                )
+
+                self.assertEqual(result["profile_days"], 20)
+                self.assertEqual(len(calls), 2)
+        finally:
+            eastmoney_turnover._PROFILE_CACHE.clear()
 
     def test_estimate_uses_twenty_day_profile_after_first_five_minutes(self):
         profile = eastmoney_turnover.build_turnover_profile(

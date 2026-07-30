@@ -86,6 +86,10 @@ from market_data.iwencai_client import (
     DEFAULT_BASE_URL as IWENCAI_DEFAULT_BASE_URL,
     normalize_base_url as normalize_iwencai_base_url,
 )
+from market_data.eastmoney_turnover import (
+    fetch_market_turnover_estimate,
+    fetch_turnover_profile,
+)
 from market_data.tencent_market_breadth import fetch_tencent_market_breadth
 from market_data.tencent_kline_cache import kline_cache_path, prewarm_completed_for_date
 from niuone_paths import apply_container_runtime_overrides, get_dashboard_env_file, get_dashboard_home, get_local_data_dir
@@ -170,6 +174,7 @@ NIUONE_MAINLINE_CACHE_FILE = CRON_OUTPUT_DIR / "niuone_mainline_latest.json"
 NIUONE_MAINLINE_MINUTE_CACHE_FILE = CRON_OUTPUT_DIR / "niuone_mainline_minute_latest.json"
 STOCK_INDUSTRY_CACHE_FILE = CRON_OUTPUT_DIR / "stock_industry_cache.json"
 MONEY_FLOW_SNAPSHOT_FILE = CRON_OUTPUT_DIR / "industry_main_money_flow_cache.json"
+TURNOVER_PROFILE_CACHE_FILE = CRON_OUTPUT_DIR / "turnover_profile_cache.json"
 # Main-net samples use a new history file so legacy total-flow observations
 # remain recoverable but can never be replayed under the new metric label.
 INDUSTRY_FLOW_HISTORY_FILE = CRON_OUTPUT_DIR / "industry_main_flow_history.json"
@@ -2973,6 +2978,20 @@ def _cached_market_breadth_payload(now: datetime) -> dict[str, Any] | None:
     )
 
 
+def _fetch_market_turnover_estimate_with_persistent_profile(
+    generated_at: datetime,
+    fallback_actual_turnover_yi: Any,
+) -> dict[str, Any]:
+    return fetch_market_turnover_estimate(
+        generated_at,
+        fallback_actual_turnover_yi,
+        profile_fetcher=lambda before_date: fetch_turnover_profile(
+            before_date,
+            persistent_cache_path=TURNOVER_PROFILE_CACHE_FILE,
+        ),
+    )
+
+
 def produce_market_breadth_data() -> dict[str, Any]:
     """Fetch, validate, persist, and project one market-breadth observation."""
 
@@ -2991,6 +3010,9 @@ def produce_market_breadth_data() -> dict[str, Any]:
             )
         try:
             snapshot = fetch_tencent_market_breadth(
+                turnover_estimate_fetcher=(
+                    _fetch_market_turnover_estimate_with_persistent_profile
+                ),
                 quote_snapshot_consumer=(
                     accept_niuone_mainline_quote_snapshot
                     if NIUONE_MAINLINE_MINUTE_REFRESH_ENABLED

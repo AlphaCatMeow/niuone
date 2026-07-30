@@ -9,9 +9,12 @@ import statistics
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+
+from app.core.json_cache import read_json_cache, write_json_cache
 
 from .auction_turnover import (
     MODEL as ESTIMATE_MODEL,
@@ -33,6 +36,7 @@ PROFILE_FETCH_LIMIT = 2_000
 CURRENT_FETCH_LIMIT = 300
 REQUEST_ATTEMPTS = 2
 PROFILE_RETRY_SECONDS = 300.0
+PROFILE_CACHE_SCHEMA_VERSION = 1
 
 _PROFILE_CACHE_LOCK = threading.Lock()
 _PROFILE_CACHE: dict[str, dict[str, Any]] = {}
@@ -256,13 +260,132 @@ def _download_pair(
         return {secid: future.result() for secid, future in futures.items()}
 
 
+def _validated_persistent_profile(
+    payload: dict[str, Any] | None,
+    before_date: dt.date,
+) -> dict[str, Any] | None:
+    """Return an exact-day persisted profile after strict structural checks."""
+
+    source = payload if isinstance(payload, dict) else {}
+    if source.get("schema_version") != PROFILE_CACHE_SCHEMA_VERSION:
+        return None
+    if str(source.get("before_date") or "") != before_date.isoformat():
+        return None
+    raw_profile = source.get("profile")
+    if not isinstance(raw_profile, dict):
+        return None
+    try:
+        profile_days = int(raw_profile.get("profile_days"))
+        interval_minutes = int(raw_profile.get("interval_minutes"))
+    except (TypeError, ValueError):
+        return None
+    daily_profiles = raw_profile.get("daily_profiles")
+    if (
+        str(raw_profile.get("model") or "") != ESTIMATE_MODEL
+        or profile_days != PROFILE_DAYS
+        or interval_minutes != PROFILE_INTERVAL_MINUTES
+        or not isinstance(daily_profiles, list)
+        or len(daily_profiles) != profile_days
+    ):
+        return None
+
+    normalized_days: list[dict[str, Any]] = []
+    previous_day = ""
+    for raw_daily in daily_profiles:
+        daily = raw_daily if isinstance(raw_daily, dict) else {}
+        day = str(daily.get("date") or "")
+        try:
+            parsed_day = dt.date.fromisoformat(day)
+        except ValueError:
+            return None
+        fractions = daily.get("fractions")
+        turnover_yi = _finite_float(daily.get("turnover_yi"))
+        if (
+            parsed_day >= before_date
+            or day <= previous_day
+            or turnover_yi is None
+            or turnover_yi <= 0
+            or not isinstance(fractions, list)
+            or len(fractions) < PROFILE_MIN_BARS
+        ):
+            return None
+        normalized_fractions: list[tuple[float, float]] = []
+        previous_progress = -1.0
+        previous_fraction = 0.0
+        for raw_fraction in fractions:
+            if not isinstance(raw_fraction, (list, tuple)) or len(raw_fraction) != 2:
+                return None
+            progress = _finite_float(raw_fraction[0])
+            fraction = _finite_float(raw_fraction[1])
+            if (
+                progress is None
+                or fraction is None
+                or progress <= previous_progress
+                or progress < 0
+                or progress > 240
+                or fraction < previous_fraction
+                or fraction <= 0
+                or fraction > 1
+            ):
+                return None
+            normalized_fractions.append((progress, fraction))
+            previous_progress = progress
+            previous_fraction = fraction
+        if (
+            normalized_fractions[0][0] > PROFILE_INTERVAL_MINUTES
+            or normalized_fractions[-1][0] < 240
+            or abs(normalized_fractions[-1][1] - 1.0) > 1e-6
+        ):
+            return None
+        normalized_days.append({
+            "date": day,
+            "fractions": normalized_fractions,
+            "turnover_yi": round(turnover_yi, 2),
+        })
+        previous_day = day
+
+    if (
+        str(raw_profile.get("profile_start") or "") != normalized_days[0]["date"]
+        or str(raw_profile.get("profile_end") or "") != normalized_days[-1]["date"]
+    ):
+        return None
+    profile = dict(raw_profile)
+    profile["daily_profiles"] = normalized_days
+    return profile
+
+
+def _read_persistent_profile(
+    path: Path | None,
+    before_date: dt.date,
+) -> dict[str, Any] | None:
+    if path is None:
+        return None
+    return _validated_persistent_profile(read_json_cache(path), before_date)
+
+
+def _write_persistent_profile(
+    path: Path | None,
+    before_date: dt.date,
+    profile: dict[str, Any],
+) -> None:
+    if path is None:
+        return
+    write_json_cache(path, {
+        "schema_version": PROFILE_CACHE_SCHEMA_VERSION,
+        "before_date": before_date.isoformat(),
+        "saved_at": dt.datetime.now(CN_TZ).strftime("%Y-%m-%d %H:%M:%S"),
+        "profile": profile,
+    })
+
+
 def fetch_turnover_profile(
     before_date: dt.date,
     *,
     downloader: Callable[[str, int, int, float], str] = _download_kline,
     monotonic: Callable[[], float] = time.monotonic,
+    persistent_cache_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Fetch and cache a 20-day Eastmoney profile with bounded failure retries."""
+    """Fetch and cache a 20-day profile in memory and, when configured, on disk."""
 
     cache_key = before_date.isoformat()
     now = monotonic()
@@ -270,6 +393,11 @@ def fetch_turnover_profile(
         cached = _PROFILE_CACHE.get(cache_key)
         if cached and cached.get("value") is not None:
             return dict(cached["value"])
+        persisted = _read_persistent_profile(persistent_cache_path, before_date)
+        if persisted is not None:
+            _PROFILE_CACHE.clear()
+            _PROFILE_CACHE[cache_key] = {"value": persisted, "retry_after": 0.0}
+            return dict(persisted)
         if cached and now < float(cached.get("retry_after") or 0):
             raise RuntimeError("Eastmoney turnover profile is waiting to retry")
         try:
@@ -291,6 +419,14 @@ def fetch_turnover_profile(
             raise
         _PROFILE_CACHE.clear()
         _PROFILE_CACHE[cache_key] = {"value": profile, "retry_after": 0.0}
+        try:
+            _write_persistent_profile(persistent_cache_path, before_date, profile)
+        except (OSError, TypeError, ValueError) as exc:
+            print(
+                f"[WARN] Eastmoney turnover profile cache write failed "
+                f"error={type(exc).__name__}",
+                flush=True,
+            )
         return dict(profile)
 
 

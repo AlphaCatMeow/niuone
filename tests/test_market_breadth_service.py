@@ -851,6 +851,41 @@ class MarketBreadthHistoryTests(unittest.TestCase):
         self.assertEqual(payload["latest"]["turnover_increment_yi"], -200)
         self.assertEqual(payload["turnover_comparison"]["previous_turnover_yi"], 12_000)
 
+    def test_dashboard_estimate_injects_persistent_profile_cache_path(self):
+        original_cache_file = dashboard.TURNOVER_PROFILE_CACHE_FILE
+        try:
+            with tempfile.TemporaryDirectory(prefix="niuone-turnover-profile-") as temp_dir:
+                cache_path = Path(temp_dir) / "profile.json"
+                dashboard.TURNOVER_PROFILE_CACHE_FILE = cache_path
+
+                def estimate(generated_at, fallback_actual, *, profile_fetcher):
+                    profile_fetcher(generated_at.date())
+                    return {"actual_turnover_yi": fallback_actual}
+
+                with patch.object(
+                    dashboard,
+                    "fetch_market_turnover_estimate",
+                    side_effect=estimate,
+                ), patch.object(
+                    dashboard,
+                    "fetch_turnover_profile",
+                    return_value={"profile_days": 20},
+                ) as profile_fetch:
+                    result = (
+                        dashboard._fetch_market_turnover_estimate_with_persistent_profile(
+                            datetime(2026, 7, 22, 10, 0),
+                            3_500,
+                        )
+                    )
+
+                self.assertEqual(result["actual_turnover_yi"], 3_500)
+                profile_fetch.assert_called_once_with(
+                    datetime(2026, 7, 22).date(),
+                    persistent_cache_path=cache_path,
+                )
+        finally:
+            dashboard.TURNOVER_PROFILE_CACHE_FILE = original_cache_file
+
     def test_producer_retains_previous_valid_sample_when_fetch_fails(self):
         original_history_file = dashboard.MARKET_BREADTH_HISTORY_FILE
         try:
@@ -884,7 +919,8 @@ class MarketBreadthHistoryTests(unittest.TestCase):
         original_history_file = dashboard.MARKET_BREADTH_HISTORY_FILE
         accepted = []
 
-        def fetch(*, quote_snapshot_consumer=None):
+        def fetch(*, turnover_estimate_fetcher=None, quote_snapshot_consumer=None):
+            self.assertIsNotNone(turnover_estimate_fetcher)
             self.assertIsNotNone(quote_snapshot_consumer)
             quote_snapshot_consumer({
                 "generated_at": "2026-07-22 10:10:00",
