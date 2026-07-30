@@ -34,6 +34,8 @@ const initialCategory = PATH_CATEGORIES[window.location.pathname]
   || initialQueryCategory
   || 'practice'
 const activeCategory = ref(Object.hasOwn(CATEGORY_PATHS, initialCategory) ? initialCategory : 'practice')
+const autoVersionCheckEnabled = ref(true)
+const currentVersion = ref('dev')
 const usFeaturesEnabled = ref(false)
 const bootstrapLoaded = ref(false)
 const bootstrapError = ref('')
@@ -100,6 +102,9 @@ async function initializeDashboardTabs() {
   }).then(async response => {
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
     const payload = await response.json()
+    const bootstrapVersion = String(payload.current_version || '').trim()
+    if (bootstrapVersion) currentVersion.value = bootstrapVersion
+    autoVersionCheckEnabled.value = payload.auto_version_check_enabled !== false
     usFeaturesEnabled.value = payload.us_features_enabled === true
     applyBootstrapCounts(payload.message_counts)
     bootstrapError.value = ''
@@ -121,9 +126,11 @@ async function initializeDashboardTabs() {
 export function useDashboardTabs() {
   return {
     activeCategory,
+    autoVersionCheckEnabled,
     bootstrapError,
     bootstrapLoaded,
     categoryAvailable,
+    currentVersion,
     initializeDashboardTabs,
     items,
     setActiveCategory,

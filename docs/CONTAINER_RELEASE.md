@@ -114,7 +114,7 @@ PYTHON_VERSION=3.11
 NIUONE_VERSION=v1.2.3
 ```
 
-看板每次打开都会请求本机的 `/api/version`；服务端定期查询 Docker Hub 的严格 SemVer 标签，并在页面顶部显示当前版本和可用更新。Docker Hub 暂时不可用不会影响其他看板功能。
+看板通过首页 bootstrap 在页面顶部只显示镜像内的当前版本。用户打开或重新加载页面时，浏览器会在后台请求一次本机的 `/api/version`；服务端使用 15 分钟缓存查询 Docker Hub 的严格 SemVer 标签。仅在存在新版本时弹窗提示，无更新或查询失败时不打断页面使用；用户也可以点击版本号手动复查。弹窗中的“此版本不再提醒”只记录在当前浏览器，后续更高版本仍会提醒；设置页末尾的“关于”分组展示作者、仓库、Apache License 2.0、当前版本和最新发行版本，并可通过 `DASHBOARD_AUTO_VERSION_CHECK_ENABLED` 关闭页面加载时的自动检测。Docker Hub 暂时不可用不会影响其他看板功能。
 
 `.dockerignore` 默认排除整个仓库，只允许构建所需的以下内容进入上下文：
 

@@ -1,6 +1,7 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { onBeforeRouteLeave, onBeforeRouteUpdate } from 'vue-router'
+import AdminAbout from './AdminAbout.vue'
 import AdminConnectionTests from './AdminConnectionTests.vue'
 import AdminEnvInput from './AdminEnvInput.vue'
 import AdminNotificationSettings from './AdminNotificationSettings.vue'
@@ -22,6 +23,14 @@ function isTruthy(value) {
   return ['1', 'true', 'yes', 'on'].includes(String(value ?? '').trim().toLowerCase())
 }
 
+function settingStateLabel(item, value) {
+  const raw = String(value ?? '').trim()
+  if (String(item?.kind || '') !== 'bool' || !raw) return raw
+  if (isTruthy(raw)) return '启用'
+  if (['0', 'false', 'no', 'off'].includes(raw.toLowerCase())) return '停用'
+  return raw
+}
+
 const group = computed(() => (
   (props.config.groups || []).find(entry => entry.slug === props.slug) || null
 ))
@@ -30,6 +39,7 @@ const items = computed(() => {
   return (props.config.items || []).filter(item => String(item.group || '其他') === group.value.name)
 })
 const isNotificationGroup = computed(() => group.value?.name === '交易通知')
+const isAboutGroup = computed(() => group.value?.slug === 'about')
 const itemCountLabel = computed(() => (
   isNotificationGroup.value
     ? `${(props.config.notification_channels || []).length} 个渠道`
@@ -436,7 +446,8 @@ onBeforeUnmount(() => {
           @field-change="handleFormMutation"
           @test-channel="runNotificationTest"
         />
-        <div v-else class="settings-list">
+        <AdminAbout v-if="isAboutGroup" :about="config.about || {}" />
+        <div v-if="!isNotificationGroup" class="settings-list">
           <div
             v-for="item in items"
             :key="item.name"
@@ -501,17 +512,17 @@ onBeforeUnmount(() => {
                   class="config-meta"
                   :class="{'config-empty': !currentStates[item.name]}"
                   :data-env-current="item.name"
-                >{{ currentStates[item.name] || '未设置' }}</div>
+                >{{ settingStateLabel(item, currentStates[item.name]) || '未设置' }}</div>
               </div>
               <div class="setting-state-item">
                 <div class="setting-state-label">默认</div>
-                <div class="config-meta" :class="{'config-empty': !item.default}">{{ item.default || '未设置' }}</div>
+                <div class="config-meta" :class="{'config-empty': !item.default}">{{ settingStateLabel(item, item.default) || '未设置' }}</div>
               </div>
             </div>
           </div>
         </div>
         <AdminConnectionTests
-          v-if="!isNotificationGroup"
+          v-if="!isNotificationGroup && !isAboutGroup"
           :config="config"
           :slug="slug"
           :model-status="modelStatus"

@@ -114,7 +114,7 @@ PYTHON_VERSION=3.11
 NIUONE_VERSION=v1.2.3
 ```
 
-Every dashboard page load requests the local `/api/version` endpoint. The server periodically checks strict SemVer tags on Docker Hub and shows the current version and any available update in the header. A temporary Docker Hub failure does not affect other dashboard features.
+The dashboard bootstrap shows only the image's current version in the header. When the user opens or reloads the page, the browser requests the local `/api/version` endpoint once in the background; the server checks strict SemVer tags on Docker Hub through a 15-minute cache. An update dialog opens only when a newer version is available, while no-update and failure results do not interrupt the page. The user can also click the version number to check again. “Do not remind me about this version” is stored only in the current browser, so a later release can still trigger a reminder. The final **About** settings group shows the author, repository, Apache License 2.0, current version, and newest release, and `DASHBOARD_AUTO_VERSION_CHECK_ENABLED` controls the automatic page-load check. A temporary Docker Hub failure does not affect other dashboard features.
 
 By default, `.dockerignore` excludes the entire repository and allows only the following files required for the build into the context:
 

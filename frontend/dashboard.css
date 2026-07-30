@@ -29,9 +29,10 @@
     .settings-link:hover, .header-link:hover { border-color:#b9c2ce; background:#f7f8fa; }
     .settings-link:focus-visible, .header-link:focus-visible { outline:2px solid rgba(36,87,197,.45); outline-offset:2px; }
     .header-link svg { width:15px; height:15px; flex:0 0 auto; fill:currentColor; }
-    .version-status { text-decoration:none; transition:.16s ease; }
+    .version-status { font:inherit; text-decoration:none; cursor:pointer; transition:.16s ease; }
     .version-status:hover { border-color:#b9c2ce; background:#f7f8fa; }
     .version-status:focus-visible { outline:2px solid rgba(36,87,197,.45); outline-offset:2px; }
+    .version-status:disabled { cursor:wait; opacity:.72; }
     .version-status span { color:#667085; font-size:12px; font-weight:650; }
     .version-status b { color:#344054; font-size:13px; font-variant-numeric:tabular-nums; letter-spacing:0; }
     .version-status[data-state="current"] { border-color:#a9d7c6; background:#f0faf6; }
@@ -39,6 +40,14 @@
     .version-status[data-state="update"] { border-color:#ddc27e; background:#fff9e8; }
     .version-status[data-state="update"] span, .version-status[data-state="update"] b { color:#845400; }
     .version-status[data-state="error"] { border-style:dashed; }
+    .version-update-backdrop { position:fixed; inset:0; z-index:110; display:grid; place-items:center; padding:20px; background:rgba(15,23,42,.56); }
+    .version-update-dialog { width:min(420px,100%); border:1px solid var(--line); border-radius:12px; padding:20px; background:var(--panel); color:var(--text); box-shadow:0 18px 48px rgba(15,23,42,.22); }
+    .version-update-dialog h2 { margin:0; font-size:18px; }
+    .version-update-dialog p { margin:12px 0 20px; color:var(--muted); font-size:14px; line-height:1.65; }
+    .version-update-actions { display:flex; justify-content:flex-end; gap:9px; flex-wrap:wrap; }
+    .version-update-actions a, .version-update-actions button { border:1px solid var(--text); border-radius:7px; padding:8px 14px; font-size:13px; font-weight:700; text-decoration:none; }
+    .version-update-actions a { background:var(--text); color:var(--panel); }
+    .version-update-actions .version-update-later, .version-update-actions .version-update-ignore { background:var(--panel); color:var(--text); }
     .refresh-pill span { color:#667085; font-size:12px; font-weight:650; }
     .refresh-pill b { font-size:13px; font-variant-numeric:tabular-nums; letter-spacing:0; }
     .subtitle { margin-top:8px; color:var(--muted); }

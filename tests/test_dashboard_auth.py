@@ -63,6 +63,7 @@ MARKET_MONITOR_COMPONENTS = '\n'.join(
 INDUSTRY_FLOW_DATA_UTIL_PATH = ROOT / 'web' / 'src' / 'utils' / 'industryFlowData.js'
 RESPONSIVE_STAGE_UTIL_PATH = ROOT / 'web' / 'src' / 'utils' / 'responsiveStage.js'
 ASYNC_PAYLOAD_UTIL_PATH = ROOT / 'web' / 'src' / 'utils' / 'asyncPayload.js'
+VERSION_STATUS_UTIL_PATH = ROOT / 'web' / 'src' / 'utils' / 'versionStatus.js'
 US_RATING_UTILS_PATH = ROOT / 'web' / 'src' / 'utils' / 'usRatingDisplay.js'
 US_RATING_UTILS = US_RATING_UTILS_PATH.read_text(encoding='utf-8')
 US_RATING_DATA = (
@@ -450,6 +451,8 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertEqual(bootstrap.status, 200)
         self.assertEqual(payload['visits'], 1)
         self.assertEqual(payload['unique'], 1)
+        self.assertEqual(payload['current_version'], dashboard.CURRENT_VERSION)
+        self.assertEqual(payload['auto_version_check_enabled'], dashboard.auto_version_check_enabled())
         self.assertIn('us_features_enabled', payload)
         self.assertTrue((bootstrap.header('Set-Cookie') or '').startswith(f'{dashboard.VISITOR_COOKIE_NAME}=nvst_'))
 
@@ -471,6 +474,40 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertEqual(handler.status, 200)
         self.assertEqual(handler.header('Cache-Control'), 'no-store')
         self.assertTrue(payload['update_available'])
+
+    def test_forced_version_status_refresh_bypasses_the_server_cache(self):
+        original_cache = dict(dashboard.VERSION_CHECK_CACHE)
+        original_builder = dashboard.build_version_status
+        cached_payload = {
+            'current_version': 'v1.2.3',
+            'latest_version': 'v1.2.4',
+            'update_available': True,
+            'check_ok': True,
+        }
+        fresh_payload = {
+            'current_version': 'v1.2.3',
+            'latest_version': 'v1.2.5',
+            'update_available': True,
+            'check_ok': True,
+        }
+        builds = []
+        try:
+            dashboard.VERSION_CHECK_CACHE.update({
+                'ts': dashboard.time.time(),
+                'ttl': dashboard.VERSION_CHECK_TTL_SECONDS,
+                'payload': cached_payload,
+            })
+            dashboard.build_version_status = lambda: builds.append(True) or fresh_payload
+            cached = dashboard.get_version_status()
+            refreshed = dashboard.get_version_status(force_refresh=True)
+        finally:
+            dashboard.build_version_status = original_builder
+            dashboard.VERSION_CHECK_CACHE.clear()
+            dashboard.VERSION_CHECK_CACHE.update(original_cache)
+
+        self.assertEqual(cached['latest_version'], 'v1.2.4')
+        self.assertEqual(refreshed['latest_version'], 'v1.2.5')
+        self.assertEqual(builds, [True])
 
     def test_docker_version_check_uses_highest_strict_semver_tag(self):
         class Response:
@@ -508,15 +545,75 @@ class DashboardAuthTests(unittest.TestCase):
         self.assertIn('/v2/namespaces/kunkundi/repositories/niuone/tags', requests[0][0].full_url)
         self.assertEqual(requests[0][1], 6)
 
-    def test_dashboard_starts_version_check_when_component_mounts(self):
+    def test_dashboard_checks_for_updates_on_load_and_version_click(self):
         source = (
             ROOT / 'web' / 'src' / 'components' / 'VersionStatus.vue'
         ).read_text(encoding='utf-8')
         self.assertIn('id="versionStatus"', source)
         self.assertIn("fetch('/api/version'", source)
-        self.assertIn('onMounted(loadVersionStatus)', source)
+        self.assertIn('@click="checkForUpdates(true)"', source)
+        self.assertNotIn('onMounted(loadVersionStatus)', source)
+        self.assertIn('await initializeDashboardTabs()', source)
+        self.assertIn('if (autoVersionCheckEnabled.value) await checkForUpdates(false)', source)
+        self.assertIn('v-if="availableVersion"', source)
+        self.assertNotIn('<span>版本</span>', source)
         self.assertIn("state.value = 'update'", source)
         self.assertIn('requestController?.abort()', source)
+        self.assertNotIn('· 最新', source)
+        tabs_source = (
+            ROOT / 'web' / 'src' / 'composables' / 'useDashboardTabs.js'
+        ).read_text(encoding='utf-8')
+        self.assertIn("const currentVersion = ref('dev')", tabs_source)
+        self.assertIn('if (bootstrapVersion) currentVersion.value = bootstrapVersion', tabs_source)
+        self.assertIn('const autoVersionCheckEnabled = ref(true)', tabs_source)
+        self.assertIn('payload.auto_version_check_enabled !== false', tabs_source)
+        compliance_source = (
+            ROOT / 'web' / 'src' / 'components' / 'ComplianceDialog.vue'
+        ).read_text(encoding='utf-8')
+        self.assertIn("window.dispatchEvent(new CustomEvent('niuone:compliance-closed'))", compliance_source)
+        self.assertIn("window.addEventListener('niuone:compliance-closed'", source)
+        self.assertIn("window.localStorage.setItem(IGNORED_UPDATE_STORAGE_KEY, version)", source)
+        self.assertIn('此版本不再提醒', source)
+
+        scenario = r"""
+const {availableVersionFromPayload, formatVersionLabel, shouldShowVersionReminder} = await import(SOURCE);
+console.log(JSON.stringify({
+  release: formatVersionLabel('v1.2.3'),
+  local: formatVersionLabel('local'),
+  dev: formatVersionLabel('dev'),
+  update: availableVersionFromPayload({
+    check_ok: true,
+    update_available: true,
+    latest_version: 'v1.2.4',
+  }),
+  current: availableVersionFromPayload({
+    check_ok: true,
+    update_available: false,
+    latest_version: 'v1.2.3',
+  }),
+  ignored: shouldShowVersionReminder('v1.2.4', 'v1.2.4'),
+  manual: shouldShowVersionReminder('v1.2.4', 'v1.2.4', true),
+  newer: shouldShowVersionReminder('v1.2.5', 'v1.2.4'),
+}));
+"""
+        output = subprocess.check_output(
+            ['node', '--input-type=module', '-e', scenario.replace(
+                'SOURCE', json.dumps(VERSION_STATUS_UTIL_PATH.as_uri()),
+            )],
+            cwd=ROOT,
+            text=True,
+        )
+        result = json.loads(output)
+        self.assertEqual(result, {
+            'release': 'v1.2.3',
+            'local': '开发版',
+            'dev': '开发版',
+            'update': 'v1.2.4',
+            'current': '',
+            'ignored': False,
+            'manual': True,
+            'newer': True,
+        })
 
     def test_visit_stats_reinitializes_database_replaced_at_same_path(self):
         replacement = dashboard.STATS_DB.with_name('replacement_stats.db')
@@ -4559,7 +4656,7 @@ process.stdout.write(JSON.stringify({{
         item_names = {item['name'] for item in payload['items']}
 
         self.assertEqual(handler.status, 200)
-        self.assertEqual(len(payload['groups']), 13)
+        self.assertEqual(len(payload['groups']), 14)
         self.assertEqual(item_names, set(dashboard.ADMIN_VISIBLE_ENV_NAMES))
         self.assertIn('<div id="app">', index_body)
         self.assertNotIn("name='env__", index_body)
@@ -4576,6 +4673,20 @@ process.stdout.write(JSON.stringify({{
         )
         self.assertIn("fetch('/api/admin/models/test'", ADMIN_FRONTEND)
         self.assertEqual(payload['iwencai_test']['group_slug'], 'iwencai')
+        self.assertEqual(payload['groups'][-1]['slug'], 'about')
+        self.assertEqual(payload['about']['author'], 'kunkundi')
+        self.assertEqual(payload['about']['repository'], 'kunkundi/niuone')
+        self.assertEqual(payload['about']['license'], 'Apache License 2.0')
+        self.assertEqual(payload['about']['current_version'], dashboard.CURRENT_VERSION)
+        self.assertIn('<AdminAbout', ADMIN_FRONTEND)
+        self.assertIn('最新版本', ADMIN_FRONTEND)
+        self.assertIn("'/api/version?refresh=1'", ADMIN_FRONTEND)
+        self.assertIn('@click="loadLatestVersion(true)"', ADMIN_FRONTEND)
+        self.assertIn("checkState === 'loading' ? '查询中…' : '检查更新'", ADMIN_FRONTEND)
+        self.assertIn("if (isTruthy(raw)) return '启用'", ADMIN_FRONTEND)
+        self.assertIn("return '停用'", ADMIN_FRONTEND)
+        self.assertIn('settingStateLabel(item, currentStates[item.name])', ADMIN_FRONTEND)
+        self.assertIn('settingStateLabel(item, item.default)', ADMIN_FRONTEND)
         self.assertIn("fetch('/api/admin/iwencai/test'", ADMIN_FRONTEND)
         self.assertNotIn('/admin/invite', ADMIN_FRONTEND)
 
@@ -4594,14 +4705,72 @@ process.stdout.write(JSON.stringify({{
             self.assertEqual(route.status, 200)
             self.assertIn('<div id="app">', route.wfile.getvalue().decode('utf-8'))
 
-        self.assertEqual(len(groups), 13)
+        self.assertEqual(len(groups), 14)
         self.assertEqual(len(slugs), len(set(slugs)))
         self.assertEqual(slugs[:2], ['access-control', 'notifications'])
+        self.assertEqual(slugs[-1], 'about')
         self.assertEqual(grouped_names, set(dashboard.ADMIN_VISIBLE_ENV_NAMES))
         self.assertIn(':to="`/admin/settings/${group.slug}`"', ADMIN_FRONTEND)
         self.assertIn('保存本组设置', ADMIN_FRONTEND)
         self.assertEqual(len(dashboard.admin_setting_group_env_names('us-market')), 16)
         self.assertEqual(len(dashboard.admin_setting_group_env_names('iwencai')), 8)
+        self.assertEqual(
+            dashboard.admin_setting_group_env_names('about'),
+            {'DASHBOARD_AUTO_VERSION_CHECK_ENABLED'},
+        )
+
+    def test_auto_version_check_setting_defaults_on_and_accepts_runtime_override(self):
+        name = 'DASHBOARD_AUTO_VERSION_CHECK_ENABLED'
+        original = dashboard.os.environ.pop(name, None)
+        try:
+            item = next(item for item in dashboard.ENV_CONFIG_SCHEMA if item['name'] == name)
+            self.assertEqual(item['group'], '关于')
+            self.assertEqual(item['kind'], 'bool')
+            self.assertEqual(item['default'], '1')
+            self.assertEqual(item['effect'], 'runtime')
+            self.assertTrue(dashboard.auto_version_check_enabled({}))
+            self.assertFalse(dashboard.auto_version_check_enabled({name: '0'}))
+            self.assertTrue(dashboard.auto_version_check_enabled({name: '1'}))
+        finally:
+            if original is not None:
+                dashboard.os.environ[name] = original
+
+    def test_about_group_saves_auto_version_check_and_updates_bootstrap(self):
+        name = 'DASHBOARD_AUTO_VERSION_CHECK_ENABLED'
+        original = dashboard.os.environ.pop(name, None)
+        try:
+            body = urllib.parse.urlencode({f'env__{name}': '0'}).encode('utf-8')
+            handler = FakeHandler(
+                path='/api/admin/config/env/about',
+                method='POST',
+                headers={
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Content-Length': str(len(body)),
+                    'Cookie': self.admin_cookie(),
+                    dashboard.ACTION_HEADER_NAME: '1',
+                },
+                body=body,
+            )
+            handler.do_POST()
+            result = json.loads(handler.wfile.getvalue().decode('utf-8'))
+            stored = dashboard.parse_env_file(
+                dashboard.DASHBOARD_ENV_FILE,
+                include_container_overrides=False,
+            )
+            bootstrap = FakeHandler(path='/api/dashboard/bootstrap')
+            bootstrap.do_GET()
+            bootstrap_payload = json.loads(bootstrap.wfile.getvalue().decode('utf-8'))
+        finally:
+            if original is None:
+                dashboard.os.environ.pop(name, None)
+            else:
+                dashboard.os.environ[name] = original
+
+        self.assertEqual(handler.status, 200)
+        self.assertEqual(result['group'], {'slug': 'about', 'name': '关于'})
+        self.assertEqual(result['changed_names'], [name])
+        self.assertEqual(stored[name], '0')
+        self.assertFalse(bootstrap_payload['auto_version_check_enabled'])
 
     def test_candidate_limit_settings_require_positive_integers(self):
         dashboard.validate_business_updates({

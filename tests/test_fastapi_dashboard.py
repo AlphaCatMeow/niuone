@@ -136,6 +136,20 @@ class FastApiDashboardTests(unittest.TestCase):
         self.assertEqual(head.content, b"")
         version.assert_called_once_with()
 
+    def test_version_route_can_force_an_upstream_refresh(self):
+        payload = {
+            "current_version": "1.2.3",
+            "latest_version": "1.2.4",
+            "update_available": True,
+            "check_ok": True,
+        }
+        with patch.object(self.legacy, "get_version_status", return_value=payload) as version:
+            response = self.client.get("/api/version?refresh=1")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), payload)
+        version.assert_called_once_with(True)
+
     def test_dashboard_bootstrap_is_native_and_reuses_the_visitor_cookie(self):
         message_payload = {
             "categories": {
@@ -157,6 +171,11 @@ class FastApiDashboardTests(unittest.TestCase):
         self.assertEqual(first.status_code, 200)
         self.assertEqual(first.json()["visits"], 1)
         self.assertEqual(first.json()["unique"], 1)
+        self.assertEqual(first.json()["current_version"], self.legacy.CURRENT_VERSION)
+        self.assertEqual(
+            first.json()["auto_version_check_enabled"],
+            self.legacy.auto_version_check_enabled(),
+        )
         self.assertEqual(
             first.json()["message_counts"],
             {"market_monitor": 6, "x_monitor": 108, "us_ratings": 4},

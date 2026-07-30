@@ -143,6 +143,12 @@ ENTRYPOINT_DIR = SCRIPT_DIR / "entrypoints"
 COMPAT_DIR = SCRIPT_DIR / "compat"
 VERSION_PATTERN = re.compile(r"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 CURRENT_VERSION = str(os.environ.get("NIUONE_VERSION") or "dev").strip() or "dev"
+PROJECT_AUTHOR = "kunkundi"
+PROJECT_AUTHOR_URL = "https://github.com/kunkundi"
+PROJECT_REPOSITORY = "kunkundi/niuone"
+PROJECT_REPOSITORY_URL = f"https://github.com/{PROJECT_REPOSITORY}"
+PROJECT_LICENSE = "Apache License 2.0"
+PROJECT_LICENSE_URL = f"{PROJECT_REPOSITORY_URL}/blob/main/LICENSE"
 DOCKER_HUB_REPOSITORY = "kunkundi/niuone"
 DOCKER_HUB_REPOSITORY_URL = f"https://hub.docker.com/r/{DOCKER_HUB_REPOSITORY}"
 DOCKER_HUB_TAGS_API = (
@@ -686,6 +692,8 @@ ENV_CONFIG_SCHEMA: list[dict[str, Any]] = [
     {"name": "X_WATCHLIST_SENT_CONTEXT_REPAIR_MAX_ATTEMPTS", "label": "X 已发修复最大尝试", "group": "X 监控", "kind": "int", "default": "8", "effect": "next_run"},
     {"name": "X_WATCHLIST_SENT_CONTEXT_REPAIR_COOLDOWN_MINUTES", "label": "X 已发修复冷却分钟", "group": "X 监控", "kind": "int", "default": "20", "effect": "next_run"},
     {"name": "X_WATCHLIST_SENT_CONTEXT_REPAIR_ITEMS", "label": "X 已发修复条数", "group": "X 监控", "kind": "int", "default": "2", "effect": "next_run"},
+
+    {"name": "DASHBOARD_AUTO_VERSION_CHECK_ENABLED", "label": "开启自动检测新版本", "group": "关于", "kind": "bool", "default": "1", "effect": "runtime"},
 ]
 ENV_CONFIG_BY_NAME = {item["name"]: item for item in ENV_CONFIG_SCHEMA}
 ADMIN_VISIBLE_ENV_NAMES = [
@@ -787,6 +795,7 @@ ADMIN_VISIBLE_ENV_NAMES = [
     "DASHBOARD_INDUSTRY_FLOW_MORNING_END",
     "DASHBOARD_INDUSTRY_FLOW_AFTERNOON_START",
     "DASHBOARD_INDUSTRY_FLOW_AFTERNOON_END",
+    "DASHBOARD_AUTO_VERSION_CHECK_ENABLED",
 ]
 TRADER_RUNTIME_ENV_NAMES = {
     STOCK_UNIVERSE_ENV,
@@ -842,6 +851,7 @@ ENV_GROUP_ORDER = [
     "上游模型覆盖",
     "X 监控",
     "其他",
+    "关于",
 ]
 
 
@@ -4051,6 +4061,16 @@ def us_features_enabled(env_values: dict[str, str] | None = None) -> bool:
     return str(raw).strip().lower() in TRUTHY_VALUES
 
 
+def auto_version_check_enabled(env_values: dict[str, str] | None = None) -> bool:
+    values = env_values if env_values is not None else parse_env_file()
+    raw = (
+        os.environ.get("DASHBOARD_AUTO_VERSION_CHECK_ENABLED")
+        if "DASHBOARD_AUTO_VERSION_CHECK_ENABLED" in os.environ
+        else values.get("DASHBOARD_AUTO_VERSION_CHECK_ENABLED", "1")
+    )
+    return str(raw).strip().lower() in TRUTHY_VALUES
+
+
 def admin_visible_env_names(env_values: dict[str, str] | None = None) -> list[str]:
     return list(ADMIN_VISIBLE_ENV_NAMES)
 
@@ -4347,6 +4367,7 @@ ADMIN_GROUP_NOTES = {
     "选股与交易策略": "选择一套独立策略；基础策略、Z哥、李大霄、板块潮汐、牛牛战法和预设文字策略的候选、买入、卖出、仓位与 Prompt 规则互不混用。",
     "盘面监控生产时间点": "直接填写北京时间 HH:MM；隔夜美股总结默认交易日 08:00 生成，A 股盘面监控在交易时段触发；长度默认：上下文 128000 tokens，最大输出 4096 tokens。",
     "行情与资金流设置": "统一管理公开快照、指数刷新和行业资金流动画。播放速度、每侧行业数量、采样间隔及上午/下午采样窗口均支持运行时保存后生效；时间使用北京时间 HH:MM，默认 09:25～11:31、13:00～15:01。",
+    "关于": "查看项目作者、源代码仓库、开源许可和版本信息，并控制首页是否在打开或重新加载时自动检测新版本。",
 }
 ADMIN_SETTING_GROUPS: tuple[dict[str, str], ...] = (
     {
@@ -4426,6 +4447,12 @@ ADMIN_SETTING_GROUPS: tuple[dict[str, str], ...] = (
         "name": "行情与资金流设置",
         "summary": "调整指数刷新、资金流展示数量、播放速度、采样频率和时间窗口。",
         "icon": "行情",
+    },
+    {
+        "slug": "about",
+        "name": "关于",
+        "summary": "查看作者、代码仓库、开源许可和版本信息。",
+        "icon": "关于",
     },
 )
 ADMIN_SETTING_GROUP_BY_SLUG = {
@@ -5385,6 +5412,15 @@ def build_admin_config_payload() -> dict[str, Any]:
             "strategy_preset_name": PRESET_STRATEGY_TEXT_ENV,
             "strategy_preset_value": "preset_text",
         },
+        "about": {
+            "author": PROJECT_AUTHOR,
+            "author_url": PROJECT_AUTHOR_URL,
+            "repository": PROJECT_REPOSITORY,
+            "repository_url": PROJECT_REPOSITORY_URL,
+            "license": PROJECT_LICENSE,
+            "license_url": PROJECT_LICENSE_URL,
+            "current_version": CURRENT_VERSION,
+        },
         "secret_placeholder": SECRET_PLACEHOLDER,
     }
 
@@ -5543,13 +5579,13 @@ def build_version_status() -> dict[str, Any]:
     return result
 
 
-def get_version_status() -> dict[str, Any]:
+def get_version_status(force_refresh: bool = False) -> dict[str, Any]:
     now = time.time()
     with VERSION_CHECK_LOCK:
         cached = VERSION_CHECK_CACHE.get("payload")
         cached_at = float(VERSION_CHECK_CACHE.get("ts") or 0)
         cached_ttl = int(VERSION_CHECK_CACHE.get("ttl") or 0)
-        if isinstance(cached, dict) and now - cached_at < cached_ttl:
+        if not force_refresh and isinstance(cached, dict) and now - cached_at < cached_ttl:
             return dict(cached)
         payload = build_version_status()
         ttl = VERSION_CHECK_TTL_SECONDS if payload["check_ok"] else VERSION_CHECK_FAILURE_TTL_SECONDS

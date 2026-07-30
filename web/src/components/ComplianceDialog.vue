@@ -7,6 +7,7 @@ function closeDialog() {
   if (!visible.value) return
   visible.value = false
   document.body.classList.remove('compliance-dialog-open')
+  window.dispatchEvent(new CustomEvent('niuone:compliance-closed'))
 }
 
 function handleKeydown(event) {

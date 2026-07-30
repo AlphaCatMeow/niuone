@@ -78,7 +78,11 @@ def create_system_router(
                 media_type="application/json",
                 headers={"Cache-Control": "no-store"},
             )
-        payload = await run_in_threadpool(services.get_version_status)
+        force_refresh = request.query_params.get("refresh") == "1"
+        if force_refresh:
+            payload = await run_in_threadpool(services.get_version_status, True)
+        else:
+            payload = await run_in_threadpool(services.get_version_status)
         return json_response(request, payload, cache_control="no-store")
 
     @router.api_route("/api/dashboard/bootstrap", methods=["GET", "HEAD"])
@@ -114,6 +118,8 @@ def create_system_router(
         payload = {
             "visits": visit_stats["visits"],
             "unique": visit_stats["unique"],
+            "current_version": services.CURRENT_VERSION,
+            "auto_version_check_enabled": services.auto_version_check_enabled(),
             "us_features_enabled": services.us_features_enabled(),
             "message_counts": message_counts,
             "message_counts_available": message_counts_available,
