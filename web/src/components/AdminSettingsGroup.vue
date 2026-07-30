@@ -4,6 +4,7 @@ import { onBeforeRouteLeave, onBeforeRouteUpdate } from 'vue-router'
 import AdminConnectionTests from './AdminConnectionTests.vue'
 import AdminEnvInput from './AdminEnvInput.vue'
 import AdminNotificationSettings from './AdminNotificationSettings.vue'
+import { allowInfoPopoverClick } from '../utils/infoPopover.js'
 
 const props = defineProps({
   config: {
@@ -121,7 +122,11 @@ function rowHidden(item) {
   return false
 }
 
-function toggleSettingHelp(name) {
+function toggleSettingHelp(name, event) {
+  if (!allowInfoPopoverClick(event)) {
+    openHelpName.value = ''
+    return
+  }
   openHelpName.value = openHelpName.value === name ? '' : name
 }
 
@@ -457,7 +462,7 @@ onBeforeUnmount(() => {
                     :aria-label="`查看${item.label || item.name}影响范围`"
                     :aria-controls="`adminSettingHelp-${item.name}`"
                     :aria-expanded="openHelpName === item.name"
-                    @click.stop="toggleSettingHelp(item.name)"
+                    @click.stop="toggleSettingHelp(item.name, $event)"
                   >
                     <svg viewBox="0 0 20 20" aria-hidden="true">
                       <circle cx="10" cy="10" r="8"></circle>

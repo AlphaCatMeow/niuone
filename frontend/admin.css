@@ -56,6 +56,9 @@ h1{font-size:26px}
 .admin-setting-info-trigger svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round}
 .admin-setting-info-popover{position:absolute;z-index:30;top:calc(100% + 7px);left:0;width:min(440px,calc(100vw - 44px));display:grid;gap:7px;padding:12px 13px;visibility:hidden;opacity:0;pointer-events:none;transform:translateY(-3px);border:1px solid rgba(148,163,184,.24);border-radius:10px;color:#94a3b8;background:rgba(2,6,23,.98);box-shadow:0 14px 36px rgba(0,0,0,.34);font-size:11px;line-height:1.5;transition:opacity .12s ease,transform .12s ease,visibility .12s ease}
 .admin-setting-info-popover.open{visibility:visible;opacity:1;pointer-events:auto;transform:translateY(0)}
+@media (hover:hover) and (pointer:fine) {
+  .admin-setting-info:hover .admin-setting-info-popover{visibility:visible;opacity:1;pointer-events:auto;transform:translateY(0)}
+}
 .admin-setting-info-popover strong{color:#e2e8f0;font-size:12px}
 .admin-setting-info-popover p,.admin-setting-info-popover footer{margin:0;color:#94a3b8}
 .admin-setting-info-row{display:grid;grid-template-columns:64px minmax(0,1fr);gap:8px;padding-top:7px;border-top:1px solid rgba(148,163,184,.15)}

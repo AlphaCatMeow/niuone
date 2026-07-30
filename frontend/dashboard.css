@@ -170,6 +170,9 @@
     .market-breadth-info-popover { position:absolute; top:calc(100% + 7px); left:0; width:min(560px, calc(100vw - 40px)); display:grid; gap:5px; padding:10px 12px; visibility:hidden; opacity:0; pointer-events:none; transform:translateY(-3px); border:1px solid rgba(148,163,184,.24); border-radius:10px; color:#94a3b8; background:rgba(2,6,23,.97); box-shadow:0 14px 36px rgba(0,0,0,.34); font-size:10px; line-height:1.5; transition:opacity .12s ease, transform .12s ease, visibility .12s ease; }
     .market-breadth-info-popover strong { color:#e2e8f0; font-size:11px; }
     .market-breadth-info-popover.open { visibility:visible; opacity:1; pointer-events:auto; transform:translateY(0); }
+    @media (hover:hover) and (pointer:fine) {
+      .market-breadth-info:hover .market-breadth-info-popover { visibility:visible; opacity:1; pointer-events:auto; transform:translateY(0); }
+    }
     .market-breadth-head-meta { grid-area:meta; display:flex; align-items:center; justify-content:flex-end; gap:8px; flex:0 0 auto; }
     .market-breadth-time { flex:0 0 auto; color:#94a3b8; font-size:11px; font-weight:750; font-variant-numeric:tabular-nums; }
     .market-breadth-notice { margin-top:9px; padding:7px 9px; border:1px solid rgba(245,158,11,.22); border-radius:9px; color:#fbbf24; background:rgba(120,53,15,.18); font-size:11px; }

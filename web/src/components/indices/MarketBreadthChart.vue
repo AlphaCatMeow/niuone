@@ -1,5 +1,6 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { allowInfoPopoverClick } from '../../utils/infoPopover.js'
 import { previousDayMarketLabel } from '../../utils/marketDisplay.js'
 
 const props = defineProps({
@@ -355,7 +356,11 @@ function syncChartSize() {
   if (availableHeight > 0) chartAvailableHeight.value = availableHeight
 }
 
-function toggleMarketInfo() {
+function toggleMarketInfo(event) {
+  if (!allowInfoPopoverClick(event)) {
+    marketInfoOpen.value = false
+    return
+  }
   marketInfoOpen.value = !marketInfoOpen.value
 }
 

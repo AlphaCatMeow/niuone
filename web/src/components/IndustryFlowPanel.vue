@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useIndicesData } from '../composables/useIndicesData.js'
 import { useIndustryFlowData } from '../composables/useIndustryFlowData.js'
+import { allowInfoPopoverClick } from '../utils/infoPopover.js'
 import { previousDayMarketLabel } from '../utils/marketDisplay.js'
 import { responsiveStageHeight } from '../utils/responsiveStage.js'
 import {
@@ -34,6 +35,10 @@ const {
   seek,
   endSeek,
 } = useIndustryFlowAnimation(payload)
+
+function handleInfoClick(event) {
+  allowInfoPopoverClick(event)
+}
 
 const samplingWindows = computed(() => (
   Array.isArray(payload.value.sampling?.windows) && payload.value.sampling.windows.length >= 2
@@ -210,6 +215,7 @@ onBeforeUnmount(() => {
                 class="industry-flow-info-trigger dashboard-info-trigger"
                 type="button"
                 aria-label="查看行业资金流数据说明"
+                @click="handleInfoClick"
               >
                 <svg viewBox="0 0 20 20" aria-hidden="true">
                   <circle cx="10" cy="10" r="8"></circle>

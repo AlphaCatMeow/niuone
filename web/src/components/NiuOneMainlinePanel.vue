@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useNiuOneMainlineData } from '../composables/useNiuOneMainlineData.js'
 import { authenticateAdmin } from '../utils/adminSession.js'
+import { allowInfoPopoverClick } from '../utils/infoPopover.js'
 
 const {
   state,
@@ -106,7 +107,11 @@ function toggleThemeStocks(theme) {
   expandedTheme.value = expandedTheme.value === key ? '' : key
 }
 
-function toggleCoveragePopover() {
+function toggleCoveragePopover(event) {
+  if (!allowInfoPopoverClick(event)) {
+    coveragePopoverOpen.value = false
+    return
+  }
   coveragePopoverOpen.value = !coveragePopoverOpen.value
 }
 
@@ -475,6 +480,9 @@ onBeforeUnmount(() => {
 .coverage-info svg { width:19px; height:19px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; }
 .coverage-popover { position:absolute; z-index:20; top:35px; right:10px; left:10px; display:none; padding:12px; border:1px solid var(--accent-border); border-radius:12px; background:var(--panel); color:var(--text); box-shadow:0 16px 34px rgba(15,23,42,.2); }
 .coverage-popover.open { display:block; }
+@media (hover:hover) and (pointer:fine) {
+  .coverage-info:hover .coverage-popover { display:block; }
+}
 .coverage-popover-title { display:block; margin-bottom:8px; color:var(--text); font-size:12px; }
 .coverage-popover-row { display:grid; grid-template-columns:1fr auto; gap:2px 10px; padding:7px 0; border-top:1px solid var(--line); }
 .coverage-popover-row > span { color:var(--text); font-size:11px; }

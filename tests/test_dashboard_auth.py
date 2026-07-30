@@ -2712,6 +2712,26 @@ console.log(JSON.stringify([
         self.assertIn('html[data-theme="dark"] .theme-toggle:focus-visible {', DASHBOARD_FRONTEND)
         self.assertIn('border-color:var(--line);\n        background:var(--panel);\n        outline:none;', DASHBOARD_FRONTEND)
 
+    def test_info_buttons_open_on_hover_for_pointer_devices(self):
+        self.assertIn('@media (hover:hover) and (pointer:fine)', DASHBOARD_FRONTEND)
+        self.assertIn(
+            '.market-breadth-info:hover .market-breadth-info-popover',
+            DASHBOARD_FRONTEND,
+        )
+        self.assertIn('.coverage-info:hover .coverage-popover', DASHBOARD_FRONTEND)
+        self.assertIn(
+            '.industry-flow-info:hover .industry-flow-info-popover',
+            DASHBOARD_FRONTEND,
+        )
+        self.assertIn('@media (hover:hover) and (pointer:fine)', ADMIN_FRONTEND)
+        self.assertIn(
+            '.admin-setting-info:hover .admin-setting-info-popover',
+            ADMIN_FRONTEND,
+        )
+        self.assertIn('allowInfoPopoverClick', DASHBOARD_FRONTEND)
+        self.assertIn('allowInfoPopoverClick', ADMIN_FRONTEND)
+        self.assertIn('event?.detail === 0', DASHBOARD_FRONTEND)
+
     def test_compliance_dialog_stays_compact_and_visible_in_dark_mode(self):
         self.assertIn('.compliance-dialog { width:min(560px, 100%);', DASHBOARD_FRONTEND)
         self.assertIn('.compliance-dialog { width:min(520px, 100%);', DASHBOARD_FRONTEND)
@@ -2890,6 +2910,7 @@ console.log(JSON.stringify([
         self.assertNotIn('coverage-popover-close', mainline_page)
         self.assertIn("document.addEventListener('pointerdown', handleCoveragePointerDown)", mainline_page)
         self.assertIn("document.addEventListener('keydown', handleCoverageKeydown)", mainline_page)
+        self.assertIn('@media (hover:hover) and (pointer:fine)', mainline_page)
         self.assertNotIn('.coverage-info:focus-within', mainline_page)
         self.assertIn('class="dashboard-info-trigger"', mainline_page)
         self.assertNotIn('class="coverage-breakdown"', mainline_page)
