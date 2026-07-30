@@ -39,15 +39,25 @@ Each feature below has its own dark-theme, 1200-pixel-wide animation, using eith
 
 <p align="center"><sub>Keep the portfolio overview, positions, and logs in view while switching daily and cumulative returns and opening the trading calendar.</sub></p>
 
+### Theme Strength Radar
+
+<p align="center">
+  <a href="https://niuone.cn/niuone-mainline">
+    <img width="1200" alt="Theme-strength interaction: compare cross-session and intraday themes, expand representative stocks, and filter confirmed themes" src="docs/assets/readme/theme-strength.gif" />
+  </a>
+</p>
+
+<p align="center"><sub>Compare confirmed cross-session and intraday themes, market state, and coverage, then expand representative stocks and filter confirmed themes.</sub></p>
+
 ### Capital Inflows and Outflows
 
 <p align="center">
   <a href="https://niuone.cn/indices">
-    <img width="1200" alt="Capital-flow interaction: switch to A-shares, inspect sectors and active stocks, and replay industry inflows and outflows" src="docs/assets/readme/capital-flow.gif" />
+    <img width="1200" alt="Capital-flow interaction: switch to A-shares, scroll through leading net inflows and outflows, and replay industry flows" src="docs/assets/readme/capital-flow.gif" />
   </a>
 </p>
 
-<p align="center"><sub>Open A-share data to inspect sector moves and active stocks, then switch to industry flows to compare net inflows and outflows and replay the timeline.</sub></p>
+<p align="center"><sub>Open A-share data, inspect sectors and active stocks, scroll through the leading net inflow and outflow lists, then replay the industry-flow timeline.</sub></p>
 
 ### Market Breadth and Red/Green Counts
 
@@ -101,7 +111,7 @@ Each feature below has its own dark-theme, 1200-pixel-wide animation, using eith
 
 ## Feature Overview
 
-- **Unified dashboard**: View indices, sectors, market sentiment, capital flows, and historical news in one place.
+- **Unified dashboard**: View theme strength, indices, sectors, market sentiment, capital flows, and historical news in one place.
 - **Information aggregation**: Organize A-share market data, U.S. market summaries, institutional ratings, and content from a Twitter/X watchlist.
 - **Intelligent summaries**: Connect compatible large-model services to summarize and structure information from multiple sources.
 - **Custom trading strategies**: Choose a built-in strategy or describe your own candidate-selection, buy, sell, position-sizing, and timing rules in natural language.
