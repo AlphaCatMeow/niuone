@@ -57,6 +57,7 @@ const savePhase = ref('idle')
 const saveStatus = ref('')
 const savePressed = ref(false)
 const editRevision = ref(0)
+const openHelpName = ref('')
 const modelStatus = reactive({})
 const iwencaiStatus = reactive({ state: '', message: '' })
 const notificationStatus = reactive({})
@@ -118,6 +119,32 @@ function rowHidden(item) {
   if (gatedNames.value.has(item.name) && !runtimeUsEnabled.value) return true
   if (item.name === strategyPreset.value && runtimeStrategySource.value !== 'preset_text') return true
   return false
+}
+
+function toggleSettingHelp(name) {
+  openHelpName.value = openHelpName.value === name ? '' : name
+}
+
+async function closeSettingHelp({ restoreFocus = false } = {}) {
+  const name = openHelpName.value
+  if (!name) return
+  openHelpName.value = ''
+  if (!restoreFocus) return
+  await nextTick()
+  form.value?.querySelector(`[data-setting-help-trigger="${name}"]`)
+    ?.focus({ preventScroll: true })
+}
+
+function handleSettingHelpPointerDown(event) {
+  if (!openHelpName.value) return
+  const root = event.target?.closest?.(`[data-setting-help="${openHelpName.value}"]`)
+  if (!root) closeSettingHelp()
+}
+
+function handleSettingHelpKeydown(event) {
+  if (event.key !== 'Escape' || !openHelpName.value) return
+  event.preventDefault()
+  closeSettingHelp({ restoreFocus: true })
 }
 
 function pulseSaveButton() {
@@ -350,10 +377,14 @@ onMounted(async () => {
   savedState.value = '1'
   window.addEventListener('beforeunload', handleBeforeUnload)
   window.addEventListener('keydown', handleShortcut)
+  document.addEventListener('pointerdown', handleSettingHelpPointerDown)
+  document.addEventListener('keydown', handleSettingHelpKeydown)
 })
 onBeforeUnmount(() => {
   window.removeEventListener('beforeunload', handleBeforeUnload)
   window.removeEventListener('keydown', handleShortcut)
+  document.removeEventListener('pointerdown', handleSettingHelpPointerDown)
+  document.removeEventListener('keydown', handleSettingHelpKeydown)
   window.clearTimeout(saveResultTimer)
   window.clearTimeout(pressedTimer)
 })
@@ -409,8 +440,52 @@ onBeforeUnmount(() => {
             :data-strategy-source-gated="item.name === strategyPreset ? 'preset_text' : null"
             :hidden="rowHidden(item)"
             :aria-hidden="String(rowHidden(item))"
+            :class="{'setting-help-open': openHelpName === item.name}"
           >
-            <div class="setting-copy"><div class="config-label">{{ item.label || item.name }}</div></div>
+            <div class="setting-copy">
+              <div class="config-label-row">
+                <div class="config-label">{{ item.label || item.name }}</div>
+                <div
+                  v-if="item.help_summary || item.help_items?.length"
+                  class="admin-setting-info"
+                  :data-setting-help="item.name"
+                >
+                  <button
+                    class="admin-setting-info-trigger"
+                    type="button"
+                    :data-setting-help-trigger="item.name"
+                    :aria-label="`查看${item.label || item.name}影响范围`"
+                    :aria-controls="`adminSettingHelp-${item.name}`"
+                    :aria-expanded="openHelpName === item.name"
+                    @click.stop="toggleSettingHelp(item.name)"
+                  >
+                    <svg viewBox="0 0 20 20" aria-hidden="true">
+                      <circle cx="10" cy="10" r="8"></circle>
+                      <path d="M10 9v5M10 6.2v.1"></path>
+                    </svg>
+                  </button>
+                  <div
+                    :id="`adminSettingHelp-${item.name}`"
+                    class="admin-setting-info-popover"
+                    :class="{open: openHelpName === item.name}"
+                    role="dialog"
+                    :aria-label="`${item.label || item.name}影响范围`"
+                  >
+                    <strong>{{ item.help_title || '参数说明' }}</strong>
+                    <p v-if="item.help_summary">{{ item.help_summary }}</p>
+                    <div
+                      v-for="helpItem in (item.help_items || [])"
+                      :key="helpItem.label"
+                      class="admin-setting-info-row"
+                    >
+                      <b>{{ helpItem.label }}</b>
+                      <span>{{ helpItem.description }}</span>
+                    </div>
+                    <footer v-if="item.help_footer">{{ item.help_footer }}</footer>
+                  </div>
+                </div>
+              </div>
+            </div>
             <div class="setting-editor">
               <AdminEnvInput :item="item" @field-change="handleFormMutation" />
             </div>

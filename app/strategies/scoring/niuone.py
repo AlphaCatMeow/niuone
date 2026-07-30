@@ -4,6 +4,7 @@ from __future__ import annotations
 import math
 import re
 import statistics
+from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from typing import Any, Mapping
 
@@ -50,10 +51,14 @@ def _stock_code(value: Any) -> str:
 
 def _percentile(value: float, population: list[float]) -> float:
     clean = sorted(float(item) for item in population if math.isfinite(float(item)))
+    return _percentile_from_sorted(value, clean)
+
+
+def _percentile_from_sorted(value: float, clean: list[float]) -> float:
     if not clean or len(clean) == 1:
         return 50.0
-    below = sum(1 for item in clean if item < value)
-    equal = sum(1 for item in clean if item == value)
+    below = bisect_left(clean, value)
+    equal = bisect_right(clean, value) - below
     return _clamp((below + max(0, equal - 1) / 2) / (len(clean) - 1) * 100)
 
 
@@ -433,6 +438,7 @@ def build_niuone_context(
     news_snapshot: dict[str, Any] | None = None,
     as_of_date: str = "",
     previous_trading_day: str = "",
+    reuse_previous_external_context: bool = False,
 ) -> dict[str, Any]:
     """Build a market-mainline context without forcing a winner.
 
@@ -471,11 +477,15 @@ def build_niuone_context(
     ret20_population = [float(member["ret20"]) for member in members]
     volume_population = [float(member["volume_ratio"]) for member in members]
     amount_population = [float(member["amount"]) for member in members]
+    sorted_ret5 = sorted(ret5_population)
+    sorted_ret20 = sorted(ret20_population)
+    sorted_volume = sorted(volume_population)
+    sorted_amount = sorted(amount_population)
     for member in members:
-        member["ret5_percentile"] = _percentile(float(member["ret5"]), ret5_population)
-        member["ret20_percentile"] = _percentile(float(member["ret20"]), ret20_population)
-        member["volume_percentile"] = _percentile(float(member["volume_ratio"]), volume_population)
-        member["amount_percentile"] = _percentile(float(member["amount"]), amount_population)
+        member["ret5_percentile"] = _percentile_from_sorted(float(member["ret5"]), sorted_ret5)
+        member["ret20_percentile"] = _percentile_from_sorted(float(member["ret20"]), sorted_ret20)
+        member["volume_percentile"] = _percentile_from_sorted(float(member["volume_ratio"]), sorted_volume)
+        member["amount_percentile"] = _percentile_from_sorted(float(member["amount"]), sorted_amount)
         member["strong_score"] = _clamp(
             member["ret20_percentile"] * 0.30
             + member["ret5_percentile"] * 0.25
@@ -494,6 +504,11 @@ def build_niuone_context(
         news_snapshot,
         members,
     )
+    if reuse_previous_external_context:
+        if isinstance(previous_context.get("dragon_tiger"), Mapping):
+            dragon = dict(previous_context["dragon_tiger"])
+        if isinstance(previous_context.get("news"), Mapping):
+            news = dict(previous_context["news"])
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for member in members:
         if member["industry"]:
@@ -551,6 +566,10 @@ def build_niuone_context(
         ]
         confirmation_signal = _clamp(50 + _mean(dragon_values) * 30 + _mean(news_values) * 20)
         confirmation_component = confirmation_signal * 0.10
+        if reuse_previous_external_context:
+            previous_confirmation = safe_float(previous.get("confirmation_component"))
+            if previous_confirmation is not None:
+                confirmation_component = _clamp(previous_confirmation, 0.0, 10.0)
         concentration_penalty = _clamp((concentration - 0.45) / 0.45 * 10, 0.0, 10.0)
         sample_penalty = 5.0 if len(theme_members) < NIUONE_MIN_THEME_MEMBERS else 0.0
         score = _clamp(

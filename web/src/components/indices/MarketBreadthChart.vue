@@ -68,9 +68,9 @@ function formatCompactSeriesValue(series, value) {
 }
 
 function tradeProgress(value) {
-  const match = String(value || '').match(/(\d{2}):(\d{2})/)
+  const match = String(value || '').match(/(\d{2}):(\d{2})(?::(\d{2}))?/)
   if (!match) return null
-  const minute = Number(match[1]) * 60 + Number(match[2])
+  const minute = Number(match[1]) * 60 + Number(match[2]) + Number(match[3] || 0) / 60
   const morningStart = 9 * 60 + 30
   const morningEnd = 11 * 60 + 30
   const afternoonStart = 13 * 60
@@ -480,7 +480,7 @@ const turnoverEstimateText = computed(() => {
               aria-label="市场情绪数据说明"
             >
               <strong>数据说明</strong>
-              <span>{{ payload.universe || '沪深A股' }} · 每分钟真实采样</span>
+              <span>{{ payload.universe || '沪深A股' }} · 每 {{ payload.sampling?.interval_seconds || 30 }} 秒真实采样</span>
               <span v-if="latestGeneratedAt">最新采样：{{ latestGeneratedAt }}</span>
               <span>情绪数据源：{{ payload.source || '腾讯证券沪深A股实时行情' }}</span>
               <span v-if="showVolume && turnoverSourceText">{{ turnoverSourceText }}</span>

@@ -50,8 +50,8 @@ TURNOVER_ESTIMATE_OUTPUT_KEYS = (
     "turnover_profile_interval_minutes",
     "turnover_estimate_warning",
 )
-DEFAULT_HISTORY_LIMIT = 300
-DEFAULT_SAMPLE_INTERVAL_SECONDS = 60
+DEFAULT_HISTORY_LIMIT = 600
+DEFAULT_SAMPLE_INTERVAL_SECONDS = 30
 HISTORY_SCHEMA_VERSION = 4
 PREVIOUS_TURNOVER_MATCH_TOLERANCE_SECONDS = 90
 SAMPLING_WINDOWS = ((9 * 60 + 30, 11 * 60 + 30), (13 * 60, 15 * 60))
@@ -347,7 +347,7 @@ def roll_market_breadth_history(
     result: dict[str, Any] = {
         "schema_version": HISTORY_SCHEMA_VERSION,
         "date": current_day,
-        "interval_seconds": max(60, min(600, int(interval_seconds))),
+        "interval_seconds": max(30, min(600, int(interval_seconds))),
         "samples": current_samples,
     }
     if previous is not None:
@@ -579,7 +579,7 @@ def build_market_breadth_payload(
         "latest": public_current or {},
         "timeline": timeline,
         "sampling": {
-            "interval_seconds": max(60, min(600, int(interval_seconds))),
+            "interval_seconds": max(30, min(600, int(interval_seconds))),
             "timezone": "Asia/Shanghai",
             "windows": [
                 {"start": "09:30", "end": "11:30"},

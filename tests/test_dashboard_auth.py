@@ -4961,6 +4961,33 @@ process.stdout.write(JSON.stringify({{
         self.assertEqual(dashboard.B1_SCAN_TIMEOUT_SECONDS, 480)
         self.assertEqual(item['default'], '480')
 
+    def test_full_market_quote_interval_defaults_to_thirty_seconds(self):
+        item = next(
+            item
+            for item in dashboard.ENV_CONFIG_SCHEMA
+            if item['name'] == 'DASHBOARD_MARKET_BREADTH_SAMPLE_INTERVAL_SECONDS'
+        )
+
+        self.assertEqual(dashboard.MARKET_BREADTH_SAMPLE_INTERVAL_SECONDS, 30)
+        self.assertEqual(dashboard.API_TTLS['market_breadth'], 30)
+        self.assertEqual(item['default'], '30')
+        self.assertEqual(item['min'], '30')
+        self.assertEqual(item['max'], '600')
+        self.assertEqual(item['help_title'], '影响范围')
+        self.assertEqual(
+            [entry['label'] for entry in item['help_items']],
+            ['题材强度', '市场情绪', '请求负载'],
+        )
+        self.assertIn('最新逐股价格', item['help_items'][0]['description'])
+        self.assertIn('admin-setting-info-trigger', ADMIN_FRONTEND)
+        self.assertIn('admin-setting-info-popover', ADMIN_FRONTEND)
+        self.assertIn('查看${item.label || item.name}影响范围', ADMIN_FRONTEND)
+        dashboard.validate_business_updates({item['name']: '30'})
+        dashboard.validate_business_updates({item['name']: '600'})
+        for invalid in ('29', '601'):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                dashboard.validate_business_updates({item['name']: invalid})
+
     def test_business_settings_are_local_to_dashboard_env(self):
         original_env_file = dashboard.DASHBOARD_ENV_FILE
         original_schedule_times = dashboard.PRACTICE_SCHEDULE_TIMES

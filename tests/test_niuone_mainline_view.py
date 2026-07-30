@@ -16,6 +16,9 @@ from app.screening.niuone_mainline_cache import (
 def sample_scan() -> dict[str, object]:
     return {
         "generated_at": "2026-07-28 14:12:14",
+        "quote_generated_at": "2026-07-28 14:12:08",
+        "refresh_mode": "minute_quotes",
+        "calculation_duration_ms": 3210,
         "configured_stock_universe_label": "主板",
         "reference_stock_universe_label": "创业板、科创板、主板（全量非 ST）",
         "reference_pool_count": 4995,
@@ -130,6 +133,9 @@ class NiuOneMainlineViewTests(unittest.TestCase):
         payload = build_niuone_mainline_cache_payload(sample_scan())
 
         self.assertEqual(payload["generated_at"], "2026-07-28 14:12:14")
+        self.assertEqual(payload["quote_generated_at"], "2026-07-28 14:12:08")
+        self.assertEqual(payload["refresh_mode"], "minute_quotes")
+        self.assertEqual(payload["calculation_duration_ms"], 3210)
         self.assertEqual(payload["reference_pool_count"], 4995)
         self.assertNotIn("configured_stock_universe_label", payload)
         self.assertNotIn("items", payload)
@@ -150,6 +156,8 @@ class NiuOneMainlineViewTests(unittest.TestCase):
         view = build_niuone_mainline_view(sample_scan())
 
         self.assertTrue(view["available"])
+        self.assertEqual(view["quote_generated_at"], "2026-07-28 14:12:08")
+        self.assertEqual(view["refresh_mode"], "minute_quotes")
         self.assertEqual(view["mainline"]["intraday_primary"], "银行")
         self.assertEqual([theme["industry"] for theme in view["themes"]], ["银行", "工业金属"])
         industrial_metals = next(theme for theme in view["themes"] if theme["industry"] == "工业金属")

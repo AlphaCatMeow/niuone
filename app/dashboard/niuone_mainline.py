@@ -5,7 +5,7 @@ import math
 from typing import Any, Mapping
 
 
-NIUONE_MAINLINE_VIEW_SCHEMA_VERSION = 4
+NIUONE_MAINLINE_VIEW_SCHEMA_VERSION = 5
 NIUONE_MAINLINE_THEME_LIMIT = 5
 
 
@@ -158,6 +158,9 @@ def build_niuone_mainline_view(payload: Mapping[str, Any] | None) -> dict[str, A
         "schema_version": NIUONE_MAINLINE_VIEW_SCHEMA_VERSION,
         "available": bool(context),
         "generated_at": _text(payload.get("generated_at"), 19),
+        "quote_generated_at": _text(payload.get("quote_generated_at"), 19),
+        "refresh_mode": _text(payload.get("refresh_mode"), 32),
+        "calculation_duration_ms": _integer(payload.get("calculation_duration_ms")),
         "as_of_date": _text(context.get("as_of_date"), 10),
         "reference_stock_universe_label": _text(payload.get("reference_stock_universe_label"), 120),
         "market": {

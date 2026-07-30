@@ -90,6 +90,8 @@ from market_data.tencent_market_breadth import fetch_tencent_market_breadth
 from market_data.tencent_kline_cache import kline_cache_path, prewarm_completed_for_date
 from niuone_paths import apply_container_runtime_overrides, get_dashboard_env_file, get_dashboard_home, get_local_data_dir
 import push_history
+from screening.niuone_mainline_cache import write_niuone_mainline_cache
+from screening.niuone_minute import NiuOneMinuteEngine
 from screening.stock_universe import (
     DEFAULT_STOCK_UNIVERSE,
     STOCK_UNIVERSE_ENV,
@@ -165,6 +167,8 @@ IWENCAI_DRAGON_TIGER_SNAPSHOT_FILE = Path(
 ).expanduser()
 B1_CACHE_FILE = CRON_OUTPUT_DIR / "b1_screen_latest.json"
 NIUONE_MAINLINE_CACHE_FILE = CRON_OUTPUT_DIR / "niuone_mainline_latest.json"
+NIUONE_MAINLINE_MINUTE_CACHE_FILE = CRON_OUTPUT_DIR / "niuone_mainline_minute_latest.json"
+STOCK_INDUSTRY_CACHE_FILE = CRON_OUTPUT_DIR / "stock_industry_cache.json"
 MONEY_FLOW_SNAPSHOT_FILE = CRON_OUTPUT_DIR / "industry_main_money_flow_cache.json"
 # Main-net samples use a new history file so legacy total-flow observations
 # remain recoverable but can never be replayed under the new metric label.
@@ -290,6 +294,14 @@ KLINE_PREWARM_LOCK = threading.Lock()
 KLINE_PREWARM_RUN_THREAD: threading.Thread | None = None
 KLINE_PREWARM_SCHEDULER_THREAD: threading.Thread | None = None
 KLINE_PREWARM_LAST_ATTEMPT_TS = 0.0
+NIUONE_MAINLINE_MINUTE_REFRESH_ENABLED = str(
+    os.environ.get("DASHBOARD_NIUONE_MAINLINE_MINUTE_REFRESH_ENABLED", "1") or "1"
+).strip().lower() not in {"0", "false", "no", "off"}
+NIUONE_MAINLINE_MINUTE_STATE_LOCK = threading.Lock()
+NIUONE_MAINLINE_MINUTE_PENDING: dict[str, Any] | None = None
+NIUONE_MAINLINE_MINUTE_THREAD: threading.Thread | None = None
+NIUONE_MAINLINE_MINUTE_ENGINE: NiuOneMinuteEngine | None = None
+NIUONE_MAINLINE_MINUTE_ENGINE_PATHS: tuple[str, str] = ("", "")
 PENDING_DECISION_THREAD: threading.Thread | None = None
 PENDING_DECISION_POLL_SECONDS = float(os.environ.get("DASHBOARD_PENDING_DECISION_POLL_SECONDS", "5") or "5")
 PRACTICE_EQUITY_HEARTBEAT_LOCK = threading.Lock()
@@ -301,7 +313,15 @@ MARKET_BREADTH_HISTORY_LOCK = threading.RLock()
 MARKET_BREADTH_REFRESH_LOCK = threading.Lock()
 MARKET_BREADTH_SAMPLER_THREAD: threading.Thread | None = None
 DAILY_MARKET_HISTORY_RESET_THREAD: threading.Thread | None = None
-MARKET_BREADTH_SAMPLE_INTERVAL_SECONDS = MARKET_BREADTH_DEFAULT_SAMPLE_INTERVAL_SECONDS
+MARKET_BREADTH_SAMPLE_INTERVAL_SECONDS = _bounded_int_value(
+    os.environ.get(
+        "DASHBOARD_MARKET_BREADTH_SAMPLE_INTERVAL_SECONDS",
+        str(MARKET_BREADTH_DEFAULT_SAMPLE_INTERVAL_SECONDS),
+    ),
+    MARKET_BREADTH_DEFAULT_SAMPLE_INTERVAL_SECONDS,
+    30,
+    600,
+)
 INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS = _bounded_int_value(
     os.environ.get("DASHBOARD_INDUSTRY_FLOW_SAMPLE_INTERVAL_SECONDS"),
     INDUSTRY_FLOW_DEFAULT_SAMPLE_INTERVAL_SECONDS,
@@ -441,7 +461,7 @@ API_TTLS = {
     "niuniu_practice": int(os.environ.get("DASHBOARD_PRACTICE_TTL_SECONDS", "15") or "15"),
     "practice_benchmarks": 30,
     "indices": int(os.environ.get("DASHBOARD_INDICES_TTL_SECONDS", "60") or "60"),
-    "market_breadth": MARKET_BREADTH_DEFAULT_SAMPLE_INTERVAL_SECONDS,
+    "market_breadth": MARKET_BREADTH_SAMPLE_INTERVAL_SECONDS,
     "sectors": 60,
     "us_sectors": int(os.environ.get("DASHBOARD_US_SECTORS_TTL_SECONDS", "300") or "300"),
     "hot_stocks": 60,
@@ -466,7 +486,7 @@ SECRET_KEY_RE = re.compile(
 DEFAULT_MODEL_CONTEXT_LENGTH = "128000"
 DEFAULT_MODEL_MAX_TOKENS = "4096"
 
-ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
+ENV_CONFIG_SCHEMA: list[dict[str, Any]] = [
     {"name": "DASHBOARD_HOME", "label": "运行数据目录", "group": "基础路径", "kind": "path", "default": str(LOCAL_DATA_DIR / "runtime"), "effect": "restart"},
     {"name": "DASHBOARD_HOST", "label": "监听地址", "group": "基础路径", "kind": "text", "default": "127.0.0.1", "effect": "restart"},
     {"name": "DASHBOARD_PORT", "label": "监听端口", "group": "基础路径", "kind": "int", "default": "8787", "effect": "restart"},
@@ -498,6 +518,34 @@ ENV_CONFIG_SCHEMA: list[dict[str, str]] = [
     {"name": "DASHBOARD_X_MEDIA_CACHE_TTL_SECONDS", "label": "X 图片缓存 TTL 秒数", "group": "限流与缓存", "kind": "int", "default": str(7 * 24 * 3600), "effect": "restart"},
     {"name": "DASHBOARD_X_MEDIA_MAX_BYTES", "label": "X 图片代理最大字节", "group": "限流与缓存", "kind": "int", "default": str(8 * 1024 * 1024), "effect": "restart"},
     {"name": "DASHBOARD_PUBLIC_REFRESH_SECONDS", "label": "公开快照刷新秒数", "group": "行情与资金流设置", "kind": "int", "default": "15", "effect": "restart"},
+    {"name": "DASHBOARD_NIUONE_MAINLINE_MINUTE_REFRESH_ENABLED", "label": "题材强度跟随全市场行情更新", "group": "行情与资金流设置", "kind": "bool", "default": "1", "effect": "restart"},
+    {
+        "name": "DASHBOARD_MARKET_BREADTH_SAMPLE_INTERVAL_SECONDS",
+        "label": "全市场行情采样间隔（秒）",
+        "group": "行情与资金流设置",
+        "kind": "int",
+        "default": "30",
+        "effect": "restart",
+        "min": "30",
+        "max": "600",
+        "help_title": "影响范围",
+        "help_summary": "控制交易时段内共享的腾讯沪深 A 股全市场逐股行情采样频率。",
+        "help_items": [
+            {
+                "label": "题材强度",
+                "description": "决定获取最新逐股价格并重新计算题材强度的频率；复用同一批行情，不会再向腾讯重复抓取。",
+            },
+            {
+                "label": "市场情绪",
+                "description": "决定红盘、绿盘、涨跌停、炸板和腾讯兜底成交额等聚合曲线的真实采样频率。",
+            },
+            {
+                "label": "请求负载",
+                "description": "间隔越短，全市场分片请求越频繁；请求不完整、超时或计算失败时继续保留上一份有效结果。",
+            },
+        ],
+        "help_footer": "仅在 A 股交易日 09:30–11:30、13:00–15:00 生效；允许 30–600 秒，保存后需重启 Dashboard。",
+    },
 
     {"name": "DASHBOARD_B1_SCHEDULE_ENABLED", "label": "启用实战定时运行", "group": "任务调度", "kind": "bool", "default": "1", "effect": "restart"},
     {"name": PRACTICE_SCHEDULE_TIMES_ENV, "label": "实战盘面总结、选股及交易时间点", "group": "选股与买卖设置", "kind": "time_list", "default": DEFAULT_PRACTICE_SCHEDULE_TIMES, "effect": "runtime"},
@@ -638,6 +686,8 @@ ENV_CONFIG_BY_NAME = {item["name"]: item for item in ENV_CONFIG_SCHEMA}
 ADMIN_VISIBLE_ENV_NAMES = [
     "DASHBOARD_ADMIN_PASSWORD",
     "DASHBOARD_PUBLIC_REFRESH_SECONDS",
+    "DASHBOARD_NIUONE_MAINLINE_MINUTE_REFRESH_ENABLED",
+    "DASHBOARD_MARKET_BREADTH_SAMPLE_INTERVAL_SECONDS",
     "DASHBOARD_US_FEATURES_ENABLED",
     "DASHBOARD_GROK_MODEL",
     "DASHBOARD_GROK_API_MODE",
@@ -1850,7 +1900,12 @@ def load_practice_candidates_cache() -> dict[str, Any]:
 def load_niuone_mainline_cache_payload() -> dict[str, Any]:
     """Load the newest dedicated or migration-era NiuOne mainline payload."""
     payloads: list[dict[str, Any]] = []
-    for cache_file in (NIUONE_MAINLINE_CACHE_FILE, MULTI_STRATEGY_CACHE_FILE, B1_CACHE_FILE):
+    for cache_file in (
+        NIUONE_MAINLINE_MINUTE_CACHE_FILE,
+        NIUONE_MAINLINE_CACHE_FILE,
+        MULTI_STRATEGY_CACHE_FILE,
+        B1_CACHE_FILE,
+    ):
         try:
             parsed = json.loads(cache_file.read_text(encoding="utf-8"))
         except (OSError, ValueError, TypeError):
@@ -1864,6 +1919,103 @@ def load_niuone_mainline_cache_payload() -> dict[str, Any]:
 
 def load_niuone_mainline_view() -> dict[str, Any]:
     return build_niuone_mainline_view(load_niuone_mainline_cache_payload())
+
+
+def get_niuone_mainline_minute_engine() -> NiuOneMinuteEngine:
+    """Return one in-process engine for the active private cache paths."""
+
+    global NIUONE_MAINLINE_MINUTE_ENGINE, NIUONE_MAINLINE_MINUTE_ENGINE_PATHS
+    resolved_paths = (str(kline_cache_path()), str(STOCK_INDUSTRY_CACHE_FILE))
+    with NIUONE_MAINLINE_MINUTE_STATE_LOCK:
+        if (
+            NIUONE_MAINLINE_MINUTE_ENGINE is None
+            or NIUONE_MAINLINE_MINUTE_ENGINE_PATHS != resolved_paths
+        ):
+            NIUONE_MAINLINE_MINUTE_ENGINE = NiuOneMinuteEngine(
+                kline_cache_path=Path(resolved_paths[0]),
+                industry_cache_path=Path(resolved_paths[1]),
+            )
+            NIUONE_MAINLINE_MINUTE_ENGINE_PATHS = resolved_paths
+        return NIUONE_MAINLINE_MINUTE_ENGINE
+
+
+def run_niuone_mainline_minute_refresh(
+    quote_snapshot: Mapping[str, Any],
+    *,
+    engine: NiuOneMinuteEngine | None = None,
+) -> dict[str, Any]:
+    """Recalculate the theme cache from fresh quotes and local slow inputs."""
+
+    quote_generated_at = str(quote_snapshot.get("generated_at") or "")[:19]
+    existing = read_json_cache(NIUONE_MAINLINE_MINUTE_CACHE_FILE, None) or {}
+    if (
+        quote_generated_at
+        and str(existing.get("quote_generated_at") or "")[:19] >= quote_generated_at
+    ):
+        return {"skipped": True, "reason": "quote_already_processed"}
+    previous_payload = load_niuone_mainline_cache_payload()
+    flow_rows = read_json_cache(MONEY_FLOW_SNAPSHOT_FILE, None) or {}
+    if str(flow_rows.get("generated_at") or "")[:10] != quote_generated_at[:10]:
+        flow_rows = {}
+    scan = (engine or get_niuone_mainline_minute_engine()).build_scan(
+        quote_snapshot,
+        previous_payload=previous_payload,
+        flow_rows=flow_rows,
+        now=current_cn_datetime(),
+    )
+    payload = write_niuone_mainline_cache(NIUONE_MAINLINE_MINUTE_CACHE_FILE, scan)
+    invalidate_api_cache(NIUONE_MAINLINE_CACHE_KEY)
+    print(
+        "[Theme strength] minute quotes updated "
+        f"quote={payload.get('quote_generated_at') or 'unknown'} "
+        f"duration_ms={payload.get('calculation_duration_ms') or 0}",
+        flush=True,
+    )
+    return {
+        "updated": True,
+        "quote_generated_at": payload.get("quote_generated_at") or "",
+        "generated_at": payload.get("generated_at") or "",
+    }
+
+
+def _niuone_mainline_minute_worker() -> None:
+    global NIUONE_MAINLINE_MINUTE_PENDING, NIUONE_MAINLINE_MINUTE_THREAD
+    while True:
+        with NIUONE_MAINLINE_MINUTE_STATE_LOCK:
+            snapshot = NIUONE_MAINLINE_MINUTE_PENDING
+            NIUONE_MAINLINE_MINUTE_PENDING = None
+            if snapshot is None:
+                NIUONE_MAINLINE_MINUTE_THREAD = None
+                return
+        try:
+            run_niuone_mainline_minute_refresh(snapshot)
+        except Exception as exc:
+            print(
+                f"[WARN] Minute theme-strength refresh retained previous cache: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+
+def accept_niuone_mainline_quote_snapshot(quote_snapshot: dict[str, Any]) -> bool:
+    """Coalesce fresh quote snapshots into one non-overlapping minute worker."""
+
+    global NIUONE_MAINLINE_MINUTE_PENDING, NIUONE_MAINLINE_MINUTE_THREAD
+    if not NIUONE_MAINLINE_MINUTE_REFRESH_ENABLED:
+        return False
+    with NIUONE_MAINLINE_MINUTE_STATE_LOCK:
+        NIUONE_MAINLINE_MINUTE_PENDING = dict(quote_snapshot)
+        if NIUONE_MAINLINE_MINUTE_THREAD and NIUONE_MAINLINE_MINUTE_THREAD.is_alive():
+            return False
+        thread = threading.Thread(
+            target=_niuone_mainline_minute_worker,
+            name="niuone-mainline-minute",
+            daemon=True,
+        )
+        NIUONE_MAINLINE_MINUTE_THREAD = thread
+        thread.start()
+        return True
 
 
 def summarize_b1_scan_failure(stderr: str, stdout: str, limit: int = 900) -> str:
@@ -2838,7 +2990,13 @@ def produce_market_breadth_data() -> dict[str, Any]:
                 interval_seconds=MARKET_BREADTH_SAMPLE_INTERVAL_SECONDS,
             )
         try:
-            snapshot = fetch_tencent_market_breadth()
+            snapshot = fetch_tencent_market_breadth(
+                quote_snapshot_consumer=(
+                    accept_niuone_mainline_quote_snapshot
+                    if NIUONE_MAINLINE_MINUTE_REFRESH_ENABLED
+                    else None
+                )
+            )
             samples = record_market_breadth_sample(snapshot, now=current)
             compact = compact_market_breadth_sample(snapshot)
             if (
@@ -2883,7 +3041,7 @@ def market_breadth_sampling_loop(
     next_due = time.monotonic()
     while not stop_event.is_set():
         interval = max(
-            60.0,
+            30.0,
             float(
                 MARKET_BREADTH_SAMPLE_INTERVAL_SECONDS
                 if poll_seconds is None
@@ -4598,6 +4756,13 @@ def validate_business_updates(updates: dict[str, str]) -> None:
             }[name]
             if number < minimum or number > maximum:
                 raise ValueError(f"{name} 必须在 {minimum} 到 {maximum} 之间")
+        elif (
+            name == "DASHBOARD_MARKET_BREADTH_SAMPLE_INTERVAL_SECONDS"
+            and str(value or "").strip()
+        ):
+            number = int(value)
+            if number < 30 or number > 600:
+                raise ValueError(f"{name} 必须在 30 到 600 之间")
         elif name == "X_WATCHLIST_ACCOUNTS":
             normalize_handle_list_update(value)
         elif name == STOCK_UNIVERSE_ENV:

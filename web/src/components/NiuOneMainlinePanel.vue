@@ -18,6 +18,8 @@ const coverageInfoTrigger = ref(null)
 const adminAuth = reactive({ open: false, credential: '', error: '', submitting: false })
 const adminCredentialInput = ref(null)
 const payload = computed(() => state.payload || {})
+const quoteGeneratedAt = computed(() => String(payload.value.quote_generated_at || payload.value.generated_at || ''))
+const calculatedAt = computed(() => String(payload.value.generated_at || ''))
 const market = computed(() => payload.value.market || {})
 const mainline = computed(() => payload.value.mainline || {})
 const themes = computed(() => Array.isArray(payload.value.themes) ? payload.value.themes : [])
@@ -203,10 +205,13 @@ onBeforeUnmount(() => {
       <div class="mainline-heading">
         <div>
           <h2>题材强度雷达</h2>
-          <p>用全市场强势股聚类追踪题材延续性；覆盖范围独立于设置中的选股范围，仅用于题材研究。</p>
+          <p>用每 30 秒全市场最新报价聚类追踪题材延续性；覆盖范围独立于设置中的选股范围，仅用于题材研究。</p>
         </div>
         <div class="mainline-actions">
-          <span class="mainline-time">{{ payload.generated_at || '尚无扫描时间' }}</span>
+          <span class="mainline-time">
+            {{ quoteGeneratedAt ? `行情 ${quoteGeneratedAt}` : '尚无行情时间' }}
+            <template v-if="calculatedAt && calculatedAt !== quoteGeneratedAt"> · 计算 {{ calculatedAt }}</template>
+          </span>
           <button type="button" :disabled="state.loading" @click="refreshData">
             {{ state.loading ? '读取中…' : '刷新数据' }}
           </button>

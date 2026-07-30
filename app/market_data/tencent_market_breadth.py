@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import statistics
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
@@ -223,7 +224,10 @@ def parse_tencent_quote_body(body: str) -> list[dict[str, Any]]:
             continue
         price = _finite_float(fields[3])
         prev_close = _finite_float(fields[4])
+        open_price = _finite_float(fields[5])
+        volume = _finite_float(fields[6])
         high = _finite_float(fields[33])
+        low = _finite_float(fields[34])
         upper_limit = _finite_float(fields[47])
         lower_limit = _finite_float(fields[48])
         if price is None or prev_close is None or price <= 0 or prev_close <= 0:
@@ -235,15 +239,24 @@ def parse_tencent_quote_body(body: str) -> list[dict[str, Any]]:
         if turnover_amount_wan is not None and turnover_amount_wan < 0:
             turnover_amount_wan = None
         rows.append({
+            "symbol": ("sh" if code.startswith("6") else "sz") + code,
             "code": code,
             "name": str(fields[1] or "").strip(),
             "price": price,
+            "prev_close": prev_close,
+            "open": open_price,
+            "volume": volume,
             "pct": pct,
+            "change_pct": pct,
             "high": high,
+            "low": low,
             "upper_limit": upper_limit,
             "lower_limit": lower_limit,
             "quote_ts": _quote_timestamp(fields[30]),
+            "quote_time": str(fields[30] or "").strip(),
             "turnover_amount_wan": turnover_amount_wan,
+            "amount": turnover_amount_wan * 10_000 if turnover_amount_wan is not None else 0.0,
+            "turnover": _finite_float(fields[38]),
         })
     return rows
 
@@ -323,6 +336,58 @@ def summarize_market_breadth(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def build_tencent_quote_snapshot(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return the private per-stock view shared by minute-level consumers."""
+
+    quotes: dict[str, dict[str, Any]] = {}
+    changes: list[float] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        symbol = str(row.get("symbol") or "").strip().lower()
+        code = str(row.get("code") or "").strip()
+        price = _finite_float(row.get("price"))
+        if not re.fullmatch(r"(?:sh|sz)\d{6}", symbol) or not code or price is None or price <= 0:
+            continue
+        change_pct = _finite_float(row.get("change_pct"))
+        if change_pct is not None:
+            changes.append(change_pct)
+        quotes[symbol] = {
+            key: row.get(key)
+            for key in (
+                "code",
+                "name",
+                "price",
+                "prev_close",
+                "open",
+                "volume",
+                "change_pct",
+                "high",
+                "low",
+                "amount",
+                "turnover",
+                "quote_time",
+            )
+        }
+    summary = summarize_market_breadth(rows)
+    return {
+        "generated_at": str(summary.get("generated_at") or "")[:19],
+        "quote_count": len(quotes),
+        "quotes": quotes,
+        "market_snapshot": {
+            "source": "tencent_minute_quote_snapshot",
+            "quote_time": str(summary.get("generated_at") or "")[:19],
+            "sample_count": len(quotes),
+            "up": int(summary.get("red") or 0),
+            "down": int(summary.get("green") or 0),
+            "flat": int(summary.get("flat") or 0),
+            "median_change_pct": round(statistics.median(changes), 4) if changes else 0.0,
+            "limit_up": int(summary.get("limit_up") or 0),
+            "limit_down": int(summary.get("limit_down") or 0),
+        },
+    }
+
+
 def _download_chunk(symbols: list[str], timeout: float) -> str:
     request = Request(
         "https://qt.gtimg.cn/q=" + ",".join(symbols),
@@ -346,6 +411,7 @@ def fetch_tencent_market_breadth(
     turnover_estimate_fetcher: Callable[[dt.datetime, Any], dict[str, Any]] = (
         fetch_market_turnover_estimate
     ),
+    quote_snapshot_consumer: Callable[[dict[str, Any]], Any] | None = None,
 ) -> dict[str, Any]:
     """Fetch a validated snapshot with bounded timeout, retries, and concurrency."""
 
@@ -432,6 +498,14 @@ def fetch_tencent_market_breadth(
             f"Tencent market breadth incomplete: {len(errors)} quote batches failed after retry; "
             f"first error: {errors[0]}"
         )
+    if quote_snapshot_consumer is not None:
+        try:
+            quote_snapshot_consumer(build_tencent_quote_snapshot(rows))
+        except Exception as exc:
+            print(
+                f"[WARN] Tencent quote snapshot consumer failed error={type(exc).__name__}",
+                flush=True,
+            )
     generated = dt.datetime.strptime(
         snapshot["generated_at"],
         "%Y-%m-%d %H:%M:%S",
@@ -473,6 +547,7 @@ __all__ = [
     "add_turnover_comparison",
     "fetch_previous_market_turnover",
     "fetch_tencent_market_breadth",
+    "build_tencent_quote_snapshot",
     "parse_tencent_quote_body",
     "summarize_market_breadth",
 ]

@@ -4,7 +4,7 @@ import { startVisiblePolling } from '../utils/visiblePolling.js'
 
 const REFRESH_INTERVAL_MS = 15 * 1000
 const MONEY_FLOW_REFRESH_INTERVAL_MS = 60 * 1000
-const MARKET_BREADTH_REFRESH_INTERVAL_MS = 60 * 1000
+const MARKET_BREADTH_REFRESH_INTERVAL_MS = 30 * 1000
 
 const state = reactive({
   loading: false,

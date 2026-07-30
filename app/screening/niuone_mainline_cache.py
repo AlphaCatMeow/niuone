@@ -10,7 +10,7 @@ except ModuleNotFoundError:  # Standalone entrypoints add app/ directly to sys.p
     from core.json_cache import read_json_cache, write_json_cache
 
 
-NIUONE_MAINLINE_CACHE_SCHEMA_VERSION = 3
+NIUONE_MAINLINE_CACHE_SCHEMA_VERSION = 4
 
 
 def build_niuone_mainline_cache_payload(scan: Mapping[str, Any]) -> dict[str, Any]:
@@ -26,6 +26,9 @@ def build_niuone_mainline_cache_payload(scan: Mapping[str, Any]) -> dict[str, An
     return {
         "schema_version": NIUONE_MAINLINE_CACHE_SCHEMA_VERSION,
         "generated_at": str(scan.get("generated_at") or "")[:19],
+        "quote_generated_at": str(scan.get("quote_generated_at") or "")[:19],
+        "refresh_mode": str(scan.get("refresh_mode") or "")[:32],
+        "calculation_duration_ms": max(0, int(scan.get("calculation_duration_ms") or 0)),
         "reference_stock_universe": list(scan.get("reference_stock_universe") or []),
         "reference_stock_universe_label": str(scan.get("reference_stock_universe_label") or ""),
         "reference_pool_count": int(scan.get("reference_pool_count") or 0),

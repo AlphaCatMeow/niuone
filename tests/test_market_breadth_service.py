@@ -3,11 +3,13 @@ import json
 import os
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
 from app.dashboard.apis.market_breadth import (
+    DEFAULT_HISTORY_LIMIT,
+    DEFAULT_SAMPLE_INTERVAL_SECONDS,
     append_market_breadth_sample,
     build_market_breadth_payload,
     compact_market_breadth_sample,
@@ -34,10 +36,14 @@ def quote_record(
     fields[2] = code
     fields[3] = str(price)
     fields[4] = str(prev_close)
+    fields[5] = str(prev_close)
+    fields[6] = "123456"
     fields[30] = quote_time
     fields[32] = str(pct)
     fields[33] = str(high)
+    fields[34] = str(min(price, prev_close))
     fields[37] = str(amount_wan)
+    fields[38] = "2.5"
     fields[47] = str(upper)
     fields[48] = str(lower)
     return f'v_{code}="' + "~".join(fields) + '";'
@@ -97,6 +103,15 @@ class TencentMarketBreadthTests(unittest.TestCase):
             result["turnover_actual_source"],
             "腾讯证券沪深A股实时行情（兜底）",
         )
+        quote_snapshot = tencent_market_breadth.build_tencent_quote_snapshot(rows)
+        self.assertEqual(quote_snapshot["generated_at"], "2026-07-22 10:20:30")
+        self.assertEqual(quote_snapshot["quotes"]["sh600001"]["price"], 11)
+        self.assertEqual(
+            quote_snapshot["quotes"]["sh600001"]["quote_time"],
+            "20260722102030",
+        )
+        self.assertEqual(quote_snapshot["market_snapshot"]["up"], 2)
+        self.assertEqual(quote_snapshot["market_snapshot"]["down"], 1)
 
     def test_previous_market_turnover_uses_latest_common_prior_trading_day(self):
         bodies = {
@@ -151,6 +166,7 @@ class TencentMarketBreadthTests(unittest.TestCase):
 
     def test_fetch_retries_a_failed_chunk_and_requires_complete_rows(self):
         calls = []
+        consumed = []
         body = quote_record(
             "600001", "浦发测试", price=10.1, prev_close=10, pct=1,
             high=10.2, upper=11, lower=9,
@@ -177,12 +193,16 @@ class TencentMarketBreadthTests(unittest.TestCase):
                     "date": "2026-07-21",
                     "turnover_yi": 10,
                 },
+                quote_snapshot_consumer=consumed.append,
             )
 
         self.assertEqual(len(calls), 2)
         self.assertEqual(result["quote_count"], 1)
         self.assertEqual(result["red"], 1)
         self.assertEqual(result["turnover_increment_yi"], 2)
+        self.assertEqual(len(consumed), 1)
+        self.assertEqual(consumed[0]["quotes"]["sh600001"]["price"], 10.1)
+        self.assertNotIn("quotes", result)
 
     def test_previous_turnover_failure_does_not_hide_valid_tencent_snapshot(self):
         body = quote_record(
@@ -241,6 +261,62 @@ class TencentMarketBreadthTests(unittest.TestCase):
 
 
 class MarketBreadthHistoryTests(unittest.TestCase):
+    def test_default_thirty_second_history_retains_a_complete_trading_day(self):
+        morning = datetime(2026, 7, 22, 9, 30)
+        afternoon = datetime(2026, 7, 22, 13, 0)
+        moments = [
+            morning + timedelta(seconds=30 * index)
+            for index in range(240)
+        ] + [
+            afternoon + timedelta(seconds=30 * index)
+            for index in range(240)
+        ]
+        history = {}
+        for moment in moments:
+            history = append_market_breadth_sample(
+                history,
+                sample(moment.strftime("%Y-%m-%d %H:%M:%S")),
+            )
+
+        self.assertEqual(DEFAULT_SAMPLE_INTERVAL_SECONDS, 30)
+        self.assertEqual(DEFAULT_HISTORY_LIMIT, 600)
+        self.assertEqual(history["interval_seconds"], 30)
+        self.assertEqual(len(history["samples"]), 480)
+        payload = build_market_breadth_payload(
+            history["samples"][-1],
+            history_samples=history["samples"][:-1],
+        )
+        self.assertEqual(payload["sampling"]["interval_seconds"], 30)
+        self.assertEqual(len(payload["timeline"]), 480)
+
+    def test_background_sampler_allows_a_thirty_second_floor(self):
+        class StopAfterFirstWait:
+            timeout = None
+
+            def is_set(self):
+                return False
+
+            def wait(self, timeout):
+                self.timeout = timeout
+                return True
+
+        stop_event = StopAfterFirstWait()
+        with patch.object(
+            dashboard,
+            "is_market_breadth_sampling_window",
+            return_value=False,
+        ), patch.object(
+            dashboard.time,
+            "monotonic",
+            side_effect=[100.0, 100.0],
+        ):
+            dashboard.market_breadth_sampling_loop(
+                stop_event=stop_event,
+                poll_seconds=1,
+            )
+
+        self.assertEqual(stop_event.timeout, 30.0)
+
     def test_daily_reset_retains_snapshots_until_nine_then_clears_them(self):
         original_breadth_file = dashboard.MARKET_BREADTH_HISTORY_FILE
         original_flow_file = dashboard.INDUSTRY_FLOW_HISTORY_FILE
@@ -804,6 +880,47 @@ class MarketBreadthHistoryTests(unittest.TestCase):
         finally:
             dashboard.MARKET_BREADTH_HISTORY_FILE = original_history_file
 
+    def test_producer_shares_each_new_quote_batch_with_theme_refresh(self):
+        original_history_file = dashboard.MARKET_BREADTH_HISTORY_FILE
+        accepted = []
+
+        def fetch(*, quote_snapshot_consumer=None):
+            self.assertIsNotNone(quote_snapshot_consumer)
+            quote_snapshot_consumer({
+                "generated_at": "2026-07-22 10:10:00",
+                "quote_count": 5100,
+                "quotes": {"sh600001": {"price": 10.1}},
+            })
+            return sample("2026-07-22 10:10:00")
+
+        try:
+            with tempfile.TemporaryDirectory(prefix="niuone-market-breadth-share-") as temp_dir:
+                dashboard.MARKET_BREADTH_HISTORY_FILE = Path(temp_dir) / "history.json"
+                with patch.object(
+                    dashboard,
+                    "fetch_tencent_market_breadth",
+                    side_effect=fetch,
+                ), patch.object(
+                    dashboard,
+                    "accept_niuone_mainline_quote_snapshot",
+                    side_effect=accepted.append,
+                ), patch.object(
+                    dashboard,
+                    "NIUONE_MAINLINE_MINUTE_REFRESH_ENABLED",
+                    True,
+                ), patch.object(
+                    dashboard,
+                    "current_cn_datetime",
+                    return_value=datetime(2026, 7, 22, 10, 10),
+                ):
+                    payload = dashboard.produce_market_breadth_data()
+
+            self.assertTrue(payload["available"])
+            self.assertEqual(len(accepted), 1)
+            self.assertEqual(accepted[0]["generated_at"], "2026-07-22 10:10:00")
+        finally:
+            dashboard.MARKET_BREADTH_HISTORY_FILE = original_history_file
+
     def test_producer_reuses_fresh_background_sample_without_duplicate_fetch(self):
         original_history_file = dashboard.MARKET_BREADTH_HISTORY_FILE
         try:
@@ -819,13 +936,31 @@ class MarketBreadthHistoryTests(unittest.TestCase):
                 ) as fetch, patch.object(
                     dashboard,
                     "current_cn_datetime",
-                    return_value=datetime(2026, 7, 22, 10, 0, 30),
+                    return_value=datetime(2026, 7, 22, 10, 0, 20),
                 ):
                     payload = dashboard.produce_market_breadth_data()
 
                 fetch.assert_not_called()
                 self.assertEqual(payload["latest"]["red"], 3200)
                 self.assertEqual(payload["sampling"]["point_count"], 1)
+        finally:
+            dashboard.MARKET_BREADTH_HISTORY_FILE = original_history_file
+
+    def test_background_sample_older_than_twenty_five_seconds_is_not_fresh(self):
+        original_history_file = dashboard.MARKET_BREADTH_HISTORY_FILE
+        try:
+            with tempfile.TemporaryDirectory(prefix="niuone-market-breadth-stale-") as temp_dir:
+                dashboard.MARKET_BREADTH_HISTORY_FILE = Path(temp_dir) / "history.json"
+                dashboard.record_market_breadth_sample(
+                    sample("2026-07-22 10:00:00"),
+                    now=datetime(2026, 7, 22, 10, 0),
+                )
+
+                cached = dashboard._cached_market_breadth_payload(
+                    datetime(2026, 7, 22, 10, 0, 26),
+                )
+
+            self.assertIsNone(cached)
         finally:
             dashboard.MARKET_BREADTH_HISTORY_FILE = original_history_file
 
@@ -854,7 +989,7 @@ class MarketBreadthHistoryTests(unittest.TestCase):
                 ) as fetch, patch.object(
                     dashboard,
                     "current_cn_datetime",
-                    return_value=datetime(2026, 7, 22, 10, 0, 30),
+                    return_value=datetime(2026, 7, 22, 10, 0, 20),
                 ):
                     payload = dashboard.produce_market_breadth_data()
 
