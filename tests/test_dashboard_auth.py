@@ -2923,6 +2923,8 @@ console.log(JSON.stringify([
         self.assertIn('<span>代表股列表</span><span>当前涨跌幅</span>', mainline_page)
         self.assertIn('.theme-stock-list { position:relative;', mainline_page)
         self.assertIn('.theme-stock-details { position:absolute;', mainline_page)
+        self.assertIn('.theme-stock-details { position:absolute; z-index:10; top:calc(100% + 5px); left:0; width:min(100%,380px);', mainline_page)
+        self.assertNotIn('width:clamp(240px,24vw,310px)', mainline_page)
         self.assertNotIn('.theme-row.expanded { align-items:start; }', mainline_page)
         self.assertIn('grid-template-columns:minmax(200px,260px) 74px 68px 82px 88px minmax(300px,380px) minmax(150px,1fr)', mainline_page)
         self.assertIn('.theme-leader-button { display:grid; width:min(100%,380px);', mainline_page)
