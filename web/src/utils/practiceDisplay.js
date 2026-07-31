@@ -12,6 +12,7 @@ export const PRACTICE_BUY_NAMES = {
   niu_leader: '牛牛领航',
   niu_pullback: '牛牛回踩',
   niu_emerging: '牛牛启动',
+  niu_reversal_probe: '牛牛反转',
   mixed: '混合买入',
   unknown_buy: '未识别买入',
   auto_exit: '系统退出',

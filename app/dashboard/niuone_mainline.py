@@ -5,7 +5,7 @@ import math
 from typing import Any, Mapping
 
 
-NIUONE_MAINLINE_VIEW_SCHEMA_VERSION = 6
+NIUONE_MAINLINE_VIEW_SCHEMA_VERSION = 7
 NIUONE_MAINLINE_THEME_LIMIT = 5
 
 
@@ -42,6 +42,8 @@ def _strong_stock_view(value: Any) -> dict[str, Any] | None:
         "name": name,
         "strong_score": _number(value.get("strong_score")),
         "change_pct": _number(value.get("change_pct")),
+        "rebound_from_low_pct": _number(value.get("rebound_from_low_pct")),
+        "reclaim_previous_close": value.get("reclaim_previous_close") is True,
         "role": _text(value.get("role"), 16),
     }
 
@@ -97,10 +99,13 @@ def _theme_view(value: Any) -> dict[str, Any] | None:
         "today_quote_count": _integer(value.get("today_quote_count")),
         "today_data_coverage": today_data_coverage,
         "today_up_count": _integer(value.get("today_up_count")),
+        "today_1_5pct_count": _integer(value.get("today_1_5pct_count")),
         "today_3pct_count": _integer(value.get("today_3pct_count")),
         "today_5pct_count": _integer(value.get("today_5pct_count")),
         "today_breadth_pct": today_breadth_pct,
         "today_median_change_pct": _number(value.get("today_median_change_pct")),
+        "today_median_rebound_pct": _number(value.get("today_median_rebound_pct")),
+        "today_prior_median_ret5_pct": _number(value.get("today_prior_median_ret5_pct")),
         "today_strength_score": _number(value.get("today_strength_score")),
         "today_leadership_score": _number(value.get("today_leadership_score")),
         "strong_stock_count": _integer(value.get("strong_stock_count")),
@@ -113,6 +118,18 @@ def _theme_view(value: Any) -> dict[str, Any] | None:
         "cross_day_persistent": value.get("cross_day_persistent") is True,
         "cross_day_confirmed": value.get("cross_day_confirmed") is True,
         "mainline_confirmed": value.get("mainline_confirmed") is True,
+        "reversal_candidate": value.get("reversal_candidate") is True,
+        "reversal_confirmed": value.get("reversal_confirmed") is True,
+        "reversal_confirmation_count": _integer(value.get("reversal_confirmation_count")),
+        "reversal_sample_gap_minutes": _number(value.get("reversal_sample_gap_minutes")),
+        "reversal_min_sample_gap_minutes": _number(value.get("reversal_min_sample_gap_minutes")),
+        "reversal_origin_weak": value.get("reversal_origin_weak") is True,
+        "reversal_quote_coverage_ok": value.get("reversal_quote_coverage_ok") is True,
+        "reversal_flow_available": value.get("reversal_flow_available") is True,
+        "reversal_flow_positive": value.get("reversal_flow_positive") is True,
+        "reversal_flow_flip": value.get("reversal_flow_flip") is True,
+        "reversal_flow_improving": value.get("reversal_flow_improving") is True,
+        "reversal_score": _number(value.get("reversal_score")),
         "core_overlap_count": _integer(value.get("core_overlap_count")),
         "core_overlap_ratio": _number(value.get("core_overlap_ratio")),
         "continued_core_codes": continued_codes,
@@ -163,6 +180,11 @@ def build_niuone_mainline_view(payload: Mapping[str, Any] | None) -> dict[str, A
             float(theme.get("today_strength_score") or 0),
             float(theme.get("today_median_change_pct") or 0),
         ),
+        reverse=True,
+    )
+    reversal_themes = sorted(
+        (theme for theme in themes if theme.get("reversal_candidate")),
+        key=lambda theme: float(theme.get("reversal_score") or 0),
         reverse=True,
     )
     reference_pool_count = _integer(payload.get("reference_pool_count"))
@@ -224,11 +246,19 @@ def build_niuone_mainline_view(payload: Mapping[str, Any] | None) -> dict[str, A
             "today_primary_score": _number(mainline.get("today_primary_score")),
             "today_primary_breadth_pct": _number(mainline.get("today_primary_breadth_pct")),
             "today_observation_reason": _text(mainline.get("today_observation_reason"), 240),
+            "reversal_primary": _text(mainline.get("reversal_primary"), 80),
+            "reversal_primary_score": _number(mainline.get("reversal_primary_score")),
+            "reversal_confirmation_count": _integer(mainline.get("reversal_confirmation_count")),
+            "reversal_reason": _text(
+                mainline.get("reversal_reason") or mainline.get("today_observation_reason"),
+                240,
+            ),
         },
         "theme_count": _integer(context.get("theme_count")),
         "strong_stock_count": _integer(context.get("strong_stock_count")),
         "themes": themes[:NIUONE_MAINLINE_THEME_LIMIT],
         "today_themes": today_themes[:NIUONE_MAINLINE_THEME_LIMIT],
+        "reversal_themes": reversal_themes[:NIUONE_MAINLINE_THEME_LIMIT],
         "data_quality": {
             "reference_pool_count": reference_pool_count,
             "reference_analysis_count": _integer(payload.get("reference_analysis_count")),

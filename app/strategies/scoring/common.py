@@ -66,7 +66,12 @@ def strategy_hard_blockers(strategy_name: str, payload: dict[str, Any]) -> list[
     blockers: list[str] = []
     dist = safe_float(payload.get("distance_pct"))
     is_sector_tide = strategy_name in {"tide_leader", "tide_rotation", "tide_recovery"}
-    is_niuone = strategy_name in {"niu_leader", "niu_pullback", "niu_emerging"}
+    is_niuone = strategy_name in {
+        "niu_leader",
+        "niu_pullback",
+        "niu_emerging",
+        "niu_reversal_probe",
+    }
     if not is_sector_tide and not is_niuone and dist is not None and dist > COMMON_MAX_BBI_DISTANCE_PCT:
         blockers.append(f"距BBI>{COMMON_MAX_BBI_DISTANCE_PCT}%")
 
@@ -157,7 +162,7 @@ def strategy_hard_blockers(strategy_name: str, payload: dict[str, Any]) -> list[
             blockers.append("市场风控禁止新开仓")
         if not payload.get("sector_data_eligible"):
             blockers.append("行业有效样本不足")
-        if is_niuone and (
+        if is_niuone and strategy_name != "niu_reversal_probe" and (
             payload.get("stock_leader_tier") is not True or payload.get("stock_strong") is not True
         ):
             blockers.append("个股未进入强势行业龙头梯队")
@@ -182,7 +187,43 @@ def strategy_hard_blockers(strategy_name: str, payload: dict[str, Any]) -> list[
         acceleration = safe_float(payload.get("sector_rank_acceleration")) or 0.0
         extension = safe_float(payload.get("extension_atr"))
         change = safe_float(payload.get("change_pct"))
-        if strategy_name == "niu_leader":
+        if strategy_name == "niu_reversal_probe":
+            max_change = safe_float(payload.get("max_entry_change_pct")) or 5.0
+            max_extension = safe_float(payload.get("max_entry_extension_atr")) or 1.0
+            breadth = safe_float(payload.get("today_breadth_pct")) or 0.0
+            rebound = safe_float(payload.get("rebound_from_low_pct")) or 0.0
+            if regime not in {"offensive", "rotation", "recovery"}:
+                blockers.append("市场状态不允许反转试仓")
+            if payload.get("mainline_confirmed"):
+                blockers.append("主题已确认主线，应使用领航或回踩路径")
+            if not payload.get("reversal_quote_coverage_ok"):
+                blockers.append("题材日内报价覆盖不足")
+            if not payload.get("reversal_origin_weak"):
+                blockers.append("题材不具备弱势区反转起点")
+            if not payload.get("reversal_candidate"):
+                blockers.append("题材未形成广度型V型反转")
+            elif not payload.get("reversal_confirmed"):
+                blockers.append("V型反转未完成两次分时间隔确认")
+            if breadth < 60:
+                blockers.append("V型反转上涨广度<60%")
+            if int(safe_float(payload.get("today_1_5pct_count")) or 0) < 2:
+                blockers.append("V型反转少于两只核心股同步转强")
+            if payload.get("reversal_flow_available") and not payload.get("reversal_flow_positive"):
+                blockers.append("V型反转主力资金尚未转正")
+            if (
+                payload.get("stock_reversal_leader_tier") is not True
+                or payload.get("stock_reversal_strong") is not True
+            ):
+                blockers.append("个股未进入反转领涨前三")
+            if not payload.get("reclaim_previous_close"):
+                blockers.append("反转个股尚未收复昨收")
+            if rebound < 1.5:
+                blockers.append("个股从日内低点回升<1.5%")
+            if _above_limit(change, max_change):
+                blockers.append(f"反转试仓单日涨幅>{_limit_label(max_change)}%")
+            if _above_limit(extension, max_extension):
+                blockers.append(f"反转试仓距EMA20超过{_limit_label(max_extension)}ATR")
+        elif strategy_name == "niu_leader":
             max_change = safe_float(payload.get("max_entry_change_pct")) or 4.0
             max_extension = safe_float(payload.get("max_entry_extension_atr")) or 1.0
             if regime not in {"offensive", "rotation"}:

@@ -294,6 +294,7 @@ class NiuOneMinuteEngine:
             previous_context=dict(previous_context),
             as_of_date=quote_date,
             previous_trading_day=previous_trading_day,
+            sample_at=quote_generated_at,
             reuse_previous_external_context=True,
         )
         if float(context.get("data_coverage") or 0.0) < self.minimum_coverage:

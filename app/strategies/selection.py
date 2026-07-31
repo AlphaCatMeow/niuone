@@ -46,10 +46,13 @@ def candidate_is_trade_ready(item: dict[str, Any]) -> bool:
     blockers = item.get("hard_blockers") or []
     distance = safe_float(item.get("distance_pct"))
     strategy_id = str(item.get("best_strategy") or item.get("strategy_id") or "")
-    niuone_strategy = strategy_id in {"niu_leader", "niu_pullback", "niu_emerging"}
+    niuone_strategy = strategy_id in {
+        "niu_leader", "niu_pullback", "niu_emerging", "niu_reversal_probe",
+    }
+    reversal_probe = strategy_id == "niu_reversal_probe"
     ema_strategy = strategy_id in {
         "tide_leader", "tide_rotation", "tide_recovery",
-        "niu_leader", "niu_pullback", "niu_emerging",
+        "niu_leader", "niu_pullback", "niu_emerging", "niu_reversal_probe",
     }
     return (
         bool(item.get("actionable", score >= threshold))
@@ -57,7 +60,16 @@ def candidate_is_trade_ready(item: dict[str, Any]) -> bool:
         and not blockers
         and (
             not niuone_strategy
-            or (item.get("stock_leader_tier") is True and item.get("stock_strong") is True)
+            or (
+                reversal_probe
+                and item.get("stock_reversal_leader_tier") is True
+                and item.get("stock_reversal_strong") is True
+            )
+            or (
+                not reversal_probe
+                and item.get("stock_leader_tier") is True
+                and item.get("stock_strong") is True
+            )
         )
         and (ema_strategy or distance is None or distance <= COMMON_MAX_BBI_DISTANCE_PCT)
     )

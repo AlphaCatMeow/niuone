@@ -74,6 +74,7 @@ def classify_exit_rule(reason: str = "", exit_signal: str | None = None) -> str:
             "no_progress", "max_hold_days", "stale_loser", "stale_below_bbi",
             "tide_leader_no_progress", "tide_rotation_no_follow_through", "tide_recovery_unconfirmed",
             "niu_leader_no_progress", "niu_pullback_no_follow_through", "niu_emerging_unconfirmed",
+            "niu_reversal_unconfirmed", "niu_reversal_not_upgraded",
         }:
             return "no_progress"
 

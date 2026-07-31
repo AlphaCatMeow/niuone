@@ -18,7 +18,8 @@ const strategy = computed(() => props.strategyMeta[strategyName.value] || {
   color: '#94a3b8',
 })
 const tideStrategy = computed(() => ['tide_leader', 'tide_rotation', 'tide_recovery'].includes(strategyName.value))
-const niuoneStrategy = computed(() => ['niu_leader', 'niu_pullback', 'niu_emerging'].includes(strategyName.value))
+const niuoneStrategy = computed(() => ['niu_leader', 'niu_pullback', 'niu_emerging', 'niu_reversal_probe'].includes(strategyName.value))
+const reversalStrategy = computed(() => strategyName.value === 'niu_reversal_probe')
 const dynamicStrategy = computed(() => tideStrategy.value || niuoneStrategy.value)
 const zettarancStrategy = computed(() => ['shaofu_b1', 'b2_confirm', 'b3_accelerate', 'super_b1'].includes(strategyName.value))
 const uniqueFlags = (values) => [...new Set(
@@ -171,13 +172,23 @@ function toggleCandidateDetails() {
               <span>龙头梯队</span>
               <strong>#{{ item.stock_leader_rank ?? '--' }} · 强度 {{ formatPracticeNumber(item.stock_strong_score) }}</strong>
             </div>
+            <div v-if="reversalStrategy" class="niuone-fact">
+              <span>反转双确认</span>
+              <strong>{{ item.reversal_confirmed ? '已完成' : '待完成' }} · {{ item.reversal_confirmation_count ?? 0 }}次</strong>
+            </div>
+            <div v-if="reversalStrategy" class="niuone-fact">
+              <span>日内领涨 / 低点反弹</span>
+              <strong>#{{ item.stock_reversal_leader_rank ?? '--' }} · {{ formatPracticeNumber(item.rebound_from_low_pct) }}%</strong>
+            </div>
             <div class="niuone-fact">
               <span>主线内排名 / 龙头集中度</span>
               <strong>#{{ formatPracticeNumber(item.stock_sector_rank) }} · {{ formatPracticeNumber(Number(item.leader_concentration) * 100) }}%</strong>
             </div>
           </div>
-          <p v-if="item.mainline_intraday_state === 'intraday_mainline'" class="niuone-observation-note">
-            日内强势仅用于观察，不直接触发买入。
+          <p v-if="reversalStrategy || item.mainline_intraday_state === 'intraday_mainline'" class="niuone-observation-note">
+            {{ reversalStrategy
+              ? '反转试仓已完成分时双确认，但不等同于主线确认；T+0不加仓，跨日延续后再升级。'
+              : '日内强势仅用于观察；只有独立的反转试仓满足双确认时才允许小仓试错。' }}
           </p>
         </section>
 

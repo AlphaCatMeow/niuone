@@ -46,10 +46,23 @@ def candidate_buy_blockers(
         or ""
     )
     persona = STRATEGY_DEFINITIONS.get(strategy_id, {}).get("persona")
+    reversal_probe = strategy_id == "niu_reversal_probe"
     if persona == "niuone" and (
-        candidate.get("stock_leader_tier") is not True or candidate.get("stock_strong") is not True
+        (
+            candidate.get("stock_reversal_leader_tier") is not True
+            or candidate.get("stock_reversal_strong") is not True
+        )
+        if reversal_probe
+        else (
+            candidate.get("stock_leader_tier") is not True
+            or candidate.get("stock_strong") is not True
+        )
     ):
-        leader_blocker = "个股未进入强势行业龙头梯队"
+        leader_blocker = (
+            "个股未进入反转领涨前三"
+            if reversal_probe
+            else "个股未进入强势行业龙头梯队"
+        )
         if leader_blocker not in blockers:
             blockers.append(leader_blocker)
     is_ema_strategy = persona in {"sector_tide", "niuone"}

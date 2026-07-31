@@ -67,6 +67,7 @@ def evaluate_strategy_time_exit(
     time_exit_hhmm: str,
     no_progress_hold_days: int,
     no_progress_max_pnl_pct: float,
+    strategy_confirmation_met: bool = False,
 ) -> dict[str, Any] | None:
     """Evaluate strategy-specific time-boxed exits."""
     if b3_exit_allowed and entry_strategy == "b3_accelerate" and hold_days >= 1 and max_pnl_pct < 1.0 and pnl_pct <= 0:
@@ -99,6 +100,16 @@ def evaluate_strategy_time_exit(
             return _sell_signal(
                 f"牛牛回踩3日未恢复强势 ({hold_days}d，最高盈利{max_pnl_pct:.1f}%，现盈亏{pnl_pct:.1f}%)",
                 "niu_pullback_no_follow_through",
+            )
+        if entry_strategy == "niu_reversal_probe" and hold_days >= 2:
+            return _sell_signal(
+                f"牛牛反转T+2仍未升级 ({hold_days}d，最高盈利{max_pnl_pct:.1f}%，现盈亏{pnl_pct:.1f}%)",
+                "niu_reversal_not_upgraded",
+            )
+        if entry_strategy == "niu_reversal_probe" and hold_days >= 1 and not strategy_confirmation_met:
+            return _sell_signal(
+                f"牛牛反转T+1未形成跨日延续 ({hold_days}d，最高盈利{max_pnl_pct:.1f}%，现盈亏{pnl_pct:.1f}%)",
+                "niu_reversal_unconfirmed",
             )
         if entry_strategy == "niu_emerging" and hold_days >= 2 and max_pnl_pct < 1.5 and pnl_pct <= 0.5:
             return _sell_signal(

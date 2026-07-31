@@ -162,6 +162,7 @@ B1_OUTPUT_DIR = DASHBOARD_HOME / "cron" / "output"
 B1_CACHE_FILE = B1_OUTPUT_DIR / "b1_screen_latest.json"
 MULTI_STRATEGY_CACHE = B1_OUTPUT_DIR / "multi_strategy_latest.json"
 NIUONE_MAINLINE_CACHE = B1_OUTPUT_DIR / "niuone_mainline_latest.json"
+NIUONE_MAINLINE_MINUTE_CACHE = B1_OUTPUT_DIR / "niuone_mainline_minute_latest.json"
 STOCK_INDUSTRY_CACHE = B1_OUTPUT_DIR / "stock_industry_cache.json"
 B1_HISTORY_DIR = B1_OUTPUT_DIR / "b1_history"
 MULTI_STRATEGY_HISTORY = B1_OUTPUT_DIR / "multi_strategy_history"
@@ -713,10 +714,26 @@ def load_previous_sector_tide_market() -> dict[str, Any] | None:
 
 def load_previous_niuone_context() -> dict[str, Any] | None:
     """Load the prior 牛牛战法 state and retain its persisted market date."""
-    dedicated = load_cached_niuone_context(NIUONE_MAINLINE_CACHE)
-    if dedicated is not None:
-        return dedicated
-    return load_cached_niuone_context(MULTI_STRATEGY_CACHE)
+    candidates: list[tuple[str, int, dict[str, Any]]] = []
+    for path in (
+        NIUONE_MAINLINE_MINUTE_CACHE,
+        NIUONE_MAINLINE_CACHE,
+        MULTI_STRATEGY_CACHE,
+    ):
+        context = load_cached_niuone_context(path)
+        if context is None:
+            continue
+        try:
+            modified_ns = int(path.stat().st_mtime_ns)
+        except OSError:
+            modified_ns = 0
+        context_time = re.sub(
+            r"\D",
+            "",
+            str(context.get("sample_at") or context.get("as_of_date") or ""),
+        )[:14].ljust(14, "0")
+        candidates.append((context_time, modified_ns, context))
+    return max(candidates, key=lambda item: (item[0], item[1]))[2] if candidates else None
 
 
 def resolve_niuone_trading_dates(
@@ -2154,6 +2171,7 @@ def main():
                 dragon_tiger_snapshot=dragon_tiger_snapshot,
                 as_of_date=niuone_as_of_date,
                 previous_trading_day=niuone_previous_trading_day,
+                sample_at=str(market_snapshot.get("captured_at") or ""),
             )
             niuone_context["industry_money_flow"] = sector_tide_flow_rows
             niuone_context["reference_stock_universe"] = list(reference_stock_universe)
@@ -2191,6 +2209,7 @@ def main():
             news_snapshot=news_snapshot,
             as_of_date=niuone_as_of_date,
             previous_trading_day=niuone_previous_trading_day,
+            sample_at=str(market_snapshot.get("captured_at") or ""),
         )
         niuone_context["industry_money_flow"] = sector_tide_flow_rows
         niuone_context["reference_stock_universe"] = list(reference_stock_universe)
@@ -2310,6 +2329,27 @@ def main():
             "mainline_previous_as_of_date": best.get("mainline_previous_as_of_date"),
             "mainline_state_streak": best.get("mainline_state_streak"),
             "mainline_score_change": best.get("mainline_score_change"),
+            "today_eligible_data": best.get("today_eligible_data"),
+            "today_up_count": best.get("today_up_count"),
+            "today_1_5pct_count": best.get("today_1_5pct_count"),
+            "today_breadth_pct": best.get("today_breadth_pct"),
+            "today_median_change_pct": best.get("today_median_change_pct"),
+            "today_median_rebound_pct": best.get("today_median_rebound_pct"),
+            "today_prior_median_ret5_pct": best.get("today_prior_median_ret5_pct"),
+            "today_strength_score": best.get("today_strength_score"),
+            "today_leadership_score": best.get("today_leadership_score"),
+            "reversal_candidate": best.get("reversal_candidate"),
+            "reversal_confirmed": best.get("reversal_confirmed"),
+            "reversal_confirmation_count": best.get("reversal_confirmation_count"),
+            "reversal_min_sample_gap_minutes": best.get("reversal_min_sample_gap_minutes"),
+            "reversal_sample_gap_minutes": best.get("reversal_sample_gap_minutes"),
+            "reversal_origin_weak": best.get("reversal_origin_weak"),
+            "reversal_quote_coverage_ok": best.get("reversal_quote_coverage_ok"),
+            "reversal_flow_available": best.get("reversal_flow_available"),
+            "reversal_flow_positive": best.get("reversal_flow_positive"),
+            "reversal_flow_flip": best.get("reversal_flow_flip"),
+            "reversal_flow_improving": best.get("reversal_flow_improving"),
+            "reversal_score": best.get("reversal_score"),
             "strong_stock_count": best.get("strong_stock_count"),
             "effective_strong_count": best.get("effective_strong_count"),
             "leader_concentration": best.get("leader_concentration"),
@@ -2319,6 +2359,10 @@ def main():
             "stock_leader_tier": best.get("stock_leader_tier"),
             "stock_strong": best.get("stock_strong"),
             "stock_strong_score": best.get("stock_strong_score"),
+            "stock_reversal_leader_rank": best.get("stock_reversal_leader_rank"),
+            "stock_reversal_leader_tier": best.get("stock_reversal_leader_tier"),
+            "stock_reversal_strong": best.get("stock_reversal_strong"),
+            "stock_today_rank_score": best.get("stock_today_rank_score"),
             "sector_rank_acceleration": best.get("sector_rank_acceleration"),
             "sector_breadth20": best.get("sector_breadth20"),
             "stock_sector_rank": best.get("stock_sector_rank"),
@@ -2487,6 +2531,7 @@ def main():
             news_snapshot=news_snapshot,
             as_of_date=niuone_as_of_date,
             previous_trading_day=niuone_previous_trading_day,
+            sample_at=str(market_snapshot.get("captured_at") or ""),
         )
         niuone_context["industry_money_flow"] = sector_tide_flow_rows
         niuone_context["reference_stock_universe"] = list(reference_stock_universe)

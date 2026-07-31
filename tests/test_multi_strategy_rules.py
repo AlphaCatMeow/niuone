@@ -227,31 +227,39 @@ class MultiStrategyRuleTests(unittest.TestCase):
         self.assertEqual((current, previous), ("2026-07-27", "2026-07-24"))
         self.assertEqual(status_calls, [("2026-07-27", False)])
 
-    def test_niuone_previous_context_prefers_independent_cache(self):
+    def test_niuone_previous_context_uses_newest_persisted_sample(self):
         with tempfile.TemporaryDirectory(prefix="niuone-context-") as directory:
             root = Path(directory)
+            minute = root / "niuone_mainline_minute_latest.json"
             dedicated = root / "niuone_mainline_latest.json"
             shared = root / "multi_strategy_latest.json"
+            minute.write_text(
+                '{"generated_at":"2026-07-29 10:25:00","niuone_context":{"as_of_date":"2026-07-29","sample_at":"2026-07-29 10:25:00","mainline":{"primary":"半导体"}}}',
+                encoding="utf-8",
+            )
             dedicated.write_text(
-                '{"generated_at":"2026-07-28 10:00:00","niuone_context":{"as_of_date":"2026-07-28","mainline":{"primary":"银行"}}}',
+                '{"generated_at":"2026-07-29 10:00:00","niuone_context":{"as_of_date":"2026-07-29","sample_at":"2026-07-29 10:00:00","mainline":{"primary":"银行"}}}',
                 encoding="utf-8",
             )
             shared.write_text(
-                '{"generated_at":"2026-07-29 10:00:00","niuone_context":{"as_of_date":"2026-07-29","mainline":{"primary":"证券"}}}',
+                '{"generated_at":"2026-07-29 10:10:00","niuone_context":{"as_of_date":"2026-07-29","sample_at":"2026-07-29 10:10:00","mainline":{"primary":"证券"}}}',
                 encoding="utf-8",
             )
+            original_minute = screen.NIUONE_MAINLINE_MINUTE_CACHE
             original_dedicated = screen.NIUONE_MAINLINE_CACHE
             original_shared = screen.MULTI_STRATEGY_CACHE
             try:
+                screen.NIUONE_MAINLINE_MINUTE_CACHE = minute
                 screen.NIUONE_MAINLINE_CACHE = dedicated
                 screen.MULTI_STRATEGY_CACHE = shared
                 context = screen.load_previous_niuone_context()
             finally:
+                screen.NIUONE_MAINLINE_MINUTE_CACHE = original_minute
                 screen.NIUONE_MAINLINE_CACHE = original_dedicated
                 screen.MULTI_STRATEGY_CACHE = original_shared
 
-        self.assertEqual(context["as_of_date"], "2026-07-28")
-        self.assertEqual(context["mainline"]["primary"], "银行")
+        self.assertEqual(context["as_of_date"], "2026-07-29")
+        self.assertEqual(context["mainline"]["primary"], "半导体")
 
     @staticmethod
     def _tencent_quote_response():
@@ -1112,7 +1120,7 @@ class MultiStrategyRuleTests(unittest.TestCase):
                 "base": {"breakout", "trend_pullback"},
                 "zettaranc": {"b3_accelerate", "b2_confirm", "shaofu_b1", "super_b1"},
                 "li_daxiao_bottom": {"li_daxiao_bottom"},
-                "niuone": {"niu_emerging", "niu_leader", "niu_pullback"},
+                "niuone": {"niu_emerging", "niu_leader", "niu_pullback", "niu_reversal_probe"},
                 "preset_text": {"breakout", "trend_pullback"},
             }
             for suite, scorer_ids in expected.items():

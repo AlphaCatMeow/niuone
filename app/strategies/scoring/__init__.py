@@ -44,6 +44,7 @@ from .niuone import (
     score_niu_emerging,
     score_niu_leader,
     score_niu_pullback,
+    score_niu_reversal_probe,
 )
 from .engine import StrategyScorer, analyze_enriched_rows
 from .sector_tide import (
@@ -79,6 +80,7 @@ _SCORER_BY_NAME: dict[str, Callable[[list[dict[str, Any]]], dict[str, Any] | Non
     "score_niu_leader": score_niu_leader,
     "score_niu_pullback": score_niu_pullback,
     "score_niu_emerging": score_niu_emerging,
+    "score_niu_reversal_probe": score_niu_reversal_probe,
 }
 
 STRATEGY_SCORERS: dict[str, Callable[[list[dict[str, Any]]], dict[str, Any] | None]] = {
@@ -132,6 +134,7 @@ __all__ = [
     "score_niu_emerging",
     "score_niu_leader",
     "score_niu_pullback",
+    "score_niu_reversal_probe",
     "score_tide_leader",
     "score_tide_rotation",
     "score_tide_recovery",

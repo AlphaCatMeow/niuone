@@ -89,6 +89,9 @@ def sample_scan() -> dict[str, object]:
                 "today_primary_score": 80.0,
                 "today_primary_breadth_pct": 87.5,
                 "today_observation_reason": "今日强度仅作观察",
+                "reversal_primary": "工业金属",
+                "reversal_primary_score": 82.5,
+                "reversal_confirmation_count": 2,
             },
             "themes": {
                 "工业金属": {
@@ -103,12 +106,25 @@ def sample_scan() -> dict[str, object]:
                     "today_quote_count": 8,
                     "today_data_coverage": 1.0,
                     "today_up_count": 7,
+                    "today_1_5pct_count": 5,
                     "today_3pct_count": 5,
                     "today_5pct_count": 2,
                     "today_breadth_pct": 87.5,
                     "today_median_change_pct": 3.2,
+                    "today_median_rebound_pct": 2.4,
+                    "today_prior_median_ret5_pct": -2.1,
                     "today_strength_score": 80.0,
                     "today_leadership_score": 65.0,
+                    "reversal_candidate": True,
+                    "reversal_confirmed": True,
+                    "reversal_confirmation_count": 2,
+                    "reversal_min_sample_gap_minutes": 20,
+                    "reversal_sample_gap_minutes": 25,
+                    "reversal_origin_weak": True,
+                    "reversal_quote_coverage_ok": True,
+                    "reversal_flow_available": True,
+                    "reversal_flow_positive": True,
+                    "reversal_score": 82.5,
                     "core_overlap_count": 1,
                     "core_overlap_ratio": 0.25,
                     "continued_core_codes": ["603979"],
@@ -118,6 +134,8 @@ def sample_scan() -> dict[str, object]:
                             "name": "金诚信",
                             "strong_score": 8.1,
                             "change_pct": 5.26,
+                            "rebound_from_low_pct": 3.1,
+                            "reclaim_previous_close": True,
                             "role": "leader",
                         },
                         {
@@ -191,8 +209,11 @@ class NiuOneMainlineViewTests(unittest.TestCase):
         self.assertEqual(view["mainline"]["intraday_primary"], "银行")
         self.assertEqual(view["mainline"]["today_primary"], "工业金属")
         self.assertEqual(view["mainline"]["today_primary_breadth_pct"], 87.5)
+        self.assertEqual(view["mainline"]["reversal_primary"], "工业金属")
+        self.assertEqual(view["mainline"]["reversal_confirmation_count"], 2)
         self.assertEqual([theme["industry"] for theme in view["themes"]], ["银行", "工业金属"])
         self.assertEqual([theme["industry"] for theme in view["today_themes"]], ["工业金属", "银行"])
+        self.assertEqual([theme["industry"] for theme in view["reversal_themes"]], ["工业金属"])
         industrial_metals = next(theme for theme in view["themes"] if theme["industry"] == "工业金属")
         self.assertEqual(industrial_metals["effective_strong_count"], 3.2)
         self.assertEqual(industrial_metals["effective_breadth_pct"], 40)
@@ -201,7 +222,12 @@ class NiuOneMainlineViewTests(unittest.TestCase):
         self.assertEqual(industrial_metals["leader_stock"]["change_pct"], 5.26)
         self.assertEqual(industrial_metals["today_strength_score"], 80)
         self.assertEqual(industrial_metals["today_breadth_pct"], 87.5)
+        self.assertTrue(industrial_metals["reversal_confirmed"])
+        self.assertEqual(industrial_metals["reversal_sample_gap_minutes"], 25)
+        self.assertEqual(industrial_metals["today_median_rebound_pct"], 2.4)
         self.assertEqual(industrial_metals["today_leader_stock"]["code"], "603979")
+        self.assertEqual(industrial_metals["leader_stock"]["rebound_from_low_pct"], 3.1)
+        self.assertTrue(industrial_metals["leader_stock"]["reclaim_previous_close"])
         self.assertEqual(
             [(stock["code"], stock["change_pct"]) for stock in industrial_metals["strong_stocks"]],
             [("603979", 5.26), ("600111", -1.35)],
@@ -228,6 +254,7 @@ class NiuOneMainlineViewTests(unittest.TestCase):
         self.assertFalse(view["available"])
         self.assertEqual(view["themes"], [])
         self.assertEqual(view["today_themes"], [])
+        self.assertEqual(view["reversal_themes"], [])
 
     def test_legacy_snapshot_marks_uncovered_reason_as_pending(self) -> None:
         scan = sample_scan()
@@ -287,6 +314,31 @@ class NiuOneMainlineViewTests(unittest.TestCase):
         self.assertEqual(
             [theme["industry"] for theme in view["today_themes"]],
             ["题材1", "题材2", "题材3", "题材4", "题材5"],
+        )
+
+    def test_public_view_keeps_reversal_list_independent_of_structure_top_five(self) -> None:
+        scan = sample_scan()
+        scan["niuone_context"]["themes"] = {
+            f"题材{index}": {
+                "industry": f"题材{index}",
+                "score": index,
+                "state": "candidate",
+                "reversal_candidate": index == 1,
+                "reversal_confirmed": index == 1,
+                "reversal_score": 88 if index == 1 else 0,
+            }
+            for index in range(1, 9)
+        }
+
+        view = build_niuone_mainline_view(scan)
+
+        self.assertEqual(
+            [theme["industry"] for theme in view["themes"]],
+            ["题材8", "题材7", "题材6", "题材5", "题材4"],
+        )
+        self.assertEqual(
+            [theme["industry"] for theme in view["reversal_themes"]],
+            ["题材1"],
         )
 
 
