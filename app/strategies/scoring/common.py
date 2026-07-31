@@ -30,6 +30,15 @@ def safe_round(v, n=2):
     return round(v, n)
 
 
+def _above_limit(value: float | None, limit: float) -> bool:
+    """Compare quote-derived floats without rejecting an exact displayed boundary."""
+    return value is not None and value > limit + 1e-9
+
+
+def _limit_label(value: float) -> str:
+    return f"{value:g}"
+
+
 def with_strategy_profile(strategy_name: str, payload: dict[str, Any]) -> dict[str, Any]:
     profile = STRATEGY_SCORE_PROFILES.get(strategy_name, {})
     score = float(payload.get("score") or 0)
@@ -150,7 +159,15 @@ def strategy_hard_blockers(strategy_name: str, payload: dict[str, Any]) -> list[
         ):
             blockers.append("个股未进入强势行业龙头梯队")
         if not payload.get("risk_ok"):
-            blockers.append("结构止损超过1.5ATR或6%")
+            max_stop_distance = safe_float(payload.get("max_stop_distance_pct"))
+            max_stop_atr = safe_float(payload.get("max_stop_atr"))
+            if max_stop_distance is not None and max_stop_atr is not None:
+                blockers.append(
+                    "结构止损超过当前行情上限"
+                    f"({_limit_label(max_stop_distance)}%或{_limit_label(max_stop_atr)}ATR)"
+                )
+            else:
+                blockers.append("结构止损超过1.5ATR或6%")
         effective_loss = safe_float(payload.get("effective_loss_distance_pct"))
         dynamic_cap = safe_float(payload.get("max_position_pct_by_risk"))
         if effective_loss is None or effective_loss <= 0 or dynamic_cap is None or dynamic_cap <= 0:
@@ -163,6 +180,8 @@ def strategy_hard_blockers(strategy_name: str, payload: dict[str, Any]) -> list[
         extension = safe_float(payload.get("extension_atr"))
         change = safe_float(payload.get("change_pct"))
         if strategy_name == "niu_leader":
+            max_change = safe_float(payload.get("max_entry_change_pct")) or 4.0
+            max_extension = safe_float(payload.get("max_entry_extension_atr")) or 1.0
             if regime not in {"offensive", "rotation"}:
                 blockers.append("牛牛领航仅用于进攻/轮动行情")
             if status != "mainline":
@@ -175,11 +194,13 @@ def strategy_hard_blockers(strategy_name: str, payload: dict[str, Any]) -> list[
                 blockers.append("单只强股不足以确认主线")
             if not (payload.get("breakout") or payload.get("pullback")):
                 blockers.append("未形成突破/首次缩量回踩")
-            if change is not None and change > 4:
-                blockers.append("领航战法单日涨幅>4%")
-            if extension is not None and extension > 1:
-                blockers.append("领航战法距EMA20超过1ATR")
+            if _above_limit(change, max_change):
+                blockers.append(f"领航战法单日涨幅>{_limit_label(max_change)}%")
+            if _above_limit(extension, max_extension):
+                blockers.append(f"领航战法距EMA20超过{_limit_label(max_extension)}ATR")
         elif strategy_name == "niu_pullback":
+            max_change = safe_float(payload.get("max_entry_change_pct")) or 4.0
+            max_extension = safe_float(payload.get("max_entry_extension_atr")) or 1.0
             if regime not in {"offensive", "rotation", "recovery"}:
                 blockers.append("市场状态不允许主线回踩")
             if status not in {"mainline", "diverging"} or (safe_float(payload.get("mainline_score")) or 0) < 70:
@@ -190,10 +211,10 @@ def strategy_hard_blockers(strategy_name: str, payload: dict[str, Any]) -> list[
                 blockers.append("主题未进入当前主线/双主线")
             if not (payload.get("pullback") or payload.get("reclaim")):
                 blockers.append("未出现EMA20承接/收复")
-            if change is not None and change > 4:
-                blockers.append("回踩战法单日涨幅>4%")
-            if extension is not None and extension > 1:
-                blockers.append("回踩战法距EMA20超过1ATR")
+            if _above_limit(change, max_change):
+                blockers.append(f"回踩战法单日涨幅>{_limit_label(max_change)}%")
+            if _above_limit(extension, max_extension):
+                blockers.append(f"回踩战法距EMA20超过{_limit_label(max_extension)}ATR")
         elif strategy_name == "niu_emerging":
             if regime not in {"offensive", "rotation", "recovery"}:
                 blockers.append("市场状态不允许启动观察仓")

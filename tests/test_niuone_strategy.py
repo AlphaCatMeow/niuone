@@ -17,7 +17,11 @@ _TEST_HOME = tempfile.TemporaryDirectory(prefix="niuone-strategy-")
 os.environ["DASHBOARD_HOME"] = _TEST_HOME.name
 
 import niuniu_practice_trader as trader  # noqa: E402
-from strategies.niuone_risk import niuone_risk_budget  # noqa: E402
+from strategies.niuone_risk import (  # noqa: E402
+    niuone_chase_limits,
+    niuone_risk_budget,
+    niuone_structure_risk_ok,
+)
 from strategies.scoring import (  # noqa: E402
     analyze_enriched_rows,
     build_niuone_context,
@@ -441,10 +445,16 @@ class NiuOneStrategyTests(unittest.TestCase):
         self.assertNotIn("个股未进入强势行业龙头梯队", second_rank["hard_blockers"])
 
         rows[-1]["quote_change_pct"] = 5.1
+        expanded = score_niu_leader(rows, context)
+        self.assertIsNotNone(expanded)
+        self.assertNotIn("领航战法单日涨幅>4%", expanded["hard_blockers"])
+        self.assertIn("领航买点偏扩张，已按行情弹性上限复核", expanded["risk_flags"])
+
+        rows[-1]["quote_change_pct"] = 7.1
         chased = score_niu_leader(rows, context)
         self.assertIsNotNone(chased)
         self.assertFalse(chased["actionable"])
-        self.assertIn("领航战法单日涨幅>4%", chased["hard_blockers"])
+        self.assertIn("领航战法单日涨幅>7%", chased["hard_blockers"])
 
         payload = with_strategy_profile("niu_leader", {
             "score": 9.0,
@@ -491,6 +501,50 @@ class NiuOneStrategyTests(unittest.TestCase):
             "stock_leader_rank": 4,
             "stock_leader_tier": False,
         }))
+
+    def test_niuone_entry_limits_expand_only_in_stronger_market_states(self):
+        self.assertEqual(
+            niuone_chase_limits("niu_leader", "offensive"),
+            {"max_entry_change_pct": 7.0, "max_entry_extension_atr": 1.5},
+        )
+        self.assertEqual(
+            niuone_chase_limits("niu_leader", "rotation"),
+            {"max_entry_change_pct": 5.0, "max_entry_extension_atr": 1.25},
+        )
+        self.assertTrue(niuone_structure_risk_ok(9.5, 2.4, "offensive"))
+        self.assertTrue(niuone_structure_risk_ok(7.5, 1.9, "rotation"))
+        self.assertFalse(niuone_structure_risk_ok(8.1, 1.9, "rotation"))
+        self.assertFalse(niuone_structure_risk_ok(6.1, 1.5, "recovery"))
+
+        payload = with_strategy_profile("niu_leader", {
+            "score": 9.0,
+            "extension_atr": 1.25,
+            "max_entry_change_pct": 5.0,
+            "max_entry_extension_atr": 1.25,
+            "change_pct": 5.000000000000003,
+            "market_allows_buys": True,
+            "market_hard_stop": False,
+            "market_regime": "rotation",
+            "sector_data_eligible": True,
+            "sector_status": "mainline",
+            "mainline_selected": True,
+            "mainline_cross_day_confirmed": True,
+            "single_stock_dominated": False,
+            "stock_strong": True,
+            "stock_leader_tier": True,
+            "breakout": True,
+            "pullback": False,
+            "risk_ok": True,
+            "effective_loss_distance_pct": 7.0,
+            "max_position_pct_by_risk": 10.0,
+            "risk_flags": [],
+        })
+        self.assertTrue(payload["actionable"])
+        self.assertNotIn("领航战法单日涨幅>5%", payload["hard_blockers"])
+
+        above_limit = with_strategy_profile("niu_leader", {**payload, "change_pct": 5.01})
+        self.assertFalse(above_limit["actionable"])
+        self.assertIn("领航战法单日涨幅>5%", above_limit["hard_blockers"])
 
     def test_all_niuone_profiles_require_the_strong_industry_leader(self):
         for strategy_id in ("niu_leader", "niu_pullback", "niu_emerging"):

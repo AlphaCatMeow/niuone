@@ -8,7 +8,13 @@ from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from typing import Any, Mapping
 
-from ..niuone_risk import NIUONE_ABSOLUTE_POSITION_CAP_PCT, niuone_risk_budget
+from ..niuone_risk import (
+    NIUONE_ABSOLUTE_POSITION_CAP_PCT,
+    niuone_chase_limits,
+    niuone_risk_budget,
+    niuone_structure_risk_ok,
+    niuone_structural_stop_limits,
+)
 from ..sector_tide_risk import (
     SECTOR_TIDE_EXECUTION_BUFFER_PCT,
     downside_gap_buffer_pct,
@@ -914,7 +920,9 @@ def _entry_metrics(rows: list[dict[str, Any]], context: dict[str, Any]) -> dict[
     structure_low = min(lows) if lows else close - atr * 1.5
     stop_distance = structural_stop_distance_pct(close, structure_low)
     stop_atr = (close - structure_low) / atr
-    risk_ok = 0 < stop_distance <= 6 and stop_atr <= 1.5
+    regime = str(market.get("risk_state") or market.get("state") or "defensive")
+    structural_limits = niuone_structural_stop_limits(regime)
+    risk_ok = niuone_structure_risk_ok(stop_distance, stop_atr, regime)
     gap_buffer = downside_gap_buffer_pct(rows, atr=atr, close=close)
     effective_distance = effective_loss_distance_pct(
         close,
@@ -951,6 +959,8 @@ def _entry_metrics(rows: list[dict[str, Any]], context: dict[str, Any]) -> dict[
         "stop_price": structure_low,
         "stop_distance_pct": stop_distance,
         "stop_atr": stop_atr,
+        "max_stop_distance_pct": structural_limits["max_stop_distance_pct"],
+        "max_stop_atr": structural_limits["max_stop_atr"],
         "gap_buffer_pct": gap_buffer,
         "effective_loss_distance_pct": effective_distance,
         "risk_ok": risk_ok,
@@ -978,6 +988,10 @@ def _payload(
         str(mainline.get("secondary") or ""),
     }
     budget = niuone_risk_budget(str(market.get("risk_state") or market.get("state") or ""))
+    chase_limits = niuone_chase_limits(
+        strategy_name,
+        str(market.get("risk_state") or market.get("state") or ""),
+    )
     absolute_cap = NIUONE_ABSOLUTE_POSITION_CAP_PCT[strategy_name]
     dynamic_cap = risk_sized_position_cap_pct(
         per_trade_risk_pct=budget["per_trade_risk_pct"],
@@ -1064,6 +1078,10 @@ def _payload(
         "stop_source": "niu_structure_low",
         "stop_distance_pct": safe_round(metrics["stop_distance_pct"], 2),
         "stop_atr": safe_round(metrics["stop_atr"], 2),
+        "max_stop_distance_pct": metrics["max_stop_distance_pct"],
+        "max_stop_atr": metrics["max_stop_atr"],
+        "max_entry_change_pct": chase_limits["max_entry_change_pct"],
+        "max_entry_extension_atr": chase_limits["max_entry_extension_atr"],
         "gap_buffer_pct": safe_round(metrics["gap_buffer_pct"], 3),
         "execution_buffer_pct": SECTOR_TIDE_EXECUTION_BUFFER_PCT,
         "effective_loss_distance_pct": safe_round(metrics["effective_loss_distance_pct"], 3),
@@ -1083,7 +1101,10 @@ def _payload(
 def _common_risks(metrics: dict[str, Any]) -> list[str]:
     risks: list[str] = []
     if not metrics["risk_ok"]:
-        risks.append("结构止损超过1.5ATR或6%")
+        risks.append(
+            "结构止损超过当前行情上限"
+            f"({metrics['max_stop_distance_pct']:g}%或{metrics['max_stop_atr']:g}ATR)"
+        )
     if metrics["theme"].get("single_stock_dominated"):
         risks.append("主题由单只强股主导")
     if metrics["stock"].get("leader_tier") is not True or metrics["stock"].get("strong") is not True:
@@ -1106,7 +1127,7 @@ def score_niu_leader(rows: list[dict[str, Any]], context: dict[str, Any]) -> dic
     if not (metrics["breakout"] or metrics["pullback"]):
         risks.append("未形成突破或首次缩量回踩")
     if metrics["change_pct"] > 4 or metrics["extension_atr"] > 1.0:
-        risks.append("领航战法拒绝追高")
+        risks.append("领航买点偏扩张，已按行情弹性上限复核")
     verdict = "高匹配牛牛领航" if metrics["composite_score"] >= 8 else ("观察牛牛领航" if metrics["composite_score"] >= 6.5 else "不匹配")
     return with_strategy_profile("niu_leader", _payload("niu_leader", metrics, verdict=verdict, risk_flags=risks))
 
@@ -1123,7 +1144,7 @@ def score_niu_pullback(rows: list[dict[str, Any]], context: dict[str, Any]) -> d
     if not (metrics["pullback"] or metrics["reclaim"]):
         risks.append("未出现EMA20承接或收复买点")
     if metrics["change_pct"] > 4 or metrics["extension_atr"] > 1.0:
-        risks.append("回踩战法拒绝追高")
+        risks.append("回踩买点偏扩张，已按行情弹性上限复核")
     verdict = "高匹配牛牛回踩" if metrics["composite_score"] >= 8.2 else ("观察牛牛回踩" if metrics["composite_score"] >= 6.5 else "不匹配")
     return with_strategy_profile("niu_pullback", _payload("niu_pullback", metrics, verdict=verdict, risk_flags=risks))
 
