@@ -1,4 +1,5 @@
 """Shared constants, indicators, and score-profile helpers."""
+import math
 import statistics
 from typing import Any
 
@@ -19,15 +20,17 @@ def safe_float(v):
     if v is None:
         return None
     try:
-        return float(v)
+        value = float(v)
     except (ValueError, TypeError):
         return None
+    return value if math.isfinite(value) else None
 
 
 def safe_round(v, n=2):
-    if v is None:
+    value = safe_float(v)
+    if value is None:
         return None
-    return round(v, n)
+    return round(value, n)
 
 
 def _above_limit(value: float | None, limit: float) -> bool:

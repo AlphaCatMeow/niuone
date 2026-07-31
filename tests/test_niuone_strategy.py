@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+import json
+import math
 import os
 import sys
 import tempfile
@@ -296,6 +298,25 @@ class NiuOneStrategyTests(unittest.TestCase):
             "invalid_metrics": 1,
             "industry_unmapped": 1,
         })
+
+    def test_context_sanitizes_non_finite_market_values_before_serialization(self):
+        prepared = self._prepared_market()
+        prepared[0]["quote"]["amount"] = float("nan")
+        prepared[1]["quote"]["price"] = float("inf")
+
+        context = build_niuone_context(
+            prepared,
+            market_snapshot={
+                "up": 100,
+                "down": 20,
+                "median_change_pct": float("nan"),
+                "limit_up": 5,
+                "limit_down": 1,
+            },
+        )
+
+        self.assertTrue(math.isfinite(context["market"]["score"]))
+        json.dumps(context, ensure_ascii=False, allow_nan=False)
 
     def test_raw_defensive_market_immediately_zeroes_new_buy_budget(self):
         context = build_niuone_context(
