@@ -5,7 +5,7 @@ import math
 from typing import Any, Mapping
 
 
-NIUONE_MAINLINE_VIEW_SCHEMA_VERSION = 5
+NIUONE_MAINLINE_VIEW_SCHEMA_VERSION = 6
 NIUONE_MAINLINE_THEME_LIMIT = 5
 
 
@@ -61,6 +61,12 @@ def _theme_view(value: Any) -> dict[str, Any] | None:
         (dict(stock) for stock in strong_stocks if stock.get("role") == "leader"),
         dict(strong_stocks[0]) if strong_stocks else None,
     )
+    today_leaders = [
+        stock
+        for raw in list(value.get("today_leaders") or [])[:5]
+        if (stock := _strong_stock_view(raw)) is not None
+    ]
+    today_leader_stock = dict(today_leaders[0]) if today_leaders else None
     continued_codes = [
         _text(code, 12)
         for code in list(value.get("continued_core_codes") or [])[:5]
@@ -73,6 +79,12 @@ def _theme_view(value: Any) -> dict[str, Any] | None:
         effective_breadth_pct = round(float(effective_strong_count) / member_count * 100, 2)
     if effective_breadth_pct is not None:
         effective_breadth_pct = round(min(100.0, max(0.0, float(effective_breadth_pct))), 2)
+    today_breadth_pct = _number(value.get("today_breadth_pct"))
+    if today_breadth_pct is not None:
+        today_breadth_pct = round(min(100.0, max(0.0, float(today_breadth_pct))), 2)
+    today_data_coverage = _number(value.get("today_data_coverage"))
+    if today_data_coverage is not None:
+        today_data_coverage = round(min(1.0, max(0.0, float(today_data_coverage))), 4)
     return {
         "industry": industry,
         "score": _number(value.get("score")),
@@ -81,6 +93,16 @@ def _theme_view(value: Any) -> dict[str, Any] | None:
         "intraday_state": _text(value.get("intraday_state"), 32),
         "member_count": member_count,
         "eligible_data": value.get("eligible_data") is True,
+        "today_eligible_data": value.get("today_eligible_data") is True,
+        "today_quote_count": _integer(value.get("today_quote_count")),
+        "today_data_coverage": today_data_coverage,
+        "today_up_count": _integer(value.get("today_up_count")),
+        "today_3pct_count": _integer(value.get("today_3pct_count")),
+        "today_5pct_count": _integer(value.get("today_5pct_count")),
+        "today_breadth_pct": today_breadth_pct,
+        "today_median_change_pct": _number(value.get("today_median_change_pct")),
+        "today_strength_score": _number(value.get("today_strength_score")),
+        "today_leadership_score": _number(value.get("today_leadership_score")),
         "strong_stock_count": _integer(value.get("strong_stock_count")),
         "effective_strong_count": effective_strong_count,
         "effective_breadth_pct": effective_breadth_pct,
@@ -100,6 +122,8 @@ def _theme_view(value: Any) -> dict[str, Any] | None:
         "flow_net_yi": _number(value.get("flow_net_yi")),
         "leader_stock": leader_stock,
         "strong_stocks": strong_stocks,
+        "today_leader_stock": today_leader_stock,
+        "today_leaders": today_leaders,
     }
 
 
@@ -129,6 +153,18 @@ def build_niuone_mainline_view(payload: Mapping[str, Any] | None) -> dict[str, A
     raw_themes = context.get("themes") if isinstance(context.get("themes"), Mapping) else {}
     themes = [theme for value in raw_themes.values() if (theme := _theme_view(value)) is not None]
     themes.sort(key=lambda theme: float(theme.get("score") or 0), reverse=True)
+    today_themes = sorted(
+        (
+            theme
+            for theme in themes
+            if theme.get("today_eligible_data") and theme.get("today_strength_score") is not None
+        ),
+        key=lambda theme: (
+            float(theme.get("today_strength_score") or 0),
+            float(theme.get("today_median_change_pct") or 0),
+        ),
+        reverse=True,
+    )
     reference_pool_count = _integer(payload.get("reference_pool_count"))
     mapped_stock_count = _integer(context.get("mapped_stock_count"))
     diagnostics = (
@@ -184,10 +220,15 @@ def build_niuone_mainline_view(payload: Mapping[str, Any] | None) -> dict[str, A
             "intraday_primary": _text(mainline.get("intraday_primary"), 80),
             "intraday_primary_score": _number(mainline.get("intraday_primary_score")),
             "observation_reason": _text(mainline.get("observation_reason"), 240),
+            "today_primary": _text(mainline.get("today_primary"), 80),
+            "today_primary_score": _number(mainline.get("today_primary_score")),
+            "today_primary_breadth_pct": _number(mainline.get("today_primary_breadth_pct")),
+            "today_observation_reason": _text(mainline.get("today_observation_reason"), 240),
         },
         "theme_count": _integer(context.get("theme_count")),
         "strong_stock_count": _integer(context.get("strong_stock_count")),
         "themes": themes[:NIUONE_MAINLINE_THEME_LIMIT],
+        "today_themes": today_themes[:NIUONE_MAINLINE_THEME_LIMIT],
         "data_quality": {
             "reference_pool_count": reference_pool_count,
             "reference_analysis_count": _integer(payload.get("reference_analysis_count")),

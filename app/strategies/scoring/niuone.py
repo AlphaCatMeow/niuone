@@ -26,6 +26,8 @@ NIUONE_STRONG_SCORE_THRESHOLD = 70.0
 NIUONE_CORE_STOCK_LIMIT = 5
 NIUONE_LEADER_TIER_LIMIT = 3
 NIUONE_MIN_CROSS_DAY_CORE_OVERLAP = 2
+NIUONE_TODAY_MIN_QUOTE_COVERAGE = 0.8
+NIUONE_TODAY_OBSERVATION_THRESHOLD = 60.0
 
 
 def _mean(values: list[float], default: float = 0.0) -> float:
@@ -123,6 +125,79 @@ def _member_metrics(item: dict[str, Any]) -> dict[str, Any] | None:
         "volume_ratio": volume_ratio,
         "amount": safe_float(quote.get("amount")) or safe_float(latest.get("quote_amount")) or 0.0,
         "change_pct": live_change if live_change is not None else (safe_float(latest.get("change_pct")) or 0.0),
+        "live_change_available": live_change is not None,
+    }
+
+
+def _today_theme_metrics(theme_members: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return quote-only intraday participation metrics without changing strategy gates."""
+    total_count = len(theme_members)
+    quoted_members = [member for member in theme_members if member.get("live_change_available")]
+    quote_count = len(quoted_members)
+    coverage = quote_count / total_count if total_count else 0.0
+    eligible = bool(
+        total_count >= NIUONE_MIN_THEME_MEMBERS
+        and quote_count >= NIUONE_MIN_THEME_MEMBERS
+        and coverage >= NIUONE_TODAY_MIN_QUOTE_COVERAGE
+    )
+    if not quoted_members:
+        return {
+            "today_eligible_data": False,
+            "today_quote_count": 0,
+            "today_data_coverage": 0.0,
+            "today_up_count": 0,
+            "today_3pct_count": 0,
+            "today_5pct_count": 0,
+            "today_breadth_pct": None,
+            "today_median_change_pct": None,
+            "today_strength_score": None,
+            "today_leadership_score": None,
+            "today_leaders": [],
+        }
+
+    changes = [float(member["change_pct"]) for member in quoted_members]
+    up_count = sum(change > 0 for change in changes)
+    advance_3_count = sum(change >= 3.0 for change in changes)
+    advance_5_count = sum(change >= 5.0 for change in changes)
+    breadth_pct = up_count / quote_count * 100
+    advance_3_pct = advance_3_count / quote_count * 100
+    advance_5_pct = advance_5_count / quote_count * 100
+    median_change = statistics.median(changes)
+    positive_median_score = _clamp(max(0.0, median_change) / 5.0 * 100)
+    strength_score = _clamp(
+        breadth_pct * 0.45
+        + advance_3_pct * 0.25
+        + advance_5_pct * 0.15
+        + positive_median_score * 0.15
+    )
+    leaders = sorted(
+        quoted_members,
+        key=lambda member: (float(member["change_pct"]), float(member["amount"])),
+        reverse=True,
+    )[:NIUONE_CORE_STOCK_LIMIT]
+    top_positive_changes = [max(0.0, float(member["change_pct"])) for member in leaders[:3]]
+    leadership_score = _clamp(_mean(top_positive_changes) / 10.0 * 100)
+    return {
+        "today_eligible_data": eligible,
+        "today_quote_count": quote_count,
+        "today_data_coverage": round(coverage, 4),
+        "today_up_count": up_count,
+        "today_3pct_count": advance_3_count,
+        "today_5pct_count": advance_5_count,
+        "today_breadth_pct": round(breadth_pct, 2),
+        "today_median_change_pct": round(median_change, 2),
+        "today_strength_score": round(strength_score, 2),
+        "today_leadership_score": round(leadership_score, 2),
+        "today_leaders": [
+            {
+                "code": member["code"],
+                "name": member["name"],
+                "strong_score": round(float(member["strong_score"]), 2),
+                "change_pct": round(float(member["change_pct"]), 2),
+                "role": "today_leader" if index == 0 else "today_core",
+            }
+            for index, member in enumerate(leaders)
+        ],
     }
 
 
@@ -521,6 +596,7 @@ def build_niuone_context(
     stocks: dict[str, dict[str, Any]] = {}
 
     for industry, theme_members in grouped.items():
+        today_metrics = _today_theme_metrics(theme_members)
         strong_members = sorted(
             (member for member in theme_members if member["strong"]),
             key=lambda member: float(member["strong_score"]),
@@ -529,7 +605,7 @@ def build_niuone_context(
         weights = [max(1.0, float(member["strong_score"])) * math.sqrt(max(1.0, float(member["amount"]))) for member in strong_members]
         weight_total = sum(weights)
         normalized = [weight / weight_total for weight in weights] if weight_total > 0 else []
-        concentration = max(normalized) if normalized else 1.0
+        concentration = max(normalized) if normalized else 0.0
         effective_count = 1.0 / sum(weight * weight for weight in normalized) if normalized else 0.0
         effective_breadth_pct = _clamp(
             effective_count / len(theme_members) * 100 if theme_members else 0.0
@@ -600,6 +676,7 @@ def build_niuone_context(
             "industry": industry,
             "theme_basis": "industry_proxy",
             "member_count": len(theme_members),
+            **today_metrics,
             "eligible_data": eligible,
             "score": round(score, 2),
             "raw_state": raw_state,
@@ -627,7 +704,7 @@ def build_niuone_context(
             "effective_strong_count": round(effective_count, 2),
             "effective_breadth_pct": round(effective_breadth_pct, 2),
             "leader_concentration": round(concentration, 4),
-            "single_stock_dominated": bool(strong_count <= 1 or concentration > 0.70),
+            "single_stock_dominated": bool(strong_count == 1 or concentration > 0.70),
             "flow_net_yi": safe_round(flow_value, 2),
             "flow_source": "industry_net_flow" if flow_value is not None else "liquidity_fallback",
             "strength_component": round(strength_component, 2),
@@ -693,6 +770,20 @@ def build_niuone_context(
     ordered = sorted(themes.values(), key=lambda theme: float(theme["score"]), reverse=True)
     confirmed = [theme for theme in ordered if theme["state"] == "mainline"]
     intraday = [theme for theme in ordered if theme.get("intraday_state") == "intraday_mainline"]
+    today_ordered = sorted(
+        (theme for theme in themes.values() if theme.get("today_eligible_data")),
+        key=lambda theme: (
+            float(theme.get("today_strength_score") or 0.0),
+            float(theme.get("today_median_change_pct") or 0.0),
+        ),
+        reverse=True,
+    )
+    today_primary = (
+        today_ordered[0]
+        if today_ordered
+        and float(today_ordered[0].get("today_strength_score") or 0.0) >= NIUONE_TODAY_OBSERVATION_THRESHOLD
+        else None
+    )
     primary = confirmed[0] if confirmed else None
     secondary = confirmed[1] if len(confirmed) > 1 and float(confirmed[0]["score"]) - float(confirmed[1]["score"]) <= 8 else None
     summary = {
@@ -708,6 +799,14 @@ def build_niuone_context(
         "observation_reason": (
             "日内强势仅作观察，等待下一交易日核心股延续"
             if intraday and not primary
+            else ""
+        ),
+        "today_primary": today_primary["industry"] if today_primary else "",
+        "today_primary_score": today_primary["today_strength_score"] if today_primary else None,
+        "today_primary_breadth_pct": today_primary["today_breadth_pct"] if today_primary else None,
+        "today_observation_reason": (
+            "今日强度仅作观察，不改变跨日主线确认和交易门槛"
+            if today_primary
             else ""
         ),
     }
@@ -748,7 +847,7 @@ def build_niuone_context(
             "description": "未归入已知数据质量分类",
         })
     return {
-        "version": 3,
+        "version": 4,
         "strategy": "niuone",
         "theme_basis": "industry_proxy",
         "as_of_date": as_of_date,

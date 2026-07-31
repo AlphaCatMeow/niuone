@@ -85,6 +85,10 @@ def sample_scan() -> dict[str, object]:
                 "intraday_primary": "银行",
                 "intraday_primary_score": 79.03,
                 "observation_reason": "日内强势仅观察",
+                "today_primary": "工业金属",
+                "today_primary_score": 80.0,
+                "today_primary_breadth_pct": 87.5,
+                "today_observation_reason": "今日强度仅作观察",
             },
             "themes": {
                 "工业金属": {
@@ -95,6 +99,16 @@ def sample_scan() -> dict[str, object]:
                     "member_count": 8,
                     "strong_stock_count": 4,
                     "effective_strong_count": 3.2,
+                    "today_eligible_data": True,
+                    "today_quote_count": 8,
+                    "today_data_coverage": 1.0,
+                    "today_up_count": 7,
+                    "today_3pct_count": 5,
+                    "today_5pct_count": 2,
+                    "today_breadth_pct": 87.5,
+                    "today_median_change_pct": 3.2,
+                    "today_strength_score": 80.0,
+                    "today_leadership_score": 65.0,
                     "core_overlap_count": 1,
                     "core_overlap_ratio": 0.25,
                     "continued_core_codes": ["603979"],
@@ -114,6 +128,15 @@ def sample_scan() -> dict[str, object]:
                             "role": "core",
                         },
                     ],
+                    "today_leaders": [
+                        {
+                            "code": "603979",
+                            "name": "金诚信",
+                            "strong_score": 8.1,
+                            "change_pct": 5.26,
+                            "role": "today_leader",
+                        }
+                    ],
                     "internal_samples": [1, 2, 3],
                 },
                 "银行": {
@@ -122,6 +145,13 @@ def sample_scan() -> dict[str, object]:
                     "state": "emerging",
                     "intraday_state": "intraday_mainline",
                     "strong_stock_count": 4,
+                    "today_eligible_data": True,
+                    "today_quote_count": 6,
+                    "today_data_coverage": 1.0,
+                    "today_up_count": 3,
+                    "today_breadth_pct": 50.0,
+                    "today_median_change_pct": 0.6,
+                    "today_strength_score": 40.0,
                 },
             },
         },
@@ -159,13 +189,19 @@ class NiuOneMainlineViewTests(unittest.TestCase):
         self.assertEqual(view["quote_generated_at"], "2026-07-28 14:12:08")
         self.assertEqual(view["refresh_mode"], "minute_quotes")
         self.assertEqual(view["mainline"]["intraday_primary"], "银行")
+        self.assertEqual(view["mainline"]["today_primary"], "工业金属")
+        self.assertEqual(view["mainline"]["today_primary_breadth_pct"], 87.5)
         self.assertEqual([theme["industry"] for theme in view["themes"]], ["银行", "工业金属"])
+        self.assertEqual([theme["industry"] for theme in view["today_themes"]], ["工业金属", "银行"])
         industrial_metals = next(theme for theme in view["themes"] if theme["industry"] == "工业金属")
         self.assertEqual(industrial_metals["effective_strong_count"], 3.2)
         self.assertEqual(industrial_metals["effective_breadth_pct"], 40)
         self.assertEqual(industrial_metals["leader_stock"]["code"], "603979")
         self.assertEqual(industrial_metals["leader_stock"]["role"], "leader")
         self.assertEqual(industrial_metals["leader_stock"]["change_pct"], 5.26)
+        self.assertEqual(industrial_metals["today_strength_score"], 80)
+        self.assertEqual(industrial_metals["today_breadth_pct"], 87.5)
+        self.assertEqual(industrial_metals["today_leader_stock"]["code"], "603979")
         self.assertEqual(
             [(stock["code"], stock["change_pct"]) for stock in industrial_metals["strong_stocks"]],
             [("603979", 5.26), ("600111", -1.35)],
@@ -191,6 +227,7 @@ class NiuOneMainlineViewTests(unittest.TestCase):
 
         self.assertFalse(view["available"])
         self.assertEqual(view["themes"], [])
+        self.assertEqual(view["today_themes"], [])
 
     def test_legacy_snapshot_marks_uncovered_reason_as_pending(self) -> None:
         scan = sample_scan()
@@ -222,6 +259,34 @@ class NiuOneMainlineViewTests(unittest.TestCase):
         self.assertEqual(
             [theme["industry"] for theme in view["themes"]],
             ["题材8", "题材7", "题材6", "题材5", "题材4"],
+        )
+
+    def test_public_view_keeps_an_independent_today_top_five(self) -> None:
+        scan = sample_scan()
+        scan["niuone_context"]["themes"] = {
+            f"题材{index}": {
+                "industry": f"题材{index}",
+                "score": index,
+                "state": "candidate",
+                "today_eligible_data": True,
+                "today_quote_count": 6,
+                "today_data_coverage": 1.0,
+                "today_breadth_pct": 100 - index,
+                "today_median_change_pct": 9 - index,
+                "today_strength_score": 100 - index,
+            }
+            for index in range(1, 9)
+        }
+
+        view = build_niuone_mainline_view(scan)
+
+        self.assertEqual(
+            [theme["industry"] for theme in view["themes"]],
+            ["题材8", "题材7", "题材6", "题材5", "题材4"],
+        )
+        self.assertEqual(
+            [theme["industry"] for theme in view["today_themes"]],
+            ["题材1", "题材2", "题材3", "题材4", "题材5"],
         )
 
 

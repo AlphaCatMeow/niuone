@@ -190,6 +190,58 @@ class NiuOneStrategyTests(unittest.TestCase):
         self.assertNotEqual(theme["state"], "mainline")
         self.assertEqual(context["mainline"]["mode"], "none")
 
+    def test_today_metrics_surface_broad_rebound_without_rewriting_structure(self):
+        prepared = self._prepared_market()
+        today_changes = [6.0, 5.5, 5.0, 4.5]
+        for item in prepared:
+            item["quote"]["change_pct"] = -1.0
+            if item["industry"] != "半导体":
+                continue
+            member_index = int(item["code"][-1])
+            item["rows"] = make_rows(item["code"], "半导体", -0.08)
+            item["quote"] = {
+                "amount": 5e8,
+                "change_pct": today_changes[member_index],
+            }
+
+        context = build_niuone_context(prepared)
+        theme = context["themes"]["半导体"]
+
+        self.assertEqual(theme["strong_stock_count"], 0)
+        self.assertEqual(theme["effective_breadth_pct"], 0)
+        self.assertEqual(theme["leader_concentration"], 0)
+        self.assertEqual(theme["concentration_penalty"], 0)
+        self.assertFalse(theme["single_stock_dominated"])
+        self.assertTrue(theme["today_eligible_data"])
+        self.assertEqual(theme["today_quote_count"], 4)
+        self.assertEqual(theme["today_up_count"], 4)
+        self.assertEqual(theme["today_3pct_count"], 4)
+        self.assertEqual(theme["today_5pct_count"], 3)
+        self.assertEqual(theme["today_breadth_pct"], 100)
+        self.assertEqual(theme["today_median_change_pct"], 5.25)
+        self.assertEqual(theme["today_strength_score"], 96.25)
+        self.assertEqual(theme["today_leadership_score"], 55)
+        self.assertEqual(theme["today_leaders"][0]["change_pct"], 6)
+        self.assertEqual(context["mainline"]["today_primary"], "半导体")
+        self.assertEqual(context["mainline"]["today_primary_score"], 96.25)
+        self.assertEqual(context["mainline"]["mode"], "none")
+
+    def test_today_ranking_requires_fresh_quote_coverage(self):
+        prepared = self._prepared_market()
+        for item in prepared:
+            item["quote"].pop("change_pct", None)
+        semiconductor = [item for item in prepared if item["industry"] == "半导体"]
+        semiconductor[0]["quote"]["change_pct"] = 6.0
+        semiconductor[1]["quote"]["change_pct"] = 5.0
+
+        context = build_niuone_context(prepared)
+        theme = context["themes"]["半导体"]
+
+        self.assertEqual(theme["today_quote_count"], 2)
+        self.assertEqual(theme["today_data_coverage"], 0.5)
+        self.assertFalse(theme["today_eligible_data"])
+        self.assertEqual(context["mainline"]["today_primary"], "")
+
     def test_context_classifies_every_uncovered_reference_stock(self):
         valid = {
             "code": "600001",

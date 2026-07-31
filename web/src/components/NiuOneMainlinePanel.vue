@@ -24,6 +24,7 @@ const calculatedAt = computed(() => String(payload.value.generated_at || ''))
 const market = computed(() => payload.value.market || {})
 const mainline = computed(() => payload.value.mainline || {})
 const themes = computed(() => Array.isArray(payload.value.themes) ? payload.value.themes : [])
+const todayThemes = computed(() => Array.isArray(payload.value.today_themes) ? payload.value.today_themes : [])
 const defensiveMarket = computed(() => (
   market.value.hard_stop === true
   || market.value.state === 'defensive'
@@ -43,32 +44,39 @@ const coverageReasons = computed(() => (
     : []
 ))
 const filters = computed(() => [
-  { key: 'all', label: '强度前5', count: themes.value.length },
+  { key: 'all', label: '结构前5', count: themes.value.length },
+  { key: 'today', label: '今日前5', count: todayThemes.value.length },
   { key: 'confirmed', label: '已确认', count: confirmedCount.value },
-  { key: 'intraday', label: '日内观察', count: intradayCount.value },
+  { key: 'intraday', label: '待跨日', count: intradayCount.value },
   { key: 'emerging', label: '酝酿中', count: themes.value.filter(theme => theme.state === 'emerging').length },
 ])
-const filteredThemes = computed(() => themes.value.filter(theme => {
-  if (activeFilter.value === 'confirmed') return theme.mainline_confirmed === true
-  if (activeFilter.value === 'intraday') {
-    return theme.intraday_state === 'intraday_mainline' || theme.raw_state === 'intraday_mainline'
-  }
-  if (activeFilter.value === 'emerging') return theme.state === 'emerging'
-  return true
-}))
+const filteredThemes = computed(() => {
+  if (activeFilter.value === 'today') return todayThemes.value
+  return themes.value.filter(theme => {
+    if (activeFilter.value === 'confirmed') return theme.mainline_confirmed === true
+    if (activeFilter.value === 'intraday') {
+      return theme.intraday_state === 'intraday_mainline' || theme.raw_state === 'intraday_mainline'
+    }
+    if (activeFilter.value === 'emerging') return theme.state === 'emerging'
+    return true
+  })
+})
 
 function numeric(value, digits = 1) {
+  if (value == null || value === '') return '--'
   const number = Number(value)
   return Number.isFinite(number) ? number.toFixed(digits) : '--'
 }
 
 function signed(value, suffix = '') {
+  if (value == null || value === '') return '--'
   const number = Number(value)
   if (!Number.isFinite(number)) return '--'
   return `${number > 0 ? '+' : ''}${number.toFixed(1)}${suffix}`
 }
 
 function percent(value) {
+  if (value == null || value === '') return '--'
   const number = Number(value)
   if (!Number.isFinite(number)) return '--'
   return `${Math.round(number * 100)}%`
@@ -76,19 +84,57 @@ function percent(value) {
 
 function effectiveBreadthTitle(theme) {
   const breadth = numeric(theme.effective_breadth_pct)
+  const todayBreadth = numeric(theme.today_breadth_pct)
   const effective = numeric(theme.effective_strong_count)
   const members = Number(theme.member_count)
   const sample = Number.isFinite(members) && members > 0 ? `${members}只` : '待补充'
-  return `有效广度 ${breadth}% · 等效强势股 ${effective}只 / 有效样本 ${sample}`
+  return `结构有效广度 ${breadth}% · 等效强势股 ${effective}只 / 有效样本 ${sample}；今日上涨广度 ${todayBreadth}%`
 }
 
-function leaderStock(theme) {
+function structuralLeaderStock(theme) {
   if (theme?.leader_stock && typeof theme.leader_stock === 'object') return theme.leader_stock
   return Array.isArray(theme?.strong_stocks) ? theme.strong_stocks[0] || null : null
 }
 
+function leaderStock(theme) {
+  const structural = structuralLeaderStock(theme)
+  if (activeFilter.value !== 'today' && structural) return structural
+  if (theme?.today_leader_stock && typeof theme.today_leader_stock === 'object') return theme.today_leader_stock
+  return Array.isArray(theme?.today_leaders) ? theme.today_leaders[0] || structural : structural
+}
+
+function leaderBadge(theme) {
+  return activeFilter.value === 'today' || !structuralLeaderStock(theme) ? '领涨' : '龙头'
+}
+
 function themeStocks(theme) {
-  return Array.isArray(theme?.strong_stocks) ? theme.strong_stocks : []
+  const strongStocks = Array.isArray(theme?.strong_stocks) ? theme.strong_stocks : []
+  if (activeFilter.value !== 'today' && strongStocks.length) return strongStocks
+  return Array.isArray(theme?.today_leaders) ? theme.today_leaders : strongStocks
+}
+
+function displayedScore(theme) {
+  return activeFilter.value === 'today' ? theme.today_strength_score : theme.score
+}
+
+function scoreDetail(theme) {
+  return activeFilter.value === 'today'
+    ? `结构 ${numeric(theme.score)}`
+    : `今日 ${numeric(theme.today_strength_score)}`
+}
+
+function displayedCount(theme) {
+  return activeFilter.value === 'today' ? theme.today_up_count : theme.strong_stock_count
+}
+
+function displayedBreadth(theme) {
+  return activeFilter.value === 'today' ? theme.today_breadth_pct : theme.effective_breadth_pct
+}
+
+function breadthDetail(theme) {
+  return activeFilter.value === 'today'
+    ? `结构 ${numeric(theme.effective_breadth_pct)}%`
+    : `今日 ${numeric(theme.today_breadth_pct)}%`
 }
 
 function stockChangeTone(value) {
@@ -98,7 +144,7 @@ function stockChangeTone(value) {
 }
 
 function themeStockPanelId(theme) {
-  const index = themes.value.indexOf(theme)
+  const index = filteredThemes.value.indexOf(theme)
   return `themeStocks${index >= 0 ? index : 0}`
 }
 
@@ -178,6 +224,7 @@ function marketLabel(value) {
 }
 
 function stateLabel(theme) {
+  if (activeFilter.value === 'today') return `今日广度 ${numeric(theme.today_breadth_pct)}%`
   if (theme.mainline_confirmed) return '已确认主线'
   if (theme.intraday_state === 'intraday_mainline' || theme.raw_state === 'intraday_mainline') return '日内观察'
   return {
@@ -186,6 +233,7 @@ function stateLabel(theme) {
 }
 
 function themeTone(theme) {
+  if (activeFilter.value === 'today') return 'intraday'
   if (theme.mainline_confirmed) return 'confirmed'
   if (theme.intraday_state === 'intraday_mainline' || theme.raw_state === 'intraday_mainline') return 'intraday'
   if (theme.state === 'emerging') return 'emerging'
@@ -239,10 +287,10 @@ onBeforeUnmount(() => {
             <strong>{{ mainline.primary || '暂无' }}</strong>
             <small>{{ mainline.primary ? `强度 ${numeric(mainline.primary_score)} · 多只强势股跨日延续` : '等待多只强势股及核心股跨日延续' }}</small>
           </article>
-          <article class="mainline-summary-card intraday" :class="{ empty: !mainline.intraday_primary }">
-            <span>日内观察主线</span>
-            <strong>{{ mainline.intraday_primary || '暂无' }}</strong>
-            <small>{{ mainline.intraday_primary ? `当日强度 ${numeric(mainline.intraday_primary_score)}` : '当前没有达到日内主线阈值的题材' }}</small>
+          <article class="mainline-summary-card intraday" :class="{ empty: !mainline.today_primary }">
+            <span>今日领涨题材</span>
+            <strong>{{ mainline.today_primary || '暂无' }}</strong>
+            <small>{{ mainline.today_primary ? `今日强度 ${numeric(mainline.today_primary_score)} · 上涨广度 ${numeric(mainline.today_primary_breadth_pct)}%` : '当前没有达到今日观察阈值的题材' }}</small>
           </article>
           <article class="mainline-summary-card" :class="defensiveMarket ? 'risk' : 'positive'">
             <span>市场状态</span>
@@ -293,10 +341,10 @@ onBeforeUnmount(() => {
           </article>
         </div>
 
-        <div v-if="defensiveMarket || mainline.observation_reason" class="mainline-notice" :class="defensiveMarket ? 'warning' : 'info'">
-          <strong>{{ defensiveMarket ? '当前仅观察' : '日内强势待确认' }}</strong>
+        <div v-if="defensiveMarket || mainline.today_observation_reason || mainline.observation_reason" class="mainline-notice" :class="defensiveMarket ? 'warning' : 'info'">
+          <strong>{{ defensiveMarket ? '当前仅观察' : '今日强势待确认' }}</strong>
           <span v-if="defensiveMarket">市场处于防守状态，题材排序暂不作为开仓依据。</span>
-          <span v-else>{{ mainline.observation_reason }}</span>
+          <span v-else>{{ mainline.today_observation_reason || mainline.observation_reason }}</span>
         </div>
       </template>
     </section>
@@ -306,7 +354,7 @@ onBeforeUnmount(() => {
         <div class="mainline-section-head">
           <div>
             <h3>题材强度榜</h3>
-            <p>排名体现当前强势聚类；“日内观察”不是买入信号。</p>
+            <p>结构榜用于跨日主线确认；今日榜只反映当日上涨参与，不改变买入门槛。</p>
           </div>
           <div class="mainline-filters" role="group" aria-label="主线状态筛选">
             <button
@@ -324,11 +372,11 @@ onBeforeUnmount(() => {
         <div v-else class="theme-table" role="table" aria-label="题材强度排名">
           <div class="theme-table-head" role="row">
             <span role="columnheader">题材</span>
-            <span class="theme-column-help" role="columnheader" tabindex="0" data-tooltip="0–100分的题材综合评分，包含强股、广度、龙头、资金和延续性。" aria-label="强度：0到100分的题材综合评分，包含强股、广度、龙头、资金和延续性。">强度</span>
-            <span role="columnheader">强势股</span>
-            <span class="theme-column-help" role="columnheader" tabindex="0" data-tooltip="等效强势股数 ÷ 题材有效样本数，归一化后用于不同规模题材间比较。" aria-label="有效广度：等效强势股数除以题材有效样本数，归一化后用于不同规模题材间比较。">有效广度</span>
+            <span class="theme-column-help" role="columnheader" tabindex="0" data-tooltip="结构分用于跨日主线确认；今日强度=上涨广度45%+涨幅≥3%占比25%+涨幅≥5%占比15%+正中位涨幅15%。" aria-label="强度：结构分用于跨日主线确认，今日强度只反映当日上涨参与。">{{ activeFilter === 'today' ? '今日强度' : '结构分' }}</span>
+            <span role="columnheader">{{ activeFilter === 'today' ? '上涨家数' : '结构强股' }}</span>
+            <span class="theme-column-help" role="columnheader" tabindex="0" data-tooltip="结构广度是等效强势股占比；今日广度是实时上涨家数占有效报价样本的比例。" aria-label="广度：区分结构有效广度与今日上涨广度。">{{ activeFilter === 'today' ? '今日广度' : '结构广度' }}</span>
             <span class="theme-column-help" role="columnheader" tabindex="0" data-tooltip="与上一相邻交易日重合的核心强势股数量及比例。" aria-label="核心延续：与上一相邻交易日重合的核心强势股数量及比例。">核心延续</span>
-            <span role="columnheader">龙头股</span>
+            <span role="columnheader">{{ activeFilter === 'today' ? '日内领涨' : '结构龙头' }}</span>
             <span class="theme-column-help" role="columnheader" tabindex="0" data-tooltip="展示是否形成跨日延续，以及行业主力资金净额或数据状态。" aria-label="延续与资金：展示是否形成跨日延续，以及行业主力资金净额或数据状态。">延续与资金</span>
           </div>
           <article
@@ -339,24 +387,24 @@ onBeforeUnmount(() => {
             role="row"
           >
             <div class="theme-identity" role="cell">
-              <span class="theme-rank">{{ String(themes.indexOf(theme) + 1 || index + 1).padStart(2, '0') }}</span>
+              <span class="theme-rank">{{ String(index + 1).padStart(2, '0') }}</span>
               <div>
                 <h4>{{ theme.industry }}</h4>
                 <span class="theme-state">{{ stateLabel(theme) }}</span>
               </div>
             </div>
             <div class="theme-score" role="cell">
-              <strong>{{ numeric(theme.score) }}</strong>
-              <small>{{ signed(theme.score_change) }}</small>
+              <strong>{{ numeric(displayedScore(theme)) }}</strong>
+              <small>{{ scoreDetail(theme) }}</small>
             </div>
-            <div class="theme-data-cell strong-count" data-label="强势股" role="cell"><strong>{{ theme.strong_stock_count }}</strong><small>只</small></div>
+            <div class="theme-data-cell strong-count" :data-label="activeFilter === 'today' ? '上涨家数' : '结构强股'" role="cell"><strong>{{ displayedCount(theme) }}</strong><small>只</small></div>
             <div
               class="theme-data-cell breadth"
-              data-label="有效广度"
+              :data-label="activeFilter === 'today' ? '今日广度' : '结构广度'"
               role="cell"
               :title="effectiveBreadthTitle(theme)"
               :aria-label="effectiveBreadthTitle(theme)"
-            ><strong>{{ numeric(theme.effective_breadth_pct) }}%</strong></div>
+            ><strong>{{ numeric(displayedBreadth(theme)) }}%</strong><small>{{ breadthDetail(theme) }}</small></div>
             <div class="theme-data-cell continuity" data-label="核心延续" role="cell"><strong>{{ theme.core_overlap_count }}只</strong><small>{{ percent(theme.core_overlap_ratio) }}</small></div>
             <div class="theme-stock-list" data-label="龙头股" role="cell">
               <template v-if="leaderStock(theme)">
@@ -365,11 +413,11 @@ onBeforeUnmount(() => {
                   class="theme-leader-button"
                   :aria-expanded="expandedTheme === theme.industry"
                   :aria-controls="themeStockPanelId(theme)"
-                  :aria-label="`${theme.industry}龙头股 ${leaderStock(theme).name || leaderStock(theme).code}，${expandedTheme === theme.industry ? '收起' : '展开'}代表股列表`"
+                  :aria-label="`${theme.industry}${leaderBadge(theme)}股 ${leaderStock(theme).name || leaderStock(theme).code}，${expandedTheme === theme.industry ? '收起' : '展开'}代表股列表`"
                   @click="toggleThemeStocks(theme)"
                 >
                   <span class="theme-leader-identity">
-                    <span class="theme-leader-badge">龙头</span>
+                    <span class="theme-leader-badge">{{ leaderBadge(theme) }}</span>
                     <strong>{{ leaderStock(theme).name || leaderStock(theme).code }}</strong>
                     <small>{{ leaderStock(theme).code }}</small>
                   </span>
@@ -383,10 +431,10 @@ onBeforeUnmount(() => {
                   role="region"
                   :aria-label="`${theme.industry}代表股列表`"
                 >
-                  <div class="theme-stock-details-head"><span>代表股列表</span><span>当前涨跌幅</span></div>
+                  <div class="theme-stock-details-head"><span>{{ activeFilter === 'today' ? '今日领涨列表' : '结构代表股' }}</span><span>当前涨跌幅</span></div>
                   <div v-for="(stock, stockIndex) in themeStocks(theme)" :key="stock.code || stock.name" class="theme-stock-detail-row">
                     <span class="theme-stock-detail-name">
-                      <b v-if="stockIndex === 0">龙头</b>
+                      <b v-if="stockIndex === 0">{{ leaderBadge(theme) }}</b>
                       <strong>{{ stock.name || stock.code }}</strong>
                       <small>{{ stock.code }}</small>
                     </span>
