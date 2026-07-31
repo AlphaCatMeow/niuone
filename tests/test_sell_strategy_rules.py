@@ -412,6 +412,39 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertNotIn("600000", state["positions"])
         self.assertIn("仅暂停BUY", decision["execution_blocked_reasons"][0])
 
+    def test_daily_loss_budget_uses_today_change_instead_of_lifetime_loss(self):
+        historical_loss = {
+            "initial_cash": 100000.0,
+            "cash": 90000.0,
+            "positions": {
+                "600000": {
+                    "qty": 1000,
+                    "avg_cost": 10.0,
+                    "last_price": 6.0,
+                    "prev_close": 6.1,
+                    "buy_date_lots": {"2000-01-01": 1000},
+                }
+            },
+            "trade_log": [],
+        }
+        intraday_crash = {
+            **historical_loss,
+            "positions": {
+                "600000": {
+                    **historical_loss["positions"]["600000"],
+                    "prev_close": 10.0,
+                }
+            },
+        }
+
+        historical_blocked, historical_pct = trader.check_daily_loss_budget(historical_loss)
+        crash_blocked, crash_pct = trader.check_daily_loss_budget(intraday_crash)
+
+        self.assertFalse(historical_blocked)
+        self.assertAlmostEqual(historical_pct, -100 / 96100 * 100, places=6)
+        self.assertTrue(crash_blocked)
+        self.assertAlmostEqual(crash_pct, -4.0, places=6)
+
     def test_execute_actions_marks_sell_rule_on_remaining_position(self):
         original_execution_time = trader.is_a_share_execution_time
         original_quote = trader.execution_quote

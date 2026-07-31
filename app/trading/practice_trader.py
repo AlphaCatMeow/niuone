@@ -3677,18 +3677,56 @@ def get_adaptive_params() -> dict[str, float]:
 
 
 def check_daily_loss_budget(state: dict[str, Any]) -> tuple[bool, float]:
-    """检查今日累计亏损是否超过预算。"""
-    trade_log = state.get("trade_log", [])
+    """Check today's equity change without treating lifetime P&L as intraday loss."""
     today = today_key()
-    today_pnl = sum(t.get("pnl", 0) or 0 for t in trade_log if t.get("time","").startswith(today) and t.get("action")=="SELL")
     positions = state.get("positions") or {}
-    unrealized = sum(
-        (float(p.get("last_price") or p.get("avg_cost") or 0) - float(p.get("avg_cost") or 0))
-        * int(p.get("qty") or p.get("shares") or 0)
-        for p in positions.values()
-    )
-    total_eq = float(state.get("initial_cash") or INITIAL_CASH) + today_pnl + unrealized
-    pnl_pct = (total_eq / float(state.get("initial_cash") or INITIAL_CASH) - 1) * 100
+    current_equity = float(state.get("cash") or 0) + portfolio_market_value(positions)
+
+    prior_points: list[dict[str, Any]] = []
+    for key in ("daily_equity_history", "equity_history"):
+        for point in state.get(key) or []:
+            if not isinstance(point, dict) or str(point.get("time") or "")[:10] >= today:
+                continue
+            equity = _safe_float(point.get("equity"), 0.0)
+            if equity > 0 and math.isfinite(equity):
+                prior_points.append(point)
+    if prior_points:
+        previous_equity = _safe_float(
+            max(prior_points, key=lambda point: str(point.get("time") or "")).get("equity"),
+            0.0,
+        )
+        pnl_pct = (current_equity / previous_equity - 1) * 100 if previous_equity > 0 else 0.0
+        return pnl_pct <= DAILY_LOSS_BUDGET_PCT, pnl_pct
+
+    daily_pnl = 0.0
+    complete = True
+    for trade in state.get("trade_log") or []:
+        if not isinstance(trade, dict) or not str(trade.get("time") or "").startswith(today):
+            continue
+        if str(trade.get("action") or "").upper() != "SELL":
+            continue
+        trade_day_pnl = _safe_float(trade.get("day_pnl"), float("nan"))
+        if not math.isfinite(trade_day_pnl):
+            complete = False
+        else:
+            daily_pnl += trade_day_pnl
+    for pos in positions.values():
+        if not isinstance(pos, dict):
+            continue
+        qty = position_qty(pos)
+        if qty <= 0:
+            continue
+        price = _safe_float(pos.get("last_price") or pos.get("close") or pos.get("avg_cost"), 0.0)
+        prev_close = _safe_float(pos.get("prev_close"), 0.0)
+        position_pnl, _position_pnl_pct = position_today_pnl(pos, price, qty, prev_close)
+        if position_pnl is None or not math.isfinite(position_pnl):
+            complete = False
+        else:
+            daily_pnl += position_pnl
+    if not complete:
+        return False, 0.0
+    opening_equity = current_equity - daily_pnl
+    pnl_pct = daily_pnl / opening_equity * 100 if opening_equity > 0 else 0.0
     return pnl_pct <= DAILY_LOSS_BUDGET_PCT, pnl_pct
 
 
@@ -6737,6 +6775,13 @@ def execute_actions(
             cost_basis = qty * avg_cost
             realized_pnl = net_proceeds - cost_basis
             realized_pnl_pct = (realized_pnl / cost_basis * 100) if cost_basis > 0 else 0.0
+            day_reference_price = _safe_float(q.get("prev_close") or pos.get("prev_close"), 0.0)
+            day_pnl = net_proceeds - qty * day_reference_price if day_reference_price > 0 else None
+            day_pnl_pct = (
+                day_pnl / (qty * day_reference_price) * 100
+                if day_pnl is not None and qty > 0
+                else None
+            )
             exit_rule = classify_exit_rule(reason)
             entry_mark = compact_position_strategy_mark(pos, entry_strategy)
             exit_mark = apply_exit_strategy_mark(pos, entry_strategy, exit_rule, reason, source="SELL")
@@ -6769,6 +6814,8 @@ def execute_actions(
                              "stamp_duty": fees["stamp_duty"], "fee": fees["total_fee"],
                              "net_proceeds": round(net_proceeds, 2), "pnl": round(realized_pnl, 2),
                              "pnl_pct": round(realized_pnl_pct, 2), "price_source": price_source,
+                             "day_pnl": round(day_pnl, 2) if day_pnl is not None else None,
+                             "day_pnl_pct": round(day_pnl_pct, 2) if day_pnl_pct is not None else None,
                              "quote_time": q.get("quote_time") or now_ts(),
                              "quote_source": q.get("source") or price_source,
                              "order_position_pct": order_position_pct,
