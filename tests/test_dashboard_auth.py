@@ -2895,6 +2895,7 @@ console.log(JSON.stringify([
         self.assertIn('--header-control-height:34px', DASHBOARD_FRONTEND)
         self.assertIn('--header-control-height:28px', DASHBOARD_FRONTEND)
         self.assertIn('height:var(--header-control-height)', DASHBOARD_FRONTEND)
+        self.assertIn('.version-status { min-width:0; }', DASHBOARD_FRONTEND)
 
     def test_mobile_theme_toggle_does_not_keep_focus_or_hover_highlight(self):
         self.assertIn('.theme-toggle { -webkit-tap-highlight-color:transparent; }', DASHBOARD_FRONTEND)
@@ -4474,6 +4475,10 @@ process.stdout.write(JSON.stringify({{
         )
         self.assertIn('-webkit-line-clamp:2;', DASHBOARD_FRONTEND)
         self.assertIn('body.practice-market-summary-dialog-open { overflow:hidden; }', DASHBOARD_FRONTEND)
+        self.assertIn(
+            '.practice-market-summary-dialog { width:min(920px, calc(100vw - 32px));',
+            DASHBOARD_FRONTEND,
+        )
         self.assertIn('max-height:84dvh;', DASHBOARD_FRONTEND)
 
     def test_practice_actions_are_right_aligned_with_account_heading(self):

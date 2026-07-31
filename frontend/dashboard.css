@@ -93,7 +93,7 @@
     .practice-market-summary-btn:focus-visible, .practice-market-summary-view-btn:focus-visible, .practice-market-summary-close:focus-visible { outline:2px solid rgba(196,181,253,.86); outline-offset:2px; }
     .practice-market-summary-empty { margin-top:8px; color:#7f8da3; font-size:12px; }
     .practice-market-summary-backdrop { position:fixed; inset:0; z-index:87; display:grid; place-items:center; padding:18px; background:rgba(2,6,23,.70); backdrop-filter:blur(10px); }
-    .practice-market-summary-dialog { width:min(760px, calc(100vw - 32px)); max-height:min(82vh, 760px); max-height:min(82dvh, 760px); min-height:0; display:grid; grid-template-rows:auto minmax(0,1fr); overflow:hidden; border:1px solid rgba(167,139,250,.28); border-radius:16px; background:linear-gradient(180deg, rgba(15,23,42,.99), rgba(8,13,24,.99)); color:#cbd5e1; box-shadow:0 28px 90px rgba(0,0,0,.52), inset 0 1px 0 rgba(255,255,255,.06); font-size:13px; line-height:1.65; }
+    .practice-market-summary-dialog { width:min(920px, calc(100vw - 32px)); max-height:min(82vh, 760px); max-height:min(82dvh, 760px); min-height:0; display:grid; grid-template-rows:auto minmax(0,1fr); overflow:hidden; border:1px solid rgba(167,139,250,.28); border-radius:16px; background:linear-gradient(180deg, rgba(15,23,42,.99), rgba(8,13,24,.99)); color:#cbd5e1; box-shadow:0 28px 90px rgba(0,0,0,.52), inset 0 1px 0 rgba(255,255,255,.06); font-size:13px; line-height:1.65; }
     .practice-market-summary-dialog.stale { border-style:dashed; }
     .practice-market-summary-dialog-head { position:static; z-index:auto; display:flex; align-items:center; justify-content:space-between; gap:12px; min-width:0; padding:12px 14px; border-bottom:1px solid rgba(167,139,250,.16); background:rgba(30,41,59,.54); }
     .practice-market-summary-dialog-heading { min-width:0; }
@@ -1254,6 +1254,7 @@
       h1 { font-size:18px; line-height:1.06; letter-spacing:-.02em; }
       .settings-link, .header-link, .version-status, .refresh-pill { padding:5px 7px; gap:5px; }
       .settings-link, .header-link { font-size:12px; }
+      .version-status { min-width:0; }
       .version-status span { display:none; }
       .version-status b { font-size:12px; }
       .refresh-pill span { display:none; }
