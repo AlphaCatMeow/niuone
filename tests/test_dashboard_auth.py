@@ -993,6 +993,27 @@ console.log(JSON.stringify({
         self.assertEqual(payload['sector_tide_context'], tide_context)
         self.assertEqual(payload['schedule_slot'], '2026-07-10 10:00')
 
+    def test_b1_payload_preserves_explicit_empty_trade_candidates(self):
+        display_candidate = {'code': '600001', 'actionable': False}
+
+        payload = dashboard.normalize_b1_payload_for_trader({
+            'generated_at': '2026-07-31 11:35:08',
+            'items': [display_candidate],
+            'trade_items': [],
+        })
+
+        self.assertEqual(payload['items'], [])
+
+    def test_b1_payload_legacy_cache_without_trade_items_uses_display_candidates(self):
+        display_candidate = {'code': '600001', 'actionable': True}
+
+        payload = dashboard.normalize_b1_payload_for_trader({
+            'generated_at': '2026-07-31 11:35:08',
+            'items': [display_candidate],
+        })
+
+        self.assertEqual(payload['items'], [display_candidate])
+
     def test_no_candidate_b1_still_refreshes_and_logs_market_context(self):
         calls = {'summary_trigger': '', 'entries': []}
         summary = {
@@ -1392,6 +1413,41 @@ console.log(JSON.stringify({
                 worker.join(2)
             dashboard._trigger_b1_scan_unlocked = original_scan
             dashboard.B1_FULL_SCAN_LOCK = original_lock
+
+    def test_full_b1_scan_preserves_empty_trade_candidates(self):
+        original_b1_cache_file = dashboard.B1_CACHE_FILE
+        original_subprocess_run = subprocess.run
+        dashboard.B1_CACHE_FILE = self.tmp_path / 'b1_screen_latest.json'
+        display_candidate = {'code': '600001', 'actionable': False}
+        scanner_payload = {
+            'items': [display_candidate],
+            'candidates': [display_candidate],
+            'trade_items': [],
+            'generated_at': '2026-07-31 11:35:08',
+            'total_analyzed': 1,
+        }
+        try:
+            subprocess.run = lambda *_args, **_kwargs: subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=json.dumps(scanner_payload),
+                stderr='',
+            )
+
+            result = dashboard._trigger_b1_scan_unlocked(
+                force=True,
+                decision_mode='none',
+            )
+            cached = json.loads(dashboard.B1_CACHE_FILE.read_text(encoding='utf-8'))
+
+            self.assertEqual(result['count'], 1)
+            self.assertEqual(result['trade_items'], [])
+            self.assertEqual(result['trade_count'], 0)
+            self.assertEqual(cached['trade_items'], [])
+            self.assertEqual(cached['trade_count'], 0)
+        finally:
+            subprocess.run = original_subprocess_run
+            dashboard.B1_CACHE_FILE = original_b1_cache_file
 
     def test_recent_manual_candidates_respect_reuse_window(self):
         original_seconds = dashboard.PRACTICE_MANUAL_SCAN_REUSE_SECONDS
@@ -3635,6 +3691,30 @@ process.stdout.write(JSON.stringify({{
             self.assertEqual(fallback['items'], [{'code': 'legacy'}])
             self.assertEqual(fallback['count'], 1)
             self.assertEqual(fallback['generated_at'], 'legacy')
+        finally:
+            dashboard.MULTI_STRATEGY_CACHE_FILE = original_multi_strategy_cache_file
+            dashboard.B1_CACHE_FILE = original_b1_cache_file
+
+    def test_practice_candidates_cache_preserves_empty_trade_candidates(self):
+        original_multi_strategy_cache_file = dashboard.MULTI_STRATEGY_CACHE_FILE
+        original_b1_cache_file = dashboard.B1_CACHE_FILE
+        dashboard.MULTI_STRATEGY_CACHE_FILE = self.tmp_path / 'multi_strategy_latest.json'
+        dashboard.B1_CACHE_FILE = self.tmp_path / 'b1_screen_latest.json'
+        try:
+            dashboard.MULTI_STRATEGY_CACHE_FILE.write_text(
+                json.dumps({
+                    'items': [{'code': '600001', 'best_score': 8.7, 'actionable': False}],
+                    'trade_items': [],
+                    'generated_at': '2026-07-31 11:35:08',
+                }),
+                encoding='utf-8',
+            )
+
+            payload = dashboard.load_practice_candidates_cache()
+
+            self.assertEqual(len(payload['items']), 1)
+            self.assertEqual(payload['trade_items'], [])
+            self.assertEqual(payload['trade_count'], 0)
         finally:
             dashboard.MULTI_STRATEGY_CACHE_FILE = original_multi_strategy_cache_file
             dashboard.B1_CACHE_FILE = original_b1_cache_file

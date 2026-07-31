@@ -1622,6 +1622,25 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertEqual(state["decision_log"][-1]["decision"]["market_guidance"]["max_new_buys_per_decision"], 1)
         self.assertEqual(result["portfolio"]["market_decision_context"]["tone"], "defensive")
 
+    def test_decision_candidates_preserve_explicit_empty_trade_pool(self):
+        display_candidate = {
+            "code": "600000",
+            "best_strategy": "niu_leader",
+            "best_score": 9.0,
+            "entry_threshold": 8.0,
+            "actionable": True,
+            "hard_blockers": [],
+        }
+
+        candidates = trader.decision_candidate_rows({
+            "items": [display_candidate],
+            "trade_items": [],
+        })
+        legacy_candidates = trader.decision_candidate_rows({"items": [display_candidate]})
+
+        self.assertEqual(candidates, [])
+        self.assertEqual(legacy_candidates, [display_candidate])
+
     def test_morning_schedule_completed_during_lunch_defers_to_13(self):
         due_at = trader.deferred_execution_due_at(
             "2026-06-25 11:20",

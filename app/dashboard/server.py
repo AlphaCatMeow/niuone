@@ -1414,8 +1414,22 @@ def get_practice_payload_fast() -> dict[str, Any]:
         annotate_practice_snapshot(payload, mode="fast", history_scope="unavailable")
         return annotate_practice_payload_clock(payload)
 
+def _candidate_rows(payload: dict[str, Any], *keys: str) -> list[Any]:
+    """Return the first explicitly supplied candidate list, preserving empties.
+
+    Older caches may not contain ``trade_items`` and still need to fall back to
+    their display candidates. A present empty list, however, means the scanner
+    intentionally found no trade-ready candidates and must not be widened.
+    """
+    for key in keys:
+        if key in payload:
+            value = payload.get(key)
+            return value if isinstance(value, list) else []
+    return []
+
+
 def normalize_b1_payload_for_trader(b1_payload: dict[str, Any]) -> dict[str, Any]:
-    items = b1_payload.get("trade_items") or b1_payload.get("items") or b1_payload.get("candidates") or []
+    items = _candidate_rows(b1_payload, "trade_items", "items", "candidates")
     payload = {"items": items, "generated_at": b1_payload.get("generated_at", "")}
     if isinstance(b1_payload.get("market_snapshot"), dict):
         payload["market_snapshot"] = b1_payload.get("market_snapshot")
@@ -1872,8 +1886,12 @@ def load_practice_candidates_cache() -> dict[str, Any]:
                 ]
 
             display_items = sort_candidates_by_score(active_rows(items))
-            candidates = sort_candidates_by_score(active_rows(parsed.get("candidates") or display_items))
-            trade_items = sort_candidates_by_score(active_rows(parsed.get("trade_items") or display_items))
+            candidates = sort_candidates_by_score(
+                active_rows(_candidate_rows(parsed, "candidates", "items"))
+            )
+            trade_items = sort_candidates_by_score(
+                active_rows(_candidate_rows(parsed, "trade_items", "items", "candidates"))
+            )
             return {
                 **parsed,
                 "generated_at": parsed.get("generated_at", ""),
@@ -2232,9 +2250,9 @@ def _trigger_b1_scan_unlocked(
         result = subprocess.run(args, capture_output=True, text=True, timeout=B1_SCAN_TIMEOUT_SECONDS)
         if result.returncode == 0:
             data = json.loads(result.stdout)
-            items = data.get("items") or data.get("candidates") or []
-            candidates = data.get("candidates") or items
-            trade_items = data.get("trade_items") or items
+            items = _candidate_rows(data, "items", "candidates")
+            candidates = _candidate_rows(data, "candidates", "items")
+            trade_items = _candidate_rows(data, "trade_items", "items", "candidates")
             schedule_meta = {}
             if schedule_slot:
                 schedule_meta = {

@@ -1794,6 +1794,15 @@ def candidate_is_buyable(candidate: dict[str, Any] | None) -> bool:
     return not candidate_buy_blockers(candidate)
 
 
+def decision_candidate_rows(b1_payload: dict[str, Any]) -> list[Any]:
+    """Select decision candidates without widening an explicit empty trade pool."""
+    for key in ("trade_items", "items", "candidates"):
+        if key in b1_payload:
+            value = b1_payload.get(key)
+            return value if isinstance(value, list) else []
+    return []
+
+
 def current_stock_universe() -> tuple[str, ...]:
     return selected_stock_universe(os.environ.get(STOCK_UNIVERSE_ENV))
 
@@ -7016,7 +7025,7 @@ def run_decision_after_b1(b1_payload: dict[str, Any], force: bool = False) -> di
     # 自适应参数
     adaptive = get_adaptive_params()
     
-    raw_candidates = b1_payload.get("trade_items") or b1_payload.get("items") or b1_payload.get("candidates") or []
+    raw_candidates = decision_candidate_rows(b1_payload)
     candidates = [
         c for c in raw_candidates
         if (
