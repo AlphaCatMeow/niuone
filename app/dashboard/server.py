@@ -1635,6 +1635,8 @@ def refresh_b1_candidate_cache_from_current_pool() -> dict[str, Any]:
                 "industry_flow_generated_at": best.get("industry_flow_generated_at"),
                 "ema20": best.get("ema20"),
                 "ema50": best.get("ema50"),
+                "atr": best.get("atr"),
+                "atr_period": best.get("atr_period"),
                 "atr20": best.get("atr20"),
                 "stop_price": best.get("stop_price"),
                 "stop_source": best.get("stop_source"),

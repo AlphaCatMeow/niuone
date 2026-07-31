@@ -88,6 +88,8 @@ def niu_candidate(**updates) -> dict:
         "stop_price": 9.5,
         "stop_source": "niu_structure_low",
         "stop_distance_pct": 5.0,
+        "atr": 0.3,
+        "atr_period": 14,
         "atr20": 0.3,
         "gap_buffer_pct": 1.0,
         "execution_buffer_pct": 0.2,
@@ -429,6 +431,8 @@ class NiuOneStrategyTests(unittest.TestCase):
         self.assertEqual(result["mainline_state"], "mainline")
         self.assertEqual(result["stock_role"], "leader")
         self.assertEqual(result["stop_source"], "niu_structure_low")
+        self.assertEqual(result["atr_period"], 14)
+        self.assertEqual(result["atr"], result["atr20"])
         self.assertEqual(result["per_trade_risk_budget_pct"], 1.5)
         self.assertFalse(any("BBI" in blocker for blocker in result["hard_blockers"]))
 
@@ -600,6 +604,9 @@ class NiuOneStrategyTests(unittest.TestCase):
             self.assertEqual(len(executed), 1)
             pos = state["positions"]["600000"]
             self.assertEqual(pos["entry_stop_source"], "niu_structure_low")
+            self.assertEqual(pos["entry_atr"], 0.3)
+            self.assertEqual(pos["entry_atr_period"], 14)
+            self.assertEqual(pos["entry_atr20"], 0.3)
             self.assertEqual(pos["mainline_state"], "mainline")
             self.assertEqual(pos["stock_role"], "leader")
             self.assertEqual(pos["risk_budget_regime"], "offensive")
@@ -611,6 +618,95 @@ class NiuOneStrategyTests(unittest.TestCase):
             blocked = trader.execute_actions(blocked_state, blocked_decision, [niu_candidate()], True, "连续竞价交易时段", market)
             self.assertEqual(blocked, [])
             self.assertIn("风险预算动态上限", blocked_decision["execution_blocked_reason"])
+        finally:
+            trader.is_a_share_execution_time = original_time
+            trader.execution_quote = original_quote
+
+    def test_execution_rechecks_niuone_structural_limits_by_market_regime(self):
+        original_time = trader.is_a_share_execution_time
+        original_quote = trader.execution_quote
+        try:
+            trader.is_a_share_execution_time = lambda dt=None: (True, "连续竞价交易时段")
+            trader.execution_quote = lambda code: {"price": 10.0, "name": "牛牛测试", "source": "test"}
+            market = {
+                "allow_new_buys": True,
+                "max_open_positions": 6,
+                "max_new_buys_per_decision": 2,
+                "max_total_position_pct": 80,
+                "min_cash_reserve_pct": 20,
+            }
+
+            offensive_state = {"cash": 100000.0, "positions": {}, "trade_log": []}
+            offensive_decision = {
+                "actions": [{"action": "BUY", "code": "600000", "shares": 100, "reason": "牛牛领航确认"}]
+            }
+            offensive_candidate = niu_candidate(
+                stop_price=9.28,
+                stop_distance_pct=7.2,
+                stop_atr=2.4,
+                atr=None,
+                atr_period=None,
+                atr20=0.3,
+                effective_loss_distance_pct=8.4,
+            )
+            executed = trader.execute_actions(
+                offensive_state,
+                offensive_decision,
+                [offensive_candidate],
+                True,
+                "连续竞价交易时段",
+                market,
+            )
+            self.assertEqual(len(executed), 1)
+            self.assertEqual(offensive_state["positions"]["600000"]["risk_budget_regime"], "offensive")
+
+            atr_blocked_state = {"cash": 100000.0, "positions": {}, "trade_log": []}
+            atr_blocked_decision = {
+                "actions": [{"action": "BUY", "code": "600000", "shares": 100, "reason": "牛牛领航确认"}]
+            }
+            atr_blocked_candidate = niu_candidate(
+                stop_price=9.1,
+                stop_distance_pct=9.0,
+                stop_atr=3.0,
+                atr=0.3,
+                atr20=0.3,
+                effective_loss_distance_pct=10.2,
+            )
+            blocked = trader.execute_actions(
+                atr_blocked_state,
+                atr_blocked_decision,
+                [atr_blocked_candidate],
+                True,
+                "连续竞价交易时段",
+                market,
+            )
+            self.assertEqual(blocked, [])
+            self.assertIn("10%/2.5ATR", atr_blocked_decision["execution_blocked_reason"])
+
+            rotation_state = {"cash": 100000.0, "positions": {}, "trade_log": []}
+            rotation_decision = {
+                "actions": [{"action": "BUY", "code": "600000", "shares": 100, "reason": "牛牛领航确认"}]
+            }
+            rotation_candidate = niu_candidate(
+                market_regime="rotation",
+                stop_price=9.3,
+                stop_distance_pct=7.0,
+                stop_atr=1.75,
+                atr=0.4,
+                atr20=0.4,
+                effective_loss_distance_pct=8.2,
+                per_trade_risk_budget_pct=1.0,
+            )
+            executed = trader.execute_actions(
+                rotation_state,
+                rotation_decision,
+                [rotation_candidate],
+                True,
+                "连续竞价交易时段",
+                market,
+            )
+            self.assertEqual(len(executed), 1)
+            self.assertEqual(rotation_state["positions"]["600000"]["risk_budget_regime"], "rotation")
         finally:
             trader.is_a_share_execution_time = original_time
             trader.execution_quote = original_quote

@@ -103,6 +103,8 @@ from strategies.niuone_risk import (
     NIUONE_ABSOLUTE_POSITION_CAP_PCT,
     NIUONE_MAX_OPEN_POSITIONS,
     niuone_risk_budget,
+    niuone_structural_stop_limits,
+    niuone_structure_risk_ok,
 )
 from strategies.scoring.common import find_n_structure_prior_low as _find_n_structure_prior_low
 from strategies.scoring.zettaranc import zettaranc_industry_flow_signal
@@ -6401,7 +6403,31 @@ def execute_actions(
                 existing_stop_price = _safe_float((existing_pos or {}).get("entry_stop_price"), 0.0) if old_qty > 0 else 0.0
                 tide_effective_stop_price = max(candidate_stop_price, existing_stop_price)
                 actual_stop_distance_pct = structural_stop_distance_pct(float(price), tide_effective_stop_price)
-                if actual_stop_distance_pct <= 0 or actual_stop_distance_pct > 6:
+                if niuone_buy:
+                    entry_atr = _safe_float(
+                        candidate.get("atr") or candidate.get("atr14") or candidate.get("atr20"),
+                        0.0,
+                    )
+                    actual_stop_atr = (
+                        (float(price) - tide_effective_stop_price) / entry_atr
+                        if entry_atr > 0 and tide_effective_stop_price > 0
+                        else 0.0
+                    )
+                    structural_limits = niuone_structural_stop_limits(regime)
+                    if not niuone_structure_risk_ok(
+                        actual_stop_distance_pct,
+                        actual_stop_atr,
+                        regime,
+                    ):
+                        add_execution_block(
+                            decision,
+                            code,
+                            f"牛牛战法缺少有效结构止损/ATR，或止损距离超过"
+                            f"{structural_limits['max_stop_distance_pct']:g}%/"
+                            f"{structural_limits['max_stop_atr']:g}ATR",
+                        )
+                        continue
+                elif actual_stop_distance_pct <= 0 or actual_stop_distance_pct > 6:
                     add_execution_block(decision, code, f"{dynamic_label}缺少有效结构止损，或止损距离超过6%")
                     continue
                 tide_gap_buffer_pct = max(
@@ -6546,7 +6572,13 @@ def execute_actions(
                     structural_stop_distance_pct(float(price), pos["entry_stop_price"]),
                     3,
                 )
-                pos["entry_atr20"] = round(_safe_float(candidate.get("atr20")), 3)
+                entry_atr = _safe_float(
+                    candidate.get("atr") or candidate.get("atr14") or candidate.get("atr20"),
+                    0.0,
+                )
+                pos["entry_atr"] = round(entry_atr, 3)
+                pos["entry_atr_period"] = int(_safe_float(candidate.get("atr_period"), 14.0))
+                pos["entry_atr20"] = round(entry_atr, 3)
                 pos["gap_buffer_pct"] = round(tide_gap_buffer_pct, 3)
                 pos["execution_buffer_pct"] = round(tide_execution_buffer_pct, 3)
                 pos["effective_loss_distance_pct"] = round(tide_effective_loss_distance_pct, 3)

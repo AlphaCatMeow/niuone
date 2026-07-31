@@ -85,7 +85,10 @@ def _return_pct(
     return (close / base - 1) * 100
 
 
-def _atr(rows: list[dict[str, Any]], lookback: int = 14) -> float | None:
+NIUONE_ATR_LOOKBACK = 14
+
+
+def _atr(rows: list[dict[str, Any]], lookback: int = NIUONE_ATR_LOOKBACK) -> float | None:
     ranges: list[float] = []
     for index in range(max(1, len(rows) - lookback), len(rows)):
         high = safe_float(rows[index].get("high"))
@@ -947,6 +950,9 @@ def _entry_metrics(rows: list[dict[str, Any]], context: dict[str, Any]) -> dict[
         "close": close,
         "ema20": ema20,
         "ema50": ema50,
+        "atr": atr,
+        "atr_period": NIUONE_ATR_LOOKBACK,
+        # Compatibility alias retained for historical candidate and position data.
         "atr20": atr,
         "distance_pct": (close / ema20 - 1) * 100,
         "extension_atr": extension_atr,
@@ -1065,6 +1071,8 @@ def _payload(
         "news_adjustment": stock.get("news_adjustment", 0.0),
         "ema20": safe_round(metrics["ema20"], 3),
         "ema50": safe_round(metrics["ema50"], 3),
+        "atr": safe_round(metrics["atr"], 3),
+        "atr_period": metrics["atr_period"],
         "atr20": safe_round(metrics["atr20"], 3),
         "distance_pct": safe_round(metrics["distance_pct"], 2),
         "extension_atr": safe_round(metrics["extension_atr"], 2),
