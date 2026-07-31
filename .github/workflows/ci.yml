@@ -54,3 +54,22 @@ jobs:
 
       - name: Validate project
         run: ./scripts/validate.sh
+
+  windows-launcher:
+    name: Windows launcher
+    runs-on: windows-2022
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Test first-run launcher
+        run: python -m unittest discover -s tests -p "test_run_bat_windows.py" -v

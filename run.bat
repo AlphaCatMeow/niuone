@@ -118,16 +118,16 @@ mkdir "%DASHBOARD_HOME%\logs" >nul 2>nul
 mkdir "%LOCAL_DATA_DIR%" >nul 2>nul
 
 set "VENV_CREATED=0"
-if not exist "%PYTHON_BIN%" (
-    echo == Creating Python virtual environment ==
-    call :find_python_launcher
-    if errorlevel 1 exit /b 1
-    mkdir "%VENV_DIR%" >nul 2>nul
-    call %PYTHON_LAUNCHER% -m venv "%VENV_DIR%"
-    if errorlevel 1 exit /b 1
-    set "PYTHON_BIN=%DEFAULT_PYTHON_BIN%"
-    set "VENV_CREATED=1"
-)
+if exist "%PYTHON_BIN%" goto venv_ready
+echo == Creating Python virtual environment ==
+call :find_python_launcher
+if errorlevel 1 exit /b 1
+mkdir "%VENV_DIR%" >nul 2>nul
+call %PYTHON_LAUNCHER% -m venv "%VENV_DIR%"
+if errorlevel 1 exit /b 1
+set "PYTHON_BIN=%DEFAULT_PYTHON_BIN%"
+set "VENV_CREATED=1"
+:venv_ready
 
 if "%SKIP_INSTALL%"=="1" (
     echo == Skipping dependency installation ==

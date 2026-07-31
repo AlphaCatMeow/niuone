@@ -33,6 +33,20 @@ class ServiceLauncherTests(unittest.TestCase):
             self.assertIn("web", text.lower())
         self.assertIn("build-frontend.ps1", windows_launcher)
 
+    def test_windows_launcher_resolves_python_before_creating_venv(self):
+        launcher = (ROOT / "run.bat").read_text(encoding="utf-8")
+        start = launcher.index('set "VENV_CREATED=0"')
+        end = launcher.index(":venv_ready", start)
+        bootstrap = launcher[start:end]
+
+        self.assertIn('if exist "%PYTHON_BIN%" goto venv_ready', bootstrap)
+        self.assertNotIn('if not exist "%PYTHON_BIN%" (', bootstrap)
+        self.assertLess(
+            bootstrap.index("call :find_python_launcher"),
+            bootstrap.index('call %PYTHON_LAUNCHER% -m venv "%VENV_DIR%"'),
+        )
+        self.assertIn("DisableDelayedExpansion", launcher)
+
     def test_unix_manager_covers_macos_and_linux_processes(self):
         text = (ROOT / "scripts" / "manage-long-running.sh").read_text(encoding="utf-8")
         for value in (
