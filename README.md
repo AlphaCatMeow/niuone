@@ -457,7 +457,7 @@ curl -s -o /dev/null -w 'SNAPSHOT HTTP:%{http_code} TOTAL:%{time_total}\n' http:
 
 ### 依赖安装失败
 
-首次启动需要从 PyPI 下载依赖。请检查网络和本机 pip 配置，然后重新运行启动脚本。
+首次启动需要从 PyPI 下载依赖。请检查网络和本机 pip 配置，然后重新运行启动脚本。中国大陆网络出现连接超时时，可按[独立运行说明](docs/STANDALONE.md#中国大陆首次安装超时)配置用户级 PyPI 镜像以及有限的超时和重试次数。
 
 ### 端口 `8787` 已被占用
 

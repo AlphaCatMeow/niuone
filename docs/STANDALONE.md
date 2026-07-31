@@ -46,6 +46,28 @@ Windows：
 run.bat --port 8877
 ```
 
+### 中国大陆首次安装超时
+
+如果首次运行在 `pip install` 阶段出现连接或读取超时，通常是当前网络访问 PyPI 不稳定，并非依赖缺失。可以在运行 `run.bat` 前配置用户级 pip 镜像，并为网络请求设置有限的超时和重试次数。以下命令以[清华大学开源软件镜像站](https://mirrors.tuna.tsinghua.edu.cn/help/pypi/)为例：
+
+```cmd
+python -m pip config --user set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+python -m pip config --user set global.timeout 60
+python -m pip config --user set global.retries 10
+python -m pip config debug
+```
+
+如果系统只提供 Python Launcher，请将命令中的 `python` 替换为 `py -3`。上述设置会写入用户级 `%APPDATA%\pip\pip.ini`，等价内容如下：
+
+```ini
+[global]
+index-url = https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+timeout = 60
+retries = 10
+```
+
+确认 `pip config debug` 显示预期配置后，重新运行 `run.bat`。也可以改用所在网络可信且支持 HTTPS 的其他镜像；不要通过 `trusted-host` 或 HTTP 绕过证书验证。pip 配置文件位置和覆盖优先级详见 [pip 官方配置文档](https://pip.pypa.io/en/stable/topics/configuration/)。
+
 公开页面和完整设置页使用同一个 FastAPI/Uvicorn 进程与端口；默认分别位于 `8787/` 和 `8787/admin`。Vue 开发服务器 `5173` 仅用于本机热更新，不参与生产部署。设置页可以通过域名访问，但配置与操作 API 仍需要管理员密码会话。增量快照和 CDN 配置详见 [Dashboard 增量展示与部署](DASHBOARD_V2.md)。
 
 ## 隔离启动

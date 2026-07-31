@@ -457,7 +457,7 @@ Install Python 3.11 or later and confirm that `python3 --version` prints the ver
 
 ### Dependency Installation Fails
 
-The first startup downloads dependencies from PyPI. Check your network connection and local pip configuration, then run the startup script again.
+The first startup downloads dependencies from PyPI. Check your network connection and local pip configuration, then run the startup script again. If PyPI connections time out from mainland China, follow the [Standalone Operation Guide](docs/STANDALONE_EN.md#first-install-timeouts-in-mainland-china) to configure a user-level mirror with bounded timeouts and retries.
 
 ### Port `8787` Is Already in Use
 

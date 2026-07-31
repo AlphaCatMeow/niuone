@@ -46,6 +46,28 @@ Windows:
 run.bat --port 8877
 ```
 
+### First-Install Timeouts in Mainland China
+
+If the first run reports a connection or read timeout during `pip install`, the current network may have unreliable access to PyPI; this does not indicate a missing project dependency. Before running `run.bat`, configure a user-level pip mirror and bounded request timeout and retry values. The following example uses the [Tsinghua Open Source Mirror](https://mirrors.tuna.tsinghua.edu.cn/help/pypi/):
+
+```cmd
+python -m pip config --user set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+python -m pip config --user set global.timeout 60
+python -m pip config --user set global.retries 10
+python -m pip config debug
+```
+
+If only the Python Launcher is available, replace `python` with `py -3`. These commands write the following equivalent configuration to the user-level `%APPDATA%\pip\pip.ini`:
+
+```ini
+[global]
+index-url = https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+timeout = 60
+retries = 10
+```
+
+After `pip config debug` shows the expected settings, run `run.bat` again. You may use another trusted HTTPS mirror that is reachable from your network; do not bypass certificate verification with `trusted-host` or HTTP. See the [official pip configuration documentation](https://pip.pypa.io/en/stable/topics/configuration/) for configuration file locations and precedence.
+
 The public page and complete settings UI use one FastAPI/Uvicorn process and port, at `8787/` and `8787/admin` by default. Vite's port `5173` is only for local hot reload and is not part of production deployment. The settings page may be accessed through the domain, while configuration and action APIs still require an administrator session. See [Dashboard Incremental Delivery and Deployment](DASHBOARD_V2_EN.md) for snapshot and CDN guidance.
 
 ## Isolated Startup
