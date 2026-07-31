@@ -4484,7 +4484,11 @@ def evaluate_sell_signal(
         pos["trailing_stop_activated"] = True
 
     hold_days = holding_days(pos, today)
-    hold_trading_days = trading_holding_days(pos, today) if shaofu_position else hold_days
+    hold_trading_days = (
+        trading_holding_days(pos, today)
+        if shaofu_position or sector_tide_position or niuone_position
+        else hold_days
+    )
     soft_exit_confirmation_key = soft_exit_confirmation_key or today
     j_now = pos.get("kdj_j")
     j_prev = pos.get("kdj_j_prev")
@@ -4554,7 +4558,7 @@ def evaluate_sell_signal(
 
         strategy_time_exit = evaluate_strategy_time_exit(
             entry_strategy=entry_strategy,
-            hold_days=hold_days,
+            hold_days=hold_trading_days,
             max_pnl_pct=max_pnl_pct,
             pnl_pct=pnl_pct,
             time_exit_allowed=time_exit_allowed,

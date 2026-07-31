@@ -989,6 +989,37 @@ class NiuOneStrategyTests(unittest.TestCase):
         self.assertEqual(signal["signal"], "niu_2r_partial")
         self.assertEqual(signal["sell_ratio"], 0.5)
 
+    def test_niuone_time_exit_counts_trading_days_across_a_weekend(self):
+        pos = {
+            "qty": 100,
+            "avg_cost": 10.0,
+            "last_price": 10.0,
+            "close": 10.0,
+            "buy_strategy": "niu_emerging",
+            "entry_stop_price": 9.0,
+            "entry_stop_source": "niu_structure_low",
+            "mainline_score": 70,
+            "mainline_state": "emerging",
+            "mainline_weak_count": 0,
+            "buy_date_lots": {"2026-07-24": 100},
+        }
+
+        monday = trader.evaluate_sell_signal(
+            "600000",
+            pos,
+            "2026-07-27",
+            time_exit_allowed=True,
+        )
+        tuesday = trader.evaluate_sell_signal(
+            "600000",
+            pos,
+            "2026-07-28",
+            time_exit_allowed=True,
+        )
+
+        self.assertIsNone(monday)
+        self.assertEqual(tuesday["signal"], "niu_emerging_unconfirmed")
+
     def test_niuone_hard_caps_total_open_positions_at_five(self):
         original_time = trader.is_a_share_execution_time
         original_quote = trader.execution_quote
