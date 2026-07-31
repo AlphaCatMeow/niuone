@@ -107,7 +107,7 @@ Recommended configuration:
 |---|---|---|
 | X watchlist monitoring and daily U.S. institutional ratings report | Grok | `DASHBOARD_GROK_BASE_URL`, `DASHBOARD_GROK_API_KEY`, `DASHBOARD_GROK_MODEL`, `DASHBOARD_GROK_API_MODE`, `X_WATCHLIST_MAX_TOKENS`, `US_RATING_MAX_TOKENS` |
 | Enhanced A-share market summary | A model compatible with `/chat/completions` | `A_SHARE_MODEL_SUMMARY_BASE_URL`, `A_SHARE_MODEL_SUMMARY_API_KEY`, `A_SHARE_MODEL_SUMMARY_MODEL`, `A_SHARE_MODEL_SUMMARY_MAX_TOKENS`; reuses `DASHBOARD_GROK_*` when left empty |
-| News pre-check for A-share candidates | A model with real-time search capabilities | `DASHBOARD_NEWS_BASE_URL`, `DASHBOARD_NEWS_API_KEY`, `DASHBOARD_NEWS_MODEL`, `DASHBOARD_NEWS_API_MODE`, `DASHBOARD_NEWS_MAX_TOKENS`, `DASHBOARD_NEWS_CONCURRENCY` |
+| News precheck for A-share candidates and Dragon-Tiger limit-up/consecutive-list signals | A model with real-time search capabilities | `DASHBOARD_NEWS_BASE_URL`, `DASHBOARD_NEWS_API_KEY`, `DASHBOARD_NEWS_MODEL`, `DASHBOARD_NEWS_API_MODE`, `DASHBOARD_NEWS_MAX_TOKENS`, `DASHBOARD_NEWS_CONCURRENCY` |
 | iWencai dragon-tiger research data | Tonghuashun iWencai OpenAPI | `IWENCAI_ENABLED`, `IWENCAI_BASE_URL`, `IWENCAI_API_KEY`, `IWENCAI_TIMEOUT_SECONDS`, `IWENCAI_MAX_RETRIES`, `IWENCAI_MAX_CONCURRENCY`, `IWENCAI_CACHE_TTL_SECONDS`, `IWENCAI_DRAGON_TIGER_CRON` |
 | Trading decisions after stock selection | DeepSeek recommended; other compatible models may be used | `DASHBOARD_DECISION_BASE_URL`, `DASHBOARD_DECISION_API_KEY`, `DASHBOARD_DECISION_MODEL` |
 | Trading-decision intelligence bundle | Aggregated locally; no additional model required | `DASHBOARD_DECISION_INTELLIGENCE_ENABLED`, `DASHBOARD_DECISION_INTELLIGENCE_TTL_SECONDS`, `DASHBOARD_DECISION_INTELLIGENCE_MAX_ITEMS` |
@@ -156,11 +156,16 @@ By default, runtime data is stored in:
 | `DASHBOARD_CONFIG` | `$DASHBOARD_HOME/config.yaml` | YAML configuration for model providers and models |
 | `DASHBOARD_PUSH_HISTORY_DB` | `$DASHBOARD_HOME/push_history.db` | Message history database |
 | `DASHBOARD_PORTFOLIO_STATE` | `$DASHBOARD_HOME/cron/output/niuniu_practice_portfolio.json` | Simulated-account state |
+| `DASHBOARD_ACTIVE_STRATEGY` | `niuone` | Active independent strategy; changes apply to the next scan without a restart |
+| `DASHBOARD_PRACTICE_SCHEDULE_TIMES` | `09:25,10:00,10:30,11:00,11:20,13:00,13:30,14:00,14:30,14:50` | Shared schedule for market summaries, screening, and simulated decisions |
 | `X_WATCHLIST_ACCOUNTS` | Empty | Comma-separated list of monitored tweet authors |
 | `DASHBOARD_DECISION_INTELLIGENCE_ENABLED` | `1` | Whether to enable the global intelligence bundle for trading decisions |
 | `DASHBOARD_TRADE_DISCIPLINE_TEXT` | Empty | Trading-discipline text for the trading-decision prompt; the built-in default discipline is used when empty |
 | `DASHBOARD_MAX_TOTAL_POSITION_PCT` | `80` | Global total-exposure cap; `zettaranc` and `sector_tide` enforce the stricter of the global limit and the strategy-suite hard cap, while other suites mainly use it as model guidance |
 | `DASHBOARD_MIN_CASH_RESERVE_PCT` | `20` | Global cash buffer; `zettaranc` and `sector_tide` also enforce it at execution time, while other suites mainly use it as model guidance |
+| `DASHBOARD_NIUONE_MAINLINE_MINUTE_REFRESH_ENABLED` | `1` | Reuse the full-market quote sample to refresh Theme Strength; requires a restart |
+| `DASHBOARD_MARKET_BREADTH_SAMPLE_INTERVAL_SECONDS` | `30` | Shared full-market interval for Theme Strength and Market Sentiment, from `30` through `600` seconds; requires a restart |
+| `DASHBOARD_AUTO_VERSION_CHECK_ENABLED` | `1` | Check Docker Hub for a newer release on page load; applies at runtime and never installs an update automatically |
 
 After settings are saved, configurations that support hot application are used immediately for subsequent requests. Restart the local service for configurations that require a restart.
 
@@ -204,6 +209,24 @@ run.bat --service --port 8877 --no-browser
 
 All three processes are registered. After the “NiuNiu U.S. Stocks” feature is disabled, the X watch-source daemon skips collection and remains in a low-frequency sleep state, so it does not need to be uninstalled separately.
 
+### Updating a Source Deployment
+
+The version check on the settings page and home page only reports whether Docker Hub has a higher strict SemVer release. It never pulls source, replaces an image, or restarts a service. Back up `.local-data/` before upgrading. If the checkout has no uncommitted conflicts that need to be preserved or resolved, run:
+
+```bash
+git pull --ff-only
+./run.sh --service --no-browser
+```
+
+Running `--service` again updates and restarts all three native services while preserving configuration, databases, and logs under `.local-data/`. For a foreground installation, run:
+
+```bash
+git pull --ff-only
+./run.sh --no-browser
+```
+
+The launcher installs Python dependencies when it creates the virtual environment or when the `requirements.txt` hash changes, and rebuilds Vue when frontend source, styles, or lock files change. `--skip-install` skips only the Python dependency installation check; it does not skip a missing or stale frontend build. For a container upgrade, pin a new `NIUONE_IMAGE` version tag before running `docker compose pull` and `docker compose up -d --no-build`. See the [Deployment, Validation, and Rollback Manual](OPERATIONS_EN.md) for the full backup, validation, and rollback procedure.
+
 ### Status, Restart, and Uninstallation
 
 macOS / Linux:
@@ -228,7 +251,7 @@ Uninstallation removes only the services or scheduled tasks. It does not delete 
 
 | Platform | Implementation | Automatic startup behavior | Service logs |
 |---|---|---|---|
-| macOS | `~/Library/LaunchAgents/ai.niuone.*.plist` | Starts after the current user signs in and restarts automatically after an unexpected exit | `.local-data/runtime/logs/ai.niuone.*.log` |
+| macOS | `~/Library/LaunchAgents/ai.niuone.*.plist` | Starts after the current user signs in and restarts automatically after an unexpected exit | `.local-data/runtime/logs/ai.niuone.*.stdout.log` and `*.stderr.log` |
 | Linux | `~/.config/systemd/user/niuone-*.service` | Starts through user-level systemd; the script attempts to enable linger | `journalctl --user -u niuone-dashboard.service` |
 | Windows | `NiuOne *` scheduled tasks | Starts after the current user signs in and automatically retries after an unexpected exit | `.local-data\runtime\logs\windows-service-*.log` |
 

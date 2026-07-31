@@ -107,7 +107,7 @@ NiuOne 需要接入大模型后才能驱动完整工作流。没有模型配置�
 |---|---|---|
 | X 关注列表监控、美股机构评级日报 | Grok | `DASHBOARD_GROK_BASE_URL`、`DASHBOARD_GROK_API_KEY`、`DASHBOARD_GROK_MODEL`、`DASHBOARD_GROK_API_MODE`、`X_WATCHLIST_MAX_TOKENS`、`US_RATING_MAX_TOKENS` |
 | A 股盘面总结增强 | 兼容 `/chat/completions` 的模型 | `A_SHARE_MODEL_SUMMARY_BASE_URL`、`A_SHARE_MODEL_SUMMARY_API_KEY`、`A_SHARE_MODEL_SUMMARY_MODEL`、`A_SHARE_MODEL_SUMMARY_MAX_TOKENS`；留空时复用 `DASHBOARD_GROK_*` |
-| A 股候选股消息面预检 | 具备实时搜索能力的模型 | `DASHBOARD_NEWS_BASE_URL`、`DASHBOARD_NEWS_API_KEY`、`DASHBOARD_NEWS_MODEL`、`DASHBOARD_NEWS_API_MODE`、`DASHBOARD_NEWS_MAX_TOKENS`、`DASHBOARD_NEWS_CONCURRENCY` |
+| A 股候选股及龙虎榜连板/连榜消息面预检 | 具备实时搜索能力的模型 | `DASHBOARD_NEWS_BASE_URL`、`DASHBOARD_NEWS_API_KEY`、`DASHBOARD_NEWS_MODEL`、`DASHBOARD_NEWS_API_MODE`、`DASHBOARD_NEWS_MAX_TOKENS`、`DASHBOARD_NEWS_CONCURRENCY` |
 | 问财龙虎榜研究数据 | 同花顺问财 OpenAPI | `IWENCAI_ENABLED`、`IWENCAI_BASE_URL`、`IWENCAI_API_KEY`、`IWENCAI_TIMEOUT_SECONDS`、`IWENCAI_MAX_RETRIES`、`IWENCAI_MAX_CONCURRENCY`、`IWENCAI_CACHE_TTL_SECONDS`、`IWENCAI_DRAGON_TIGER_CRON` |
 | 选股后的买卖决策 | 推荐 DeepSeek，可用其他兼容模型 | `DASHBOARD_DECISION_BASE_URL`、`DASHBOARD_DECISION_API_KEY`、`DASHBOARD_DECISION_MODEL` |
 | 买卖决策情报包 | 本地聚合，不需要额外模型 | `DASHBOARD_DECISION_INTELLIGENCE_ENABLED`、`DASHBOARD_DECISION_INTELLIGENCE_TTL_SECONDS`、`DASHBOARD_DECISION_INTELLIGENCE_MAX_ITEMS` |
@@ -156,11 +156,16 @@ NiuOne 需要接入大模型后才能驱动完整工作流。没有模型配置�
 | `DASHBOARD_CONFIG` | `$DASHBOARD_HOME/config.yaml` | 模型服务商和模型 YAML 配置 |
 | `DASHBOARD_PUSH_HISTORY_DB` | `$DASHBOARD_HOME/push_history.db` | 消息历史数据库 |
 | `DASHBOARD_PORTFOLIO_STATE` | `$DASHBOARD_HOME/cron/output/niuniu_practice_portfolio.json` | 模拟账户状态 |
+| `DASHBOARD_ACTIVE_STRATEGY` | `niuone` | 当前独立策略；保存后下一轮扫描热生效 |
+| `DASHBOARD_PRACTICE_SCHEDULE_TIMES` | `09:25,10:00,10:30,11:00,11:20,13:00,13:30,14:00,14:30,14:50` | 盘面总结、选股和模拟决策的共享时间点 |
 | `X_WATCHLIST_ACCOUNTS` | 空 | 推文监控作者列表，使用英文逗号分隔 |
 | `DASHBOARD_DECISION_INTELLIGENCE_ENABLED` | `1` | 买卖决策是否启用全局情报包 |
 | `DASHBOARD_TRADE_DISCIPLINE_TEXT` | 空 | 买卖决策 prompt 的交易纪律文本；为空使用内置默认纪律 |
 | `DASHBOARD_MAX_TOTAL_POSITION_PCT` | `80` | 全局总仓上限；`zettaranc` 和 `sector_tide` 在执行层取全局限制与策略套件硬上限中的更严格值，其他套件主要作为模型参考 |
 | `DASHBOARD_MIN_CASH_RESERVE_PCT` | `20` | 全局现金缓冲；`zettaranc` 和 `sector_tide` 在执行层同时校验，其他套件主要作为模型参考 |
+| `DASHBOARD_NIUONE_MAINLINE_MINUTE_REFRESH_ENABLED` | `1` | 是否复用全市场行情采样刷新题材强度；重启生效 |
+| `DASHBOARD_MARKET_BREADTH_SAMPLE_INTERVAL_SECONDS` | `30` | 题材强度和市场情绪共享的全市场采样间隔，允许 `30`～`600` 秒；重启生效 |
+| `DASHBOARD_AUTO_VERSION_CHECK_ENABLED` | `1` | 页面加载时是否检查 Docker Hub 新版本；运行时热生效，不会自动安装更新 |
 
 保存设置后，运行时可热应用的配置会立即用于后续请求；需要重启的配置请重启本地服务。
 
@@ -204,6 +209,24 @@ run.bat --service --port 8877 --no-browser
 
 三个进程都会被注册。关闭“牛牛美股”功能后，X 关注源守护进程会跳过采集并保持低频休眠，无需单独卸载。
 
+### 更新源码部署
+
+设置页和首页的版本检查只提示 Docker Hub 是否存在更高的严格 SemVer 版本，不会自动拉取代码、替换镜像或重启服务。升级前先备份 `.local-data/`；如果源码目录没有需要保留或处理的未提交冲突，可执行：
+
+```bash
+git pull --ff-only
+./run.sh --service --no-browser
+```
+
+重复运行 `--service` 会更新并重启三个原生服务，同时保留 `.local-data/` 中的配置、数据库和日志。前台运行方式使用：
+
+```bash
+git pull --ff-only
+./run.sh --no-browser
+```
+
+启动器会在虚拟环境新建或 `requirements.txt` 哈希变化时安装 Python 依赖，并在前端源码、样式或锁文件变化时重新构建 Vue。`--skip-install` 只跳过 Python 依赖安装检查，不会跳过缺失或过期的前端构建。容器升级请固定新的 `NIUONE_IMAGE` 版本标签，再执行 `docker compose pull` 和 `docker compose up -d --no-build`；完整备份、验证和回滚步骤见[部署、验证和回滚手册](OPERATIONS.md)。
+
 ### 状态、重启与卸载
 
 macOS / Linux：
@@ -228,7 +251,7 @@ powershell -File .\scripts\manage-long-running.ps1 -Action Uninstall
 
 | 平台 | 实现 | 自动启动行为 | 服务日志 |
 |---|---|---|---|
-| macOS | `~/Library/LaunchAgents/ai.niuone.*.plist` | 当前用户登录后启动，异常退出后自动重启 | `.local-data/runtime/logs/ai.niuone.*.log` |
+| macOS | `~/Library/LaunchAgents/ai.niuone.*.plist` | 当前用户登录后启动，异常退出后自动重启 | `.local-data/runtime/logs/ai.niuone.*.stdout.log` 与 `*.stderr.log` |
 | Linux | `~/.config/systemd/user/niuone-*.service` | 用户级 systemd 启动，脚本会尝试启用 linger | `journalctl --user -u niuone-dashboard.service` |
 | Windows | `NiuOne *` 计划任务 | 当前用户登录后启动，异常退出后自动重试 | `.local-data\runtime\logs\windows-service-*.log` |
 

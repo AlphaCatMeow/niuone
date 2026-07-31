@@ -111,13 +111,27 @@ Each feature below has its own dark-theme, 1200-pixel-wide animation, using eith
 
 ## Feature Overview
 
-- **Unified dashboard**: View theme strength, indices, sectors, market sentiment, capital flows, and historical news in one place.
-- **Information aggregation**: Organize A-share market data, U.S. market summaries, institutional ratings, and content from a Twitter/X watchlist.
+- **Unified dashboard**: View theme strength, indices, sectors, market sentiment, industry capital flows, Dragon-Tiger data, and historical news in one place.
+- **Theme-strength and strategy research**: Reuse the default 30-second full-market quote sample for intraday theme updates. Built-in suites cover Base, Z-ge, Li Daxiao, Sector Tide, and NiuOne; NiuOne includes cross-session mainline confirmation, emerging/leader/pullback paths, and a twice-confirmed V-reversal probe.
+- **Information aggregation**: Organize A-share auction/midday/close reports, U.S. market summaries, institutional ratings, Twitter/X watchlists, and iWencai Dragon-Tiger data. Limit-up-streak and consecutively listed stocks can receive a structured news precheck.
 - **Intelligent summaries**: Connect compatible large-model services to summarize and structure information from multiple sources.
 - **Custom trading strategies**: Choose a built-in strategy or describe your own candidate-selection, buy, sell, position-sizing, and timing rules in natural language.
 - **Simulated trading and portfolio tracking**: Use your own simulated account for candidate screening, buy and sell decisions, position and P&L tracking, and access to the equity curve and trading logs—all without connecting to a brokerage or using real funds.
+- **Execution notifications**: After a simulated execution is persisted, send alerts to Feishu, DingTalk, WeCom, and Telegram, with independent enable/disable and test controls for each channel.
 - **Automated tasks**: Schedule data collection, summary generation, database ingestion, and background monitoring.
-- **User-controlled data**: Configuration, databases, logs, and task output are stored in a separate runtime directory by default. They remain under the user's control and are not committed with the source code.
+- **Local configuration and version notices**: Configuration, databases, logs, and task output stay in a separate runtime directory. The settings page can test connections, display the current version, and check Docker Hub for a newer release, but it never downloads or installs an update automatically.
+
+Primary pages and dependencies:
+
+| Page | Capability | Additional configuration |
+|---|---|---|
+| `/practice` | Simulated account, candidates, market summary, model decisions, equity curve, and trading calendar | Model decisions require `DASHBOARD_DECISION_*` |
+| `/niuone-mainline` | Full-market cross-session mainlines, intraday strength, V-reversal observations, and representative stocks | Uses public market data; news-confirmation model is optional |
+| `/indices`, `/industry-flow` | Indices, sectors, active stocks, industry main-fund flow, market sentiment, and turnover | No key; market sources must be reachable |
+| `/dragon-tiger` | Dated Dragon-Tiger seats, limit-up/consecutive-list signals, and news prechecks | Enable and configure iWencai; news-precheck model is optional |
+| `/market-monitor` | A-share auction/midday/close and overnight U.S. summaries | Keep the scheduler running; model enhancement is optional |
+| `/x-monitor`, `/us-ratings` | Twitter/X watchlists and U.S. institutional ratings | Enable “NiuNiu U.S. Stocks” and configure the relevant model |
+| `/admin` | Configuration, connection tests, version, and runtime status | Administrator authentication is always required |
 
 The main README does not cover specific research methods or experimental strategies in detail. See the [Strategy Research Notes](docs/strategies/README_EN.md).
 
@@ -185,7 +199,7 @@ On the first run, NiuOne automatically:
 |---|---|
 | `--port VALUE` | Set and save the dashboard port |
 | `--no-browser` | Do not open a browser automatically after startup |
-| `--skip-install` | Skip the dependency installation check |
+| `--skip-install` | Skip the Python dependency installation check; a missing or stale frontend is still built |
 | `--service` | Register and start a long-running service for the current platform |
 
 For example, to use port `8877` without opening a browser automatically:
@@ -263,10 +277,10 @@ NiuOne can send simulated buy and sell execution alerts to Feishu, DingTalk, WeC
 1. Go to “Settings → Trade Notifications” and set “Enable simulated trade notifications” to “Enabled.”
 2. “Timeout per notification in seconds” defaults to `5` seconds and can be set from `1` to `30` seconds.
 3. Select a channel from the “Notification channels” drop-down list and click “Add channel.”
-4. Complete the required fields on that channel's card, enter a signing secret if needed, and click “Send test notification” at the bottom of the card to validate the configuration.
-5. After the test succeeds, click “Save this section’s settings” (`保存本组设置`) and add other channels as needed. Notification settings take effect immediately after saving; there is no need to restart the service specifically for notification changes.
+4. Complete the required fields on that channel's card, enter a signing secret if needed, and use the status switch in the upper-right corner to decide whether the channel receives execution alerts. The adjacent label shows “Enabled” (`已启用`) or “Disabled” (`已关闭`).
+5. Click “Send test notification” at the bottom of the card. After the test succeeds, click “Save this section’s settings” (`保存本组设置`) and add other channels as needed. Notification settings take effect immediately after saving; there is no need to restart the service specifically for notification changes.
 
-Clicking “Remove” in the upper-right corner of a channel card first disables and collapses that channel. After you click “Save this section’s settings” (`保存本组设置`), NiuOne deletes the saved Webhook, Bot Token, Chat ID, and signing secret for that channel. If you add the channel again later, its status will be “Not set.” If you add the channel again before saving, the original configuration is not deleted. For a channel that remains added, leaving a sensitive field blank when saving preserves its existing value.
+Disabling a channel stops its execution alerts without deleting its Webhook, Bot Token, Chat ID, or signing secret, so it can be enabled again directly. Clicking “Remove” in the upper-right corner disables and collapses the channel. Only after you click “Save this section’s settings” (`保存本组设置`) does NiuOne delete all saved configuration for that channel; adding it later then shows “Not set.” Adding it again before saving cancels the removal and preserves the original configuration. For a channel that remains added, leaving a sensitive field blank when saving preserves its existing value.
 
 “Send test notification” sends only to the channel represented by the current card. It is unaffected by the master notification switch or the channel switch, and it does not save or modify configuration. The test uses unsaved values currently entered in the card first. If a sensitive field is blank, it falls back to the saved Webhook, Bot Token, or signing secret, while the Telegram Chat ID and timeout are validated using the current input. The test message includes “模拟成交，非实盘,” but it does not create an execution record or change cash or positions.
 
@@ -397,6 +411,15 @@ Options can be combined to specify a port or prevent the browser from opening au
 ./run.sh --service --port 8877 --no-browser
 ```
 
+Before upgrading a source deployment, back up `.local-data/`. If the checkout has no conflicting uncommitted changes, synchronize the default branch and rerun the launcher:
+
+```bash
+git pull --ff-only
+./run.sh --service --no-browser
+```
+
+For a foreground installation, replace the second command with `./run.sh --no-browser`. The launcher preserves `.local-data/`: it installs Python dependencies when the virtual environment is missing or `requirements.txt` changed, and rebuilds Vue when frontend source, styles, or lock files changed. The settings-page version check is advisory and never performs the upgrade. For containers, change `NIUONE_IMAGE` to an explicit new version tag before running `docker compose pull` and `docker compose up -d --no-build`.
+
 For platform-specific status, restart, uninstall, and unattended-operation instructions, see the [Standalone Operation Guide](docs/STANDALONE_EN.md). For deployment updates, log inspection, backups, and rollback procedures, see the [Deployment, Validation, and Rollback Manual](docs/OPERATIONS_EN.md).
 
 ## Project Structure
@@ -473,10 +496,13 @@ Check the data sources, model services, feature switches, and task times on the 
 
 ## Documentation
 
-- [Strategy Research Notes](docs/strategies/README_EN.md)
-- [Standalone Operation Guide](docs/STANDALONE_EN.md)
-- [Deployment, Validation, and Rollback Manual](docs/OPERATIONS_EN.md)
-- [Runtime Data and Sensitive Information Policy](config/runtime-policy_EN.md)
+- [Standalone Operation Guide](docs/STANDALONE_EN.md): one-click startup, model configuration, long-running services, and upgrades.
+- [Deployment, Validation, and Rollback Manual](docs/OPERATIONS_EN.md): configuration semantics, process ownership, diagnostics, deployment, and recovery.
+- [Dashboard Incremental Delivery and Deployment](docs/DASHBOARD_V2_EN.md): Vue/FastAPI, public snapshots, caching, and reverse proxies.
+- [Strategy Research Guide](docs/strategies/README_EN.md): built-in suites, the NiuOne method, risk budgets, and extension points.
+- [app module architecture](docs/APP_ARCHITECTURE.md): entry points, compatibility adapters, domain boundaries, and dependency direction.
+- [Container Image Release Process](docs/CONTAINER_RELEASE_EN.md): maintainer workflow for multi-architecture Docker releases.
+- [Runtime Data and Sensitive Information Policy](config/runtime-policy_EN.md): private directories, keys, databases, and exposure response.
 
 ## License
 
