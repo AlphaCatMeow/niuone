@@ -77,6 +77,9 @@ class NiuOneMinuteRefreshTests(unittest.TestCase):
                 industry_loader=lambda _path: {
                     f"600{index:03d}": "半导体" for index in range(1, 5)
                 },
+                trading_day_status_loader=lambda _value, **_kwargs: {
+                    "previous_trading_day": "2026-07-29"
+                },
                 minimum_coverage=0.75,
             )
             previous_payload = {
@@ -121,6 +124,57 @@ class NiuOneMinuteRefreshTests(unittest.TestCase):
         self.assertEqual(first_theme["strong_stocks"][0]["change_pct"], 50.0)
         self.assertEqual(second_theme["strong_stocks"][0]["change_pct"], 55.0)
         self.assertEqual(second["niuone_context"]["refresh_mode"], "minute_quotes")
+
+    def test_does_not_treat_a_stale_context_as_the_previous_trading_day(self) -> None:
+        accepted_dates: list[set[str]] = []
+
+        def kline_loader(symbols, **kwargs):
+            accepted_dates.append(set(kwargs.get("accepted_last_dates") or set()))
+            return {symbol: history_rows() for symbol in symbols}
+
+        with tempfile.TemporaryDirectory(prefix="niuone-minute-gap-") as directory:
+            root = Path(directory)
+            engine = NiuOneMinuteEngine(
+                kline_cache_path=root / "klines.sqlite3",
+                industry_cache_path=root / "industries.json",
+                kline_loader=kline_loader,
+                industry_loader=lambda _path: {
+                    f"600{index:03d}": "半导体" for index in range(1, 5)
+                },
+                trading_day_status_loader=lambda _value, **_kwargs: {
+                    "previous_trading_day": "2026-07-29"
+                },
+                minimum_coverage=0.75,
+            )
+            previous_payload = {
+                "generated_at": "2026-07-28 15:00:00",
+                "reference_pool_count": 4,
+                "niuone_context": {
+                    "as_of_date": "2026-07-28",
+                    "previous_trading_day": "2026-07-27",
+                    "themes": {
+                        "半导体": {
+                            "industry": "半导体",
+                            "state": "emerging",
+                            "raw_state": "mainline",
+                            "as_of_date": "2026-07-28",
+                            "core_stock_codes": ["600001", "600002"],
+                        }
+                    },
+                },
+            }
+
+            scan = engine.build_scan(
+                quote_snapshot("2026-07-30 10:01:00", [15.0, 14.0, 12.0, 10.5]),
+                previous_payload=previous_payload,
+                now=datetime(2026, 7, 30, 10, 1, 5),
+            )
+
+        theme = scan["niuone_context"]["themes"]["半导体"]
+        self.assertEqual(accepted_dates, [{"2026-07-29", "2026-07-30"}])
+        self.assertFalse(theme["consecutive_trading_day"])
+        self.assertFalse(theme["cross_day_confirmed"])
+        self.assertNotEqual(theme["state"], "mainline")
 
     def test_rejects_stale_quotes_without_producing_a_replacement(self) -> None:
         with tempfile.TemporaryDirectory(prefix="niuone-minute-stale-") as directory:

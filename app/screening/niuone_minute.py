@@ -44,6 +44,11 @@ except ImportError:  # pragma: no cover - standalone entrypoints add app/ to sys
     from strategies.scoring.common import compute_ema
     from strategies.scoring.niuone import build_niuone_context
 
+try:
+    from app.reports.a_share.calendar import trading_day_status as default_trading_day_status
+except ImportError:  # pragma: no cover - standalone entrypoints add app/compat to sys.path
+    from a_share_calendar import trading_day_status as default_trading_day_status
+
 
 MINUTE_REFRESH_MODE = "minute_quotes"
 DEFAULT_MINIMUM_COVERAGE = 0.75
@@ -112,6 +117,7 @@ class NiuOneMinuteEngine:
         industry_cache_path: Path,
         kline_loader: Callable[..., dict[str, list[dict[str, Any]]]] = load_kline_series_map,
         industry_loader: Callable[[Path], dict[str, str]] = load_stock_industry_map,
+        trading_day_status_loader: Callable[..., Mapping[str, Any]] = default_trading_day_status,
         minimum_coverage: float = DEFAULT_MINIMUM_COVERAGE,
         max_quote_age_seconds: float = DEFAULT_MAX_QUOTE_AGE_SECONDS,
     ) -> None:
@@ -119,6 +125,7 @@ class NiuOneMinuteEngine:
         self.industry_cache_path = Path(industry_cache_path)
         self.kline_loader = kline_loader
         self.industry_loader = industry_loader
+        self.trading_day_status_loader = trading_day_status_loader
         self.minimum_coverage = max(0.0, min(1.0, float(minimum_coverage)))
         self.max_quote_age_seconds = max(30.0, float(max_quote_age_seconds))
         self._lock = threading.Lock()
@@ -222,16 +229,17 @@ class NiuOneMinuteEngine:
         )
         quote_date = quote_time.strftime("%Y-%m-%d")
         previous_context_date = str(previous_context.get("as_of_date") or "")[:10]
-        previous_trading_day = (
-            previous_context_date
-            if previous_context_date and previous_context_date != quote_date
-            else str(previous_context.get("previous_trading_day") or "")[:10]
-        )
+        try:
+            calendar_status = self.trading_day_status_loader(quote_date, allow_refresh=False)
+            previous_trading_day = str(calendar_status.get("previous_trading_day") or "")[:10]
+        except Exception:
+            previous_trading_day = ""
+        if not previous_trading_day and previous_context_date == quote_date:
+            previous_trading_day = str(previous_context.get("previous_trading_day") or "")[:10]
         accepted_dates = {
             value
             for value in (
                 quote_date,
-                previous_context_date,
                 previous_trading_day,
             )
             if value
