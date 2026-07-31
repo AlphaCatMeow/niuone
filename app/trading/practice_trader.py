@@ -6259,7 +6259,19 @@ def execute_actions(
             existing_pos = positions.get(code)
             old_qty = position_qty(existing_pos or {})
             existing_entry_strategy = position_entry_strategy(existing_pos or {}) if old_qty > 0 else ""
-            if old_qty > 0 and is_dynamic_risk_strategy(buy_strategy) and existing_entry_strategy != buy_strategy:
+            niuone_upgrade_add = bool(
+                old_qty > 0
+                and existing_entry_strategy == "niu_emerging"
+                and buy_strategy in {"niu_leader", "niu_pullback"}
+                and candidate.get("mainline_confirmed") is True
+                and str(candidate.get("mainline_state") or "") in {"mainline", "diverging"}
+            )
+            if (
+                old_qty > 0
+                and is_dynamic_risk_strategy(buy_strategy)
+                and existing_entry_strategy != buy_strategy
+                and not niuone_upgrade_add
+            ):
                 suite_label = "牛牛战法" if is_niuone_strategy(buy_strategy) else "板块潮汐"
                 add_execution_block(
                     decision,
@@ -6342,11 +6354,13 @@ def execute_actions(
                 if regime not in {"offensive", "rotation", "recovery"}:
                     add_execution_block(decision, code, f"{dynamic_label}市场状态{regime or '缺失'}不可买入")
                     continue
-                if buy_strategy in {"tide_recovery", "niu_emerging"} and old_qty > 0:
+                if buy_strategy == "niu_emerging" and old_qty > 0:
+                    add_execution_block(decision, code, "牛牛启动观察仓升级为确认主线前禁止加仓")
+                    continue
+                if buy_strategy == "tide_recovery" and old_qty > 0:
                     today_lots = int(((existing_pos or {}).get("buy_date_lots") or {}).get(today_key(), 0) or 0)
                     if today_lots > 0:
-                        starter_label = "牛牛启动" if niuone_buy else "冰点修复"
-                        add_execution_block(decision, code, f"{starter_label}观察仓当日禁止加仓，须次日确认")
+                        add_execution_block(decision, code, "冰点修复观察仓当日禁止加仓，须次日确认")
                         continue
 
                 tide_risk_budget = niuone_risk_budget(regime) if niuone_buy else sector_tide_risk_budget(regime)
@@ -6615,7 +6629,17 @@ def execute_actions(
                     pos["niu_leader_lost_count"] = 0
                 else:
                     pos["sector_weak_count"] = 0
-            if old_qty <= 0 or not pos.get("buy_strategy"):
+            if niuone_upgrade_add:
+                pos.setdefault("initial_buy_strategy", existing_entry_strategy)
+                pos.setdefault("initial_entry_reason", str(pos.get("entry_reason") or ""))
+                pos["buy_strategy"] = buy_strategy
+                pos["strategy_upgrade_from"] = existing_entry_strategy
+                pos["strategy_upgraded_at"] = now_ts()
+                pos["latest_add_reason"] = reason
+                entry_mark_strategy = buy_strategy
+                entry_mark_component = existing_entry_strategy
+                entry_mark_source = "BUY_UPGRADE"
+            elif old_qty <= 0 or not pos.get("buy_strategy"):
                 pos["buy_strategy"] = buy_strategy
                 pos["entry_reason"] = reason
                 entry_mark_strategy = buy_strategy

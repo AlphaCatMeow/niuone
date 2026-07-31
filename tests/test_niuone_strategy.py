@@ -807,6 +807,90 @@ class NiuOneStrategyTests(unittest.TestCase):
             trader.is_a_share_execution_time = original_time
             trader.execution_quote = original_quote
 
+    def test_niuone_emerging_position_adds_only_after_confirmed_upgrade(self):
+        original_time = trader.is_a_share_execution_time
+        original_quote = trader.execution_quote
+        try:
+            trader.is_a_share_execution_time = lambda dt=None: (True, "连续竞价交易时段")
+            trader.execution_quote = lambda code: {"price": 10.0, "name": "牛牛启动", "source": "test"}
+            market = {
+                "allow_new_buys": True,
+                "max_open_positions": 6,
+                "max_new_buys_per_decision": 2,
+                "max_total_position_pct": 80,
+                "min_cash_reserve_pct": 20,
+            }
+            original_position = {
+                "code": "600000",
+                "name": "牛牛启动",
+                "qty": 100,
+                "avg_cost": 10.0,
+                "last_price": 10.0,
+                "buy_strategy": "niu_emerging",
+                "strategy_mark": {"strategy_id": "niu_emerging"},
+                "industry": "半导体",
+                "entry_reason": "牛牛启动观察仓",
+                "entry_stop_price": 9.5,
+                "gap_buffer_pct": 1.0,
+                "execution_buffer_pct": 0.2,
+                "buy_date_lots": {"2000-01-01": 100},
+            }
+
+            blocked_state = {"cash": 99000.0, "positions": {"600000": dict(original_position)}, "trade_log": []}
+            blocked_decision = {
+                "actions": [{"action": "BUY", "code": "600000", "shares": 100, "reason": "启动主题延续"}]
+            }
+            blocked_candidate = niu_candidate(
+                best_strategy="niu_emerging",
+                mainline_state="emerging",
+                sector_status="emerging",
+                mainline_confirmed=False,
+            )
+
+            blocked = trader.execute_actions(
+                blocked_state,
+                blocked_decision,
+                [blocked_candidate],
+                True,
+                "连续竞价交易时段",
+                market,
+            )
+
+            self.assertEqual(blocked, [])
+            self.assertEqual(blocked_state["positions"]["600000"]["qty"], 100)
+            self.assertIn("升级为确认主线前禁止加仓", blocked_decision["execution_blocked_reason"])
+
+            upgraded_state = {"cash": 99000.0, "positions": {"600000": dict(original_position)}, "trade_log": []}
+            upgraded_decision = {
+                "actions": [{"action": "BUY", "code": "600000", "shares": 100, "reason": "升级主线后加仓"}]
+            }
+            upgraded_candidate = niu_candidate(
+                best_strategy="niu_leader",
+                mainline_state="mainline",
+                sector_status="mainline",
+                mainline_confirmed=True,
+            )
+
+            upgraded = trader.execute_actions(
+                upgraded_state,
+                upgraded_decision,
+                [upgraded_candidate],
+                True,
+                "连续竞价交易时段",
+                market,
+            )
+
+            self.assertEqual(len(upgraded), 1)
+            position = upgraded_state["positions"]["600000"]
+            self.assertEqual(position["qty"], 200)
+            self.assertEqual(position["initial_buy_strategy"], "niu_emerging")
+            self.assertEqual(position["buy_strategy"], "niu_leader")
+            self.assertEqual(position["strategy_mark"]["strategy_id"], "niu_leader")
+            self.assertEqual(position["strategy_mark"]["source"], "BUY_UPGRADE")
+        finally:
+            trader.is_a_share_execution_time = original_time
+            trader.execution_quote = original_quote
+
     def test_limit_up_execution_guard_respects_board_specific_limits(self):
         self.assertTrue(trader.quote_is_at_limit_up(
             "600000",
