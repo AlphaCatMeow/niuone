@@ -14,7 +14,7 @@ from typing import Any
 from app.dashboard.niuone_mainline import build_niuone_mainline_view
 
 
-PUBLIC_SCHEMA_VERSION = 5
+PUBLIC_SCHEMA_VERSION = 8
 
 ACCOUNT_FIELDS = (
     "initial_cash",
@@ -91,6 +91,14 @@ CANDIDATE_FIELDS = (
     "signal_theme_attribution_weight",
     "signal_theme_historical_prior_score",
     "signal_theme_cohort_alignment_score",
+    "signal_theme_peer_resonance_score",
+    "signal_theme_return_correlation_score",
+    "signal_theme_return_correlation_rank_score",
+    "signal_theme_return_correlation_observation_count",
+    "signal_theme_return_correlation_peer_count",
+    "signal_theme_specificity_score",
+    "signal_theme_membership_source",
+    "unattributed_theme_weight",
     "theme_attribution_confident",
     "theme_attribution_gap",
     "board",

@@ -71,7 +71,18 @@ def sample_scan() -> dict[str, object]:
                     },
                 ],
             },
-            "stocks": {"603979": {"raw_news": "private"}},
+            "stocks": {
+                "603979": {
+                    "raw_news": "private",
+                    "theme_attributions": [{
+                        "theme": "工业金属",
+                        "membership_source": "eastmoney_concept",
+                        "attribution_score": 82.0,
+                        "attribution_weight": 0.8,
+                        "peer_resonance_score": 78.0,
+                    }],
+                }
+            },
             "industry_money_flow": [{"raw": "private"}],
             "market": {
                 "score": 34,
@@ -192,7 +203,20 @@ class NiuOneMainlineViewTests(unittest.TestCase):
         self.assertNotIn("configured_stock_universe_label", payload)
         self.assertNotIn("items", payload)
         self.assertNotIn("trade_items", payload)
-        self.assertNotIn("stocks", payload["niuone_context"])
+        self.assertEqual(
+            payload["niuone_context"]["stocks"],
+            {
+                "603979": {
+                    "theme_attributions": [{
+                        "theme": "工业金属",
+                        "membership_source": "eastmoney_concept",
+                        "attribution_score": 82.0,
+                        "attribution_weight": 0.8,
+                        "peer_resonance_score": 78.0,
+                    }],
+                }
+            },
+        )
         self.assertNotIn("industry_money_flow", payload["niuone_context"])
         self.assertIn("工业金属", payload["niuone_context"]["themes"])
 
@@ -331,6 +355,65 @@ class NiuOneMainlineViewTests(unittest.TestCase):
             [theme["industry"] for theme in view["today_themes"]],
             ["题材1", "题材2", "题材3", "题材4", "题材5"],
         )
+
+    def test_public_view_collapses_overlapping_label_clones(self) -> None:
+        scan = sample_scan()
+        shared = [
+            {
+                "code": "002149",
+                "name": "西部材料",
+                "strong_score": 92,
+                "change_pct": 7.4,
+                "attribution_weight": 0.1,
+                "role": "leader",
+            },
+            {
+                "code": "600111",
+                "name": "共同核心",
+                "strong_score": 86,
+                "change_pct": 4.0,
+                "attribution_weight": 0.2,
+                "role": "core",
+            },
+        ]
+        scan["niuone_context"]["themes"] = {
+            "商业航天": {
+                "industry": "商业航天",
+                "score": 82,
+                "state": "emerging",
+                "strong_stocks": [
+                    {**shared[0], "attribution_weight": 0.8},
+                    {**shared[1], "attribution_weight": 0.7},
+                ],
+            },
+            "纳米银": {
+                "industry": "纳米银",
+                "score": 70,
+                "state": "candidate",
+                "strong_stocks": shared,
+            },
+            "独立题材": {
+                "industry": "独立题材",
+                "score": 68,
+                "state": "candidate",
+                "strong_stocks": [{
+                    "code": "600999",
+                    "name": "独立龙头",
+                    "strong_score": 85,
+                    "change_pct": 5.0,
+                    "attribution_weight": 1.0,
+                    "role": "leader",
+                }],
+            },
+        }
+
+        view = build_niuone_mainline_view(scan)
+
+        self.assertEqual(
+            [theme["industry"] for theme in view["themes"]],
+            ["商业航天", "独立题材"],
+        )
+        self.assertEqual(view["themes"][0]["related_themes"], ["纳米银"])
 
 if __name__ == "__main__":
     unittest.main()

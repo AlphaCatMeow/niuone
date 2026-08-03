@@ -10,19 +10,61 @@ except ModuleNotFoundError:  # Standalone entrypoints add app/ directly to sys.p
     from core.json_cache import read_json_cache, write_json_cache
 
 
-NIUONE_MAINLINE_CACHE_SCHEMA_VERSION = 6
+NIUONE_MAINLINE_CACHE_SCHEMA_VERSION = 9
+
+_THEME_ATTRIBUTION_FIELDS = (
+    "theme",
+    "theme_member_count",
+    "membership_source",
+    "current_score",
+    "historical_prior_score",
+    "attribution_score",
+    "attribution_weight",
+    "cohort_alignment_score",
+    "peer_resonance_score",
+    "return_correlation_score",
+    "return_correlation_rank_score",
+    "return_correlation_observation_count",
+    "return_correlation_peer_count",
+    "theme_specificity_score",
+    "observation_count",
+    "wave_count",
+)
+
+
+def _compact_stock_attributions(value: object) -> dict[str, object] | None:
+    if not isinstance(value, Mapping):
+        return None
+    attributions = [
+        {
+            key: item.get(key)
+            for key in _THEME_ATTRIBUTION_FIELDS
+            if key in item
+        }
+        for item in list(value.get("theme_attributions") or [])
+        if isinstance(item, Mapping) and str(item.get("theme") or "").strip()
+    ]
+    if not attributions:
+        return None
+    return {"theme_attributions": attributions}
 
 
 def build_niuone_mainline_cache_payload(scan: Mapping[str, Any]) -> dict[str, Any]:
     """Keep the state needed for cross-day confirmation and the mainline page."""
     context = scan.get("niuone_context") if isinstance(scan.get("niuone_context"), Mapping) else {}
     themes = context.get("themes") if isinstance(context.get("themes"), Mapping) else {}
+    raw_stocks = context.get("stocks") if isinstance(context.get("stocks"), Mapping) else {}
     compact_context = {
         key: value
         for key, value in context.items()
         if key not in {"stocks", "industry_money_flow"}
     }
     compact_context["themes"] = dict(themes)
+    compact_context["stocks"] = {
+        str(code): compact
+        for code, value in raw_stocks.items()
+        if (compact := _compact_stock_attributions(value)) is not None
+    }
     return {
         "schema_version": NIUONE_MAINLINE_CACHE_SCHEMA_VERSION,
         "generated_at": str(scan.get("generated_at") or "")[:19],

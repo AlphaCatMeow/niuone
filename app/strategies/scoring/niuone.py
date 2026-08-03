@@ -72,10 +72,62 @@ NIUONE_THEME_ATTRIBUTION_HISTORY_WEIGHT = 0.25
 NIUONE_THEME_ATTRIBUTION_HISTORY_DECAY = 0.75
 NIUONE_THEME_ATTRIBUTION_CONFIDENCE_SCORE = 60.0
 NIUONE_THEME_ATTRIBUTION_CONFIDENCE_GAP = 5.0
+NIUONE_THEME_ATTRIBUTION_SOFTMAX_TEMPERATURE = 12.0
+NIUONE_THEME_ATTRIBUTION_MIN_MASS = 0.25
+NIUONE_THEME_LEADER_MIN_ATTRIBUTION_WEIGHT = 0.15
+NIUONE_THEME_RETURN_CORRELATION_LOOKBACK = 20
+NIUONE_THEME_RETURN_CORRELATION_MIN_OBSERVATIONS = 8
+NIUONE_THEME_RETURN_CORRELATION_MIN_PEERS = 3
+NIUONE_THEME_RETURN_CORRELATION_RANK_FULL_SPREAD = 15.0
+NIUONE_MIN_ATTRIBUTED_THEME_MASS = 1.5
+NIUONE_TODAY_BREADTH_PRIOR_MASS = 4.0
+NIUONE_CONTEXT_VERSION = 11
 
 
 def _mean(values: list[float], default: float = 0.0) -> float:
     return statistics.mean(values) if values else default
+
+
+def _weighted_mean(
+    values: list[tuple[float, float]],
+    *,
+    default: float = 0.0,
+) -> float:
+    clean = [
+        (float(value), max(0.0, float(weight)))
+        for value, weight in values
+        if math.isfinite(float(value)) and math.isfinite(float(weight))
+    ]
+    total = sum(weight for _value, weight in clean)
+    if total <= 0:
+        return default
+    return sum(value * weight for value, weight in clean) / total
+
+
+def _weighted_median(values: list[tuple[float, float]]) -> float:
+    clean = sorted(
+        (
+            (float(value), max(0.0, float(weight)))
+            for value, weight in values
+            if math.isfinite(float(value)) and math.isfinite(float(weight))
+        ),
+        key=lambda item: item[0],
+    )
+    total = sum(weight for _value, weight in clean)
+    if total <= 0:
+        return 0.0
+    threshold = total / 2.0
+    cumulative = 0.0
+    for index, (value, weight) in enumerate(clean):
+        cumulative += weight
+        if cumulative >= threshold:
+            if (
+                math.isclose(cumulative, threshold, rel_tol=0.0, abs_tol=1e-12)
+                and index + 1 < len(clean)
+            ):
+                return (value + clean[index + 1][0]) / 2.0
+            return value
+    return clean[-1][0]
 
 
 def _clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
@@ -137,6 +189,33 @@ def _return_pct(
     if close is None or base is None or base <= 0:
         return None
     return (close / base - 1) * 100
+
+
+def _daily_return_path(
+    rows: list[dict[str, Any]],
+    *,
+    current_close: float | None = None,
+) -> dict[str, float]:
+    """Return the recent dated close-to-close path used for theme attribution."""
+    window = rows[-(NIUONE_THEME_RETURN_CORRELATION_LOOKBACK + 1):]
+    closes = [safe_float(row.get("close")) for row in window]
+    if current_close is not None and current_close > 0 and closes:
+        closes[-1] = current_close
+    result: dict[str, float] = {}
+    for index in range(1, len(window)):
+        previous_close = closes[index - 1]
+        close = closes[index]
+        date = str(window[index].get("date") or "")[:10]
+        if (
+            previous_close is None
+            or previous_close <= 0
+            or close is None
+            or close <= 0
+            or not date
+        ):
+            continue
+        result[date] = (close / previous_close - 1.0) * 100.0
+    return result
 
 
 NIUONE_ATR_LOOKBACK = 14
@@ -320,10 +399,145 @@ def _member_metrics(item: dict[str, Any]) -> dict[str, Any] | None:
         "live_change_available": live_change is not None,
         "previous_close": previous_close,
         "prior_ret5": prior_ret5,
+        "return_path": _daily_return_path(rows, current_close=close),
         "intraday_low": intraday_low,
         "rebound_from_low_pct": rebound_from_low_pct,
         "reclaim_previous_close": bool(previous_close and close > previous_close),
     }
+
+
+def _market_return_path(
+    members: list[dict[str, Any]],
+) -> dict[str, float]:
+    """Build a robust daily market factor from the same prepared stock universe."""
+    returns_by_date: dict[str, list[float]] = defaultdict(list)
+    for member in members:
+        path = member.get("return_path")
+        if not isinstance(path, Mapping):
+            continue
+        for date, raw_value in path.items():
+            value = safe_float(raw_value)
+            if value is not None:
+                returns_by_date[str(date)[:10]].append(value)
+    return {
+        date: statistics.median(values)
+        for date, values in returns_by_date.items()
+        if values
+    }
+
+
+def _theme_excess_return_factor(
+    theme_members: list[dict[str, Any]],
+    *,
+    market_returns: Mapping[str, float],
+) -> dict[str, list[float]]:
+    """Pre-sort theme-member excess returns for fast leave-one-out medians."""
+    values_by_date: dict[str, list[float]] = defaultdict(list)
+    for member in theme_members:
+        path = member.get("return_path")
+        if not isinstance(path, Mapping):
+            continue
+        for date, raw_value in path.items():
+            market_value = safe_float(market_returns.get(str(date)[:10]))
+            value = safe_float(raw_value)
+            if value is not None and market_value is not None:
+                values_by_date[str(date)[:10]].append(value - market_value)
+    return {
+        date: sorted(values)
+        for date, values in values_by_date.items()
+        if values
+    }
+
+
+def _median_excluding(
+    sorted_values: list[float],
+    excluded_value: float,
+) -> float | None:
+    """Return a median after removing one exact member value without copying."""
+    index = bisect_left(sorted_values, excluded_value)
+    if index >= len(sorted_values) or not math.isclose(
+        sorted_values[index],
+        excluded_value,
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    ):
+        return None
+    remaining = len(sorted_values) - 1
+    if remaining <= 0:
+        return None
+
+    def remaining_value(position: int) -> float:
+        return sorted_values[position if position < index else position + 1]
+
+    midpoint = remaining // 2
+    if remaining % 2:
+        return remaining_value(midpoint)
+    return (
+        remaining_value(midpoint - 1) + remaining_value(midpoint)
+    ) / 2.0
+
+
+def _peer_return_correlation(
+    member: Mapping[str, Any],
+    *,
+    theme_factor: Mapping[str, list[float]],
+    market_returns: Mapping[str, float],
+) -> dict[str, Any]:
+    """Measure whether daily excess-return waves match the other theme members."""
+    path = member.get("return_path")
+    if not isinstance(path, Mapping):
+        path = {}
+    stock_returns: list[float] = []
+    peer_returns: list[float] = []
+    peer_counts: list[int] = []
+    for date in sorted(str(value)[:10] for value in path)[
+        -NIUONE_THEME_RETURN_CORRELATION_LOOKBACK:
+    ]:
+        raw_stock = safe_float(path.get(date))
+        market_value = safe_float(market_returns.get(date))
+        values = theme_factor.get(date)
+        if raw_stock is None or market_value is None or not isinstance(values, list):
+            continue
+        stock_excess = raw_stock - market_value
+        if len(values) - 1 < NIUONE_THEME_RETURN_CORRELATION_MIN_PEERS:
+            continue
+        peer_median = _median_excluding(values, stock_excess)
+        if peer_median is None:
+            continue
+        stock_returns.append(stock_excess)
+        peer_returns.append(peer_median)
+        peer_counts.append(len(values) - 1)
+
+    observation_count = len(stock_returns)
+    result = {
+        "return_correlation_score": None,
+        "return_correlation_observation_count": observation_count,
+        "return_correlation_peer_count": min(peer_counts) if peer_counts else 0,
+    }
+    if observation_count < NIUONE_THEME_RETURN_CORRELATION_MIN_OBSERVATIONS:
+        return result
+    stock_mean = statistics.mean(stock_returns)
+    peer_mean = statistics.mean(peer_returns)
+    stock_deviations = [value - stock_mean for value in stock_returns]
+    peer_deviations = [value - peer_mean for value in peer_returns]
+    denominator = math.sqrt(
+        sum(value * value for value in stock_deviations)
+        * sum(value * value for value in peer_deviations)
+    )
+    if denominator <= 1e-12:
+        return result
+    correlation = sum(
+        stock_value * peer_value
+        for stock_value, peer_value in zip(
+            stock_deviations,
+            peer_deviations,
+        )
+    ) / denominator
+    result["return_correlation_score"] = round(
+        _clamp((correlation + 1.0) * 50.0),
+        2,
+    )
+    return result
 
 
 def _previous_theme_attributions(
@@ -352,22 +566,72 @@ def _apply_theme_attributions(
 ) -> list[dict[str, Any]]:
     """Attach bounded current and historical evidence to each concept branch.
 
-    Classification membership is only the candidate set.  Attribution combines
-    current cohort evidence with a causal prior carried by earlier snapshots,
-    then normalizes the weights so one stock contributes at most one unit of
-    narrative credit across all of its concepts.
+    Classification membership is only the candidate set. Attribution is based
+    on evidence that excludes the stock from its peer cohort, plus bounded
+    historical evidence. A residual ``unattributed_weight`` keeps a weak
+    candidate set from being presented as certain narrative attribution.
     """
     previous = _previous_theme_attributions(previous_stock)
+    correlation_scores = [
+        score
+        for source in profiles
+        if (score := safe_float(source.get("return_correlation_score")))
+        is not None
+        and int(source.get("return_correlation_observation_count") or 0)
+        >= NIUONE_THEME_RETURN_CORRELATION_MIN_OBSERVATIONS
+    ]
+    correlation_spread = (
+        max(correlation_scores) - min(correlation_scores)
+        if len(correlation_scores) >= 2
+        else 0.0
+    )
+    correlation_rank_reliability = _clamp(
+        correlation_spread
+        / NIUONE_THEME_RETURN_CORRELATION_RANK_FULL_SPREAD,
+        0.0,
+        1.0,
+    )
+    theme_member_counts = [
+        count
+        for source in profiles
+        if (count := safe_float(source.get("theme_member_count")))
+        is not None
+        and count > 0
+    ]
     scored: list[dict[str, Any]] = []
     for source in profiles:
         profile = dict(source)
         theme = _industry_name(profile.get("industry"))
         prior = previous.get(theme, {})
+        cohort_score = safe_float(profile.get("cohort_alignment_score"))
+        correlation_score = safe_float(profile.get("return_correlation_score"))
+        if correlation_score is None:
+            correlation_rank_score = 0.0
+            correlation_score = 0.0
+        elif len(correlation_scores) >= 2:
+            raw_rank_score = _percentile(correlation_score, correlation_scores)
+            correlation_rank_score = _clamp(
+                50.0
+                + (raw_rank_score - 50.0) * correlation_rank_reliability
+            )
+        else:
+            correlation_rank_score = correlation_score
+        theme_member_count = safe_float(profile.get("theme_member_count"))
+        specificity_score = (
+            100.0 - _percentile(theme_member_count, theme_member_counts)
+            if theme_member_count is not None
+            and theme_member_count > 0
+            and len(theme_member_counts) >= 2
+            else 0.0
+        )
         current_score = _clamp(
-            float(profile.get("theme_score") or 0.0) * 0.35
-            + float(profile.get("theme_rank") or 0.0) * 0.30
-            + float(profile.get("cohort_alignment_score") or 50.0) * 0.25
-            + float(profile.get("today_rank_score") or 0.0) * 0.10
+            correlation_rank_score * 0.35
+            + correlation_score * 0.10
+            + specificity_score * 0.15
+            + float(profile.get("peer_resonance_score") or 0.0) * 0.20
+            + (cohort_score if cohort_score is not None else 50.0) * 0.10
+            + float(profile.get("today_rank_score") or 0.0) * 0.06
+            + float(profile.get("theme_rank") or 0.0) * 0.04
         )
         prior_score = safe_float(
             prior.get("historical_prior_score")
@@ -392,12 +656,16 @@ def _apply_theme_attributions(
         if not same_trading_day:
             observation_count += 1
             if (
-                str(profile.get("theme_state") or "")
-                in {"emerging", "mainline", "diverging"}
-                and profile.get("strong") is True
+                profile.get("strong") is True
+                and float(profile.get("peer_resonance_score") or 0.0) >= 60.0
             ):
                 wave_count += 1
         profile.update({
+            "return_correlation_rank_score": round(
+                correlation_rank_score,
+                2,
+            ),
+            "theme_specificity_score": round(specificity_score, 2),
             "current_attribution_score": round(current_score, 2),
             "historical_prior_score": round(historical_score, 2),
             "attribution_score": round(attribution_score, 2),
@@ -406,19 +674,36 @@ def _apply_theme_attributions(
         })
         scored.append(profile)
 
-    total = sum(max(0.0, float(item["attribution_score"])) for item in scored)
-    if total <= 0 and scored:
-        raw_weights = [1.0 / len(scored)] * len(scored)
-    elif total > 0:
-        raw_weights = [
-            max(0.0, float(item["attribution_score"])) / total
+    if len(scored) == 1:
+        raw_weights = [1.0]
+        attributed_mass = 1.0
+    elif scored:
+        best_score = max(float(item["attribution_score"]) for item in scored)
+        exponentials = [
+            math.exp(
+                (float(item["attribution_score"]) - best_score)
+                / NIUONE_THEME_ATTRIBUTION_SOFTMAX_TEMPERATURE
+            )
             for item in scored
         ]
+        exponential_total = sum(exponentials)
+        raw_weights = [
+            value / exponential_total if exponential_total > 0 else 1.0 / len(scored)
+            for value in exponentials
+        ]
+        attributed_mass = _clamp(
+            (best_score - 30.0) / 40.0,
+            NIUONE_THEME_ATTRIBUTION_MIN_MASS,
+            1.0,
+        )
     else:
         raw_weights = []
+        attributed_mass = 0.0
+    raw_weights = [weight * attributed_mass for weight in raw_weights]
     weight_scale = 1_000_000
     weight_units = [int(weight * weight_scale) for weight in raw_weights]
-    remainder = max(0, weight_scale - sum(weight_units))
+    target_units = int(round(attributed_mass * weight_scale))
+    remainder = max(0, target_units - sum(weight_units))
     remainder_order = sorted(
         range(len(raw_weights)),
         key=lambda index: (
@@ -430,6 +715,7 @@ def _apply_theme_attributions(
         weight_units[index] += 1
     for item, units in zip(scored, weight_units):
         item["attribution_weight"] = units / weight_scale
+        item["unattributed_weight"] = round(1.0 - attributed_mass, 6)
     return sorted(
         scored,
         key=lambda item: (
@@ -474,16 +760,77 @@ def _cohort_alignment_score(
     return _clamp(directional_score * 0.65 + peer_strength_score * 0.35)
 
 
-def _today_theme_metrics(theme_members: list[dict[str, Any]]) -> dict[str, Any]:
-    """Return quote-only intraday participation metrics without changing strategy gates."""
+def _peer_resonance_score(
+    member: Mapping[str, Any],
+    theme_members: list[dict[str, Any]],
+    *,
+    market_breadth_pct: float,
+) -> float:
+    """Score independent peer support after excluding the focal stock."""
+    code = str(member.get("code") or "")
+    peers = [
+        peer
+        for peer in theme_members
+        if str(peer.get("code") or "") != code
+    ]
+    if not peers:
+        return 0.0
+    strong_pct = sum(peer.get("strong") is True for peer in peers) / len(peers) * 100.0
+    quoted = [peer for peer in peers if peer.get("live_change_available")]
+    peer_up_pct = (
+        sum(float(peer.get("change_pct") or 0.0) > 0 for peer in quoted)
+        / len(quoted)
+        * 100.0
+        if quoted
+        else market_breadth_pct
+    )
+    excess_breadth_score = _clamp(
+        50.0 + (peer_up_pct - market_breadth_pct) * 1.5
+    )
+    ret5_score = _clamp(50.0 + statistics.median(
+        float(peer.get("ret5") or 0.0) for peer in peers
+    ) * 5.0)
+    ret20_score = _clamp(50.0 + statistics.median(
+        float(peer.get("ret20") or 0.0) for peer in peers
+    ) * 2.5)
+    return _clamp(
+        strong_pct * 0.35
+        + excess_breadth_score * 0.25
+        + ret5_score * 0.25
+        + ret20_score * 0.15
+    )
+
+
+def _today_theme_metrics(
+    theme_members: list[dict[str, Any]],
+    *,
+    attributions: Mapping[str, Mapping[str, Any]],
+    market_breadth_pct: float,
+) -> dict[str, Any]:
+    """Return raw and attribution-weighted intraday participation metrics."""
     total_count = len(theme_members)
     quoted_members = [member for member in theme_members if member.get("live_change_available")]
     quote_count = len(quoted_members)
     coverage = quote_count / total_count if total_count else 0.0
+    attributed_member_count = sum(
+        max(0.0, float((attributions.get(str(member.get("code") or "")) or {}).get("attribution_weight") or 0.0))
+        for member in theme_members
+    )
+    attributed_quote_count = sum(
+        max(0.0, float((attributions.get(str(member.get("code") or "")) or {}).get("attribution_weight") or 0.0))
+        for member in quoted_members
+    )
+    attributed_coverage = (
+        attributed_quote_count / attributed_member_count
+        if attributed_member_count > 0
+        else 0.0
+    )
     eligible = bool(
         total_count >= NIUONE_MIN_THEME_MEMBERS
         and quote_count >= NIUONE_MIN_THEME_MEMBERS
         and coverage >= NIUONE_TODAY_MIN_QUOTE_COVERAGE
+        and attributed_quote_count >= NIUONE_MIN_ATTRIBUTED_THEME_MASS
+        and attributed_coverage >= NIUONE_TODAY_MIN_QUOTE_COVERAGE
     )
     if not quoted_members:
         return {
@@ -495,6 +842,10 @@ def _today_theme_metrics(theme_members: list[dict[str, Any]]) -> dict[str, Any]:
             "today_3pct_count": 0,
             "today_5pct_count": 0,
             "today_breadth_pct": None,
+            "today_attributed_quote_count": 0.0,
+            "today_attributed_up_count": 0.0,
+            "today_attributed_breadth_pct": None,
+            "today_adjusted_breadth_pct": None,
             "today_median_change_pct": None,
             "today_strength_score": None,
             "today_leadership_score": None,
@@ -507,32 +858,89 @@ def _today_theme_metrics(theme_members: list[dict[str, Any]]) -> dict[str, Any]:
     advance_3_count = sum(change >= 3.0 for change in changes)
     advance_5_count = sum(change >= 5.0 for change in changes)
     breadth_pct = up_count / quote_count * 100
-    advance_3_pct = advance_3_count / quote_count * 100
-    advance_5_pct = advance_5_count / quote_count * 100
-    median_change = statistics.median(changes)
+    weighted_changes = [
+        (
+            float(member["change_pct"]),
+            max(0.0, float((attributions.get(str(member.get("code") or "")) or {}).get("attribution_weight") or 0.0)),
+        )
+        for member in quoted_members
+    ]
+    attributed_up_count = sum(weight for change, weight in weighted_changes if change > 0)
+    attributed_3_count = sum(weight for change, weight in weighted_changes if change >= 3.0)
+    attributed_5_count = sum(weight for change, weight in weighted_changes if change >= 5.0)
+    attributed_breadth_pct = (
+        attributed_up_count / attributed_quote_count * 100.0
+        if attributed_quote_count > 0
+        else 0.0
+    )
+    market_prior = _clamp(float(market_breadth_pct)) / 100.0
+    adjusted_breadth_pct = (
+        (
+            attributed_up_count
+            + NIUONE_TODAY_BREADTH_PRIOR_MASS * market_prior
+        )
+        / (attributed_quote_count + NIUONE_TODAY_BREADTH_PRIOR_MASS)
+        * 100.0
+        if attributed_quote_count > 0
+        else market_prior * 100.0
+    )
+    threshold_prior_mass = NIUONE_TODAY_BREADTH_PRIOR_MASS / 2.0
+    attributed_3_pct = (
+        attributed_3_count / (attributed_quote_count + threshold_prior_mass) * 100.0
+        if attributed_quote_count > 0
+        else 0.0
+    )
+    attributed_5_pct = (
+        attributed_5_count / (attributed_quote_count + threshold_prior_mass) * 100.0
+        if attributed_quote_count > 0
+        else 0.0
+    )
+    median_change = _weighted_median(weighted_changes)
     positive_median_score = _clamp(max(0.0, median_change) / 5.0 * 100)
     strength_score = _clamp(
-        breadth_pct * 0.45
-        + advance_3_pct * 0.25
-        + advance_5_pct * 0.15
+        adjusted_breadth_pct * 0.45
+        + attributed_3_pct * 0.25
+        + attributed_5_pct * 0.15
         + positive_median_score * 0.15
     )
     leaders = sorted(
-        quoted_members,
-        key=lambda member: (float(member["change_pct"]), float(member["amount"])),
+        (
+            member
+            for member in quoted_members
+            if float((attributions.get(str(member.get("code") or "")) or {}).get("attribution_weight") or 0.0)
+            >= NIUONE_THEME_LEADER_MIN_ATTRIBUTION_WEIGHT
+        ),
+        key=lambda member: (
+            float(member["change_pct"])
+            * float((attributions.get(str(member.get("code") or "")) or {}).get("attribution_weight") or 0.0),
+            float(member["amount"]),
+        ),
         reverse=True,
     )[:NIUONE_CORE_STOCK_LIMIT]
-    top_positive_changes = [max(0.0, float(member["change_pct"])) for member in leaders[:3]]
-    leadership_score = _clamp(_mean(top_positive_changes) / 10.0 * 100)
+    top_positive_changes = [
+        (
+            max(0.0, float(member["change_pct"])),
+            float((attributions.get(str(member.get("code") or "")) or {}).get("attribution_weight") or 0.0),
+        )
+        for member in leaders[:3]
+    ]
+    leadership_score = _clamp(
+        _weighted_mean(top_positive_changes) / 10.0 * 100
+    )
     return {
         "today_eligible_data": eligible,
         "today_quote_count": quote_count,
         "today_data_coverage": round(coverage, 4),
+        "today_attributed_data_coverage": round(attributed_coverage, 4),
         "today_up_count": up_count,
         "today_1_5pct_count": advance_1_5_count,
         "today_3pct_count": advance_3_count,
         "today_5pct_count": advance_5_count,
         "today_breadth_pct": round(breadth_pct, 2),
+        "today_attributed_quote_count": round(attributed_quote_count, 4),
+        "today_attributed_up_count": round(attributed_up_count, 4),
+        "today_attributed_breadth_pct": round(attributed_breadth_pct, 2),
+        "today_adjusted_breadth_pct": round(adjusted_breadth_pct, 2),
         "today_median_change_pct": round(median_change, 2),
         "today_strength_score": round(strength_score, 2),
         "today_leadership_score": round(leadership_score, 2),
@@ -542,6 +950,8 @@ def _today_theme_metrics(theme_members: list[dict[str, Any]]) -> dict[str, Any]:
                 "name": member["name"],
                 "strong_score": round(float(member["strong_score"]), 2),
                 "change_pct": round(float(member["change_pct"]), 2),
+                "attribution_score": (attributions.get(str(member.get("code") or "")) or {}).get("attribution_score"),
+                "attribution_weight": (attributions.get(str(member.get("code") or "")) or {}).get("attribution_weight"),
                 "role": "today_leader" if index == 0 else "today_core",
             }
             for index, member in enumerate(leaders)
@@ -889,8 +1299,15 @@ def build_niuone_context(
     )
     unavailable_kline_count = max(0, resolved_reference_pool_count - len(prepared_items))
     resolved_theme_basis = str(theme_basis or "industry_proxy").strip() or "industry_proxy"
-    missing_theme_count = sum(1 for member in members if not member.get("themes"))
     previous_context = previous_context if isinstance(previous_context, dict) else {}
+    previous_version = previous_context.get("version")
+    if previous_version is not None and previous_version != NIUONE_CONTEXT_VERSION:
+        previous_market = (
+            dict(previous_context["market"])
+            if isinstance(previous_context.get("market"), Mapping)
+            else {}
+        )
+        previous_context = {"market": previous_market}
     as_of_date = str(as_of_date or "")[:10]
     previous_trading_day = str(previous_trading_day or "")[:10]
     sample_at = str(
@@ -930,6 +1347,7 @@ def build_niuone_context(
             member["strong_score"] >= NIUONE_STRONG_SCORE_THRESHOLD
             and (member["ret5"] > 0 or member["ret20"] > 0 or member["new_high20"])
         )
+    market_returns = _market_return_path(members)
 
     dragon, dragon_stocks, news, news_stocks = _external_context(
         dragon_tiger_snapshot,
@@ -941,19 +1359,134 @@ def build_niuone_context(
             dragon = dict(previous_context["dragon_tiger"])
         if isinstance(previous_context.get("news"), Mapping):
             news = dict(previous_context["news"])
+    previous_stocks = (
+        previous_context.get("stocks")
+        if isinstance(previous_context.get("stocks"), Mapping)
+        else {}
+    )
+    missing_theme_count = sum(
+        1 for member in members if not member.get("themes")
+    )
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for member in members:
         for theme_name in member.get("themes") or ():
             grouped[str(theme_name)].append(member)
+    same_trading_day = bool(
+        as_of_date
+        and previous_context_date
+        and as_of_date == previous_context_date
+    )
+    attribution_inputs: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    market_breadth_pct = float(market.get("breadth_score") or 50.0)
+    for theme_name, theme_members in grouped.items():
+        theme_return_factor = _theme_excess_return_factor(
+            theme_members,
+            market_returns=market_returns,
+        )
+        structural_ranked = sorted(
+            theme_members,
+            key=lambda member: float(member.get("strong_score") or 0.0),
+            reverse=True,
+        )
+        structural_rank_by_code = {
+            str(member.get("code") or ""): index
+            for index, member in enumerate(structural_ranked, start=1)
+            if member.get("code")
+        }
+        today_ranked = sorted(
+            (member for member in theme_members if member.get("live_change_available")),
+            key=lambda member: (
+                float(member.get("change_pct") or 0.0),
+                float(member.get("amount") or 0.0),
+            ),
+            reverse=True,
+        )
+        today_rank_by_code = {
+            str(member.get("code") or ""): index
+            for index, member in enumerate(today_ranked, start=1)
+            if member.get("code")
+        }
+        for member in theme_members:
+            code = str(member.get("code") or "")
+            rank = structural_rank_by_code.get(code)
+            today_rank = today_rank_by_code.get(code)
+            return_correlation = _peer_return_correlation(
+                member,
+                theme_factor=theme_return_factor,
+                market_returns=market_returns,
+            )
+            attribution_inputs[code].append({
+                "industry": theme_name,
+                "classification_industry": str(member.get("industry") or ""),
+                "membership_source": resolved_theme_basis,
+                "strong": bool(member.get("strong")),
+                "theme_member_count": len(theme_members),
+                "theme_rank": round(
+                    100.0 - (rank - 1) / max(1, len(theme_members) - 1) * 100.0,
+                    2,
+                ) if rank is not None else 0.0,
+                "today_rank_score": round(
+                    100.0 - (today_rank - 1) / max(1, len(today_ranked) - 1) * 100.0,
+                    2,
+                ) if today_rank is not None else 0.0,
+                "cohort_alignment_score": round(
+                    _cohort_alignment_score(member, theme_members),
+                    2,
+                ),
+                "peer_resonance_score": round(
+                    _peer_resonance_score(
+                        member,
+                        theme_members,
+                        market_breadth_pct=market_breadth_pct,
+                    ),
+                    2,
+                ),
+                **return_correlation,
+            })
+    attributed_profiles_by_code: dict[str, dict[str, dict[str, Any]]] = {}
+    for code, profiles in attribution_inputs.items():
+        attributed_profiles_by_code[code] = {
+            str(profile.get("industry") or ""): profile
+            for profile in _apply_theme_attributions(
+                profiles,
+                previous_stock=(
+                    previous_stocks.get(code)
+                    if isinstance(previous_stocks.get(code), Mapping)
+                    else None
+                ),
+                same_trading_day=same_trading_day,
+            )
+            if str(profile.get("industry") or "")
+        }
     flows = _flow_map(flow_rows)
     flow_population = list(flows.values())
-    theme_amounts = [sum(float(member["amount"]) for member in group) for group in grouped.values()]
+    theme_amounts = [
+        sum(
+            float(member["amount"])
+            * float(
+                (attributed_profiles_by_code.get(str(member.get("code") or ""), {}).get(theme_name) or {}).get("attribution_weight")
+                or 0.0
+            )
+            for member in group
+        )
+        for theme_name, group in grouped.items()
+    ]
     previous_themes = previous_context.get("themes") if isinstance(previous_context.get("themes"), dict) else {}
     themes: dict[str, dict[str, Any]] = {}
     stock_profiles: dict[str, list[dict[str, Any]]] = defaultdict(list)
 
     for industry, theme_members in grouped.items():
-        today_metrics = _today_theme_metrics(theme_members)
+        theme_attributions = {
+            str(member.get("code") or ""): attributed_profiles_by_code.get(
+                str(member.get("code") or ""), {}
+            ).get(industry, {})
+            for member in theme_members
+        }
+        today_metrics = _today_theme_metrics(
+            theme_members,
+            attributions=theme_attributions,
+            market_breadth_pct=market_breadth_pct,
+        )
         today_ranked_members = sorted(
             (member for member in theme_members if member.get("live_change_available")),
             key=lambda member: (float(member["change_pct"]), float(member["amount"])),
@@ -964,29 +1497,67 @@ def build_niuone_context(
             for index, member in enumerate(today_ranked_members, start=1)
             if member.get("code")
         }
+        def attribution_weight(member: Mapping[str, Any]) -> float:
+            return max(0.0, float(
+                (theme_attributions.get(str(member.get("code") or "")) or {}).get("attribution_weight")
+                or 0.0
+            ))
+
+        attributed_member_count = sum(
+            attribution_weight(member) for member in theme_members
+        )
+        raw_strong_members = [
+            member for member in theme_members if member["strong"]
+        ]
         strong_members = sorted(
-            (member for member in theme_members if member["strong"]),
-            key=lambda member: float(member["strong_score"]),
+            (
+                member
+                for member in raw_strong_members
+                if attribution_weight(member)
+                >= NIUONE_THEME_LEADER_MIN_ATTRIBUTION_WEIGHT
+            ),
+            key=lambda member: (
+                float(member["strong_score"]) * attribution_weight(member),
+                float(member["strong_score"]),
+            ),
             reverse=True,
         )
-        weights = [max(1.0, float(member["strong_score"])) * math.sqrt(max(1.0, float(member["amount"]))) for member in strong_members]
+        attributed_strong_count = sum(
+            attribution_weight(member) for member in raw_strong_members
+        )
+        weights = [
+            max(1.0, float(member["strong_score"]))
+            * math.sqrt(max(1.0, float(member["amount"])))
+            * attribution_weight(member)
+            for member in strong_members
+        ]
         weight_total = sum(weights)
         normalized = [weight / weight_total for weight in weights] if weight_total > 0 else []
         concentration = max(normalized) if normalized else 0.0
-        effective_count = 1.0 / sum(weight * weight for weight in normalized) if normalized else 0.0
+        kish_count = 1.0 / sum(weight * weight for weight in normalized) if normalized else 0.0
+        effective_count = min(kish_count, attributed_strong_count)
         effective_breadth_pct = _clamp(
-            effective_count / len(theme_members) * 100 if theme_members else 0.0
+            effective_count / attributed_member_count * 100
+            if attributed_member_count > 0
+            else 0.0
         )
         strong_count = len(strong_members)
         core_codes = [str(member["code"]) for member in strong_members[:NIUONE_CORE_STOCK_LIMIT] if member.get("code")]
-        strong_ratio = strong_count / len(theme_members) * 100 if theme_members else 0.0
+        strong_ratio = (
+            attributed_strong_count / attributed_member_count * 100
+            if attributed_member_count > 0
+            else 0.0
+        )
         top_scores = [float(member["strong_score"]) for member in strong_members[:3]]
         strength_component = _mean(top_scores) * 0.25
         breadth_signal = _clamp(strong_ratio * 1.2) * 0.55 + _clamp(effective_count / 3 * 100) * 0.45
         breadth_component = breadth_signal * 0.20
         leadership_signal = (_mean(top_scores[:1]) * 0.45 + _mean(top_scores[1:3]) * 0.55) if top_scores else 0.0
         leadership_component = leadership_signal * 0.15
-        amount = sum(float(member["amount"]) for member in theme_members)
+        amount = sum(
+            float(member["amount"]) * attribution_weight(member)
+            for member in theme_members
+        )
         flow_value = _matched_flow(industry, flows)
         amount_percentile = _percentile(amount, theme_amounts)
         flow_score = _percentile(flow_value, flow_population) if flow_value is not None else amount_percentile
@@ -1000,21 +1571,30 @@ def build_niuone_context(
             provisional = strength_component + breadth_component + leadership_component + capital_component
             persistence_signal += _clamp(provisional - previous_score, -20.0, 20.0)
         persistence_component = _clamp(persistence_signal) * 0.15
-        dragon_values = [float((dragon_stocks.get(str(member["code"])) or {}).get("strength") or 0.0) for member in strong_members]
-        news_values = [
-            1.0 if (news_stocks.get(str(member["code"])) or {}).get("tone") == "positive"
-            else -1.0 if (news_stocks.get(str(member["code"])) or {}).get("tone") == "negative"
-            else 0.0
+        dragon_values = [
+            (
+                float((dragon_stocks.get(str(member["code"])) or {}).get("strength") or 0.0),
+                attribution_weight(member),
+            )
             for member in strong_members
         ]
-        confirmation_signal = _clamp(50 + _mean(dragon_values) * 30 + _mean(news_values) * 20)
+        confirmation_signal = _clamp(
+            50
+            + _weighted_mean(dragon_values) * 30
+        )
         confirmation_component = confirmation_signal * 0.10
         if reuse_previous_external_context:
             previous_confirmation = safe_float(previous.get("confirmation_component"))
             if previous_confirmation is not None:
                 confirmation_component = _clamp(previous_confirmation, 0.0, 10.0)
         concentration_penalty = _clamp((concentration - 0.45) / 0.45 * 10, 0.0, 10.0)
-        sample_penalty = 5.0 if len(theme_members) < NIUONE_MIN_THEME_MEMBERS else 0.0
+        sample_penalty = _clamp(
+            (NIUONE_MIN_ATTRIBUTED_THEME_MASS - attributed_member_count)
+            / NIUONE_MIN_ATTRIBUTED_THEME_MASS
+            * 10.0,
+            0.0,
+            10.0,
+        )
         score = _clamp(
             strength_component
             + breadth_component
@@ -1025,7 +1605,10 @@ def build_niuone_context(
             - concentration_penalty
             - sample_penalty
         )
-        eligible = len(theme_members) >= NIUONE_MIN_THEME_MEMBERS
+        eligible = bool(
+            len(theme_members) >= NIUONE_MIN_THEME_MEMBERS
+            and attributed_member_count >= NIUONE_MIN_ATTRIBUTED_THEME_MASS
+        )
         state_detail = _theme_state(
             score=score,
             eligible=eligible,
@@ -1059,6 +1642,7 @@ def build_niuone_context(
             "industry": industry,
             "theme_basis": resolved_theme_basis,
             "member_count": len(theme_members),
+            "attributed_member_count": round(attributed_member_count, 4),
             **today_metrics,
             "eligible_data": eligible,
             "score": round(score, 2),
@@ -1084,7 +1668,9 @@ def build_niuone_context(
             "continued_core_codes": state_detail["continued_core_codes"],
             "previous_score": safe_round(previous_score, 2),
             "score_change": safe_round(score - previous_score, 2) if previous_score is not None else None,
+            "raw_strong_stock_count": len(raw_strong_members),
             "strong_stock_count": strong_count,
+            "attributed_strong_stock_count": round(attributed_strong_count, 4),
             "strong_stock_ratio": round(strong_ratio, 2),
             "effective_strong_count": round(effective_count, 2),
             "effective_breadth_pct": round(effective_breadth_pct, 2),
@@ -1105,6 +1691,8 @@ def build_niuone_context(
                     "name": member["name"],
                     "strong_score": round(float(member["strong_score"]), 2),
                     "change_pct": round(float(member["change_pct"]), 2),
+                    "attribution_score": (theme_attributions.get(str(member.get("code") or "")) or {}).get("attribution_score"),
+                    "attribution_weight": (theme_attributions.get(str(member.get("code") or "")) or {}).get("attribution_weight"),
                     "role": "leader" if index == 0 else "core",
                     "leader_rank": index + 1,
                     "leader_tier": index < NIUONE_LEADER_TIER_LIMIT,
@@ -1115,9 +1703,19 @@ def build_niuone_context(
 
         theme_ret5 = sorted(float(member["ret5"]) for member in theme_members)
         theme_ret20 = sorted(float(member["ret20"]) for member in theme_members)
+        attributed_leader_rank_by_code = {
+            str(member.get("code") or ""): index
+            for index, member in enumerate(strong_members, start=1)
+            if member.get("code")
+        }
+        attributed_today_rank_by_code = {
+            str(item.get("code") or ""): index
+            for index, item in enumerate(today_metrics.get("today_leaders") or [], start=1)
+            if item.get("code")
+        }
         for rank_index, member in enumerate(sorted(theme_members, key=lambda item: float(item["strong_score"]), reverse=True), start=1):
             code = str(member["code"])
-            today_rank = today_rank_by_code.get(code)
+            today_rank = attributed_today_rank_by_code.get(code)
             today_rank_score = (
                 100 - (today_rank - 1) / max(1, len(today_ranked_members) - 1) * 100
                 if today_rank is not None
@@ -1132,22 +1730,64 @@ def build_niuone_context(
             )
             dragon_stock = dragon_stocks.get(code) or {}
             news_stock = news_stocks.get(code) or {}
-            role = "leader" if rank_index == 1 and member["strong"] else ("core" if member["strong"] else "follower")
+            attribution = theme_attributions.get(code) or {}
+            leader_rank = attributed_leader_rank_by_code.get(code)
+            role = (
+                "leader"
+                if leader_rank == 1
+                else "core"
+                if leader_rank is not None
+                else "follower"
+            )
             stock_profiles[code].append({
                 "industry": industry,
                 "classification_industry": str(member.get("industry") or ""),
                 "theme_basis": resolved_theme_basis,
+                "theme_membership_source": attribution.get(
+                    "membership_source",
+                    resolved_theme_basis,
+                ),
                 "theme_state": state,
                 "theme_score": round(score, 2),
-                "cohort_alignment_score": round(
-                    _cohort_alignment_score(member, theme_members),
-                    2,
+                "theme_member_count": attribution.get(
+                    "theme_member_count"
                 ),
+                "cohort_alignment_score": attribution.get("cohort_alignment_score"),
+                "peer_resonance_score": attribution.get("peer_resonance_score"),
+                "return_correlation_score": attribution.get(
+                    "return_correlation_score"
+                ),
+                "return_correlation_rank_score": attribution.get(
+                    "return_correlation_rank_score"
+                ),
+                "return_correlation_observation_count": attribution.get(
+                    "return_correlation_observation_count"
+                ),
+                "return_correlation_peer_count": attribution.get(
+                    "return_correlation_peer_count"
+                ),
+                "theme_specificity_score": attribution.get(
+                    "theme_specificity_score"
+                ),
+                "current_attribution_score": attribution.get("current_attribution_score"),
+                "historical_prior_score": attribution.get("historical_prior_score"),
+                "attribution_score": attribution.get("attribution_score"),
+                "attribution_weight": attribution.get("attribution_weight"),
+                "unattributed_weight": attribution.get("unattributed_weight"),
+                "attribution_observation_count": attribution.get("attribution_observation_count"),
+                "attribution_wave_count": attribution.get("attribution_wave_count"),
                 "strong_score": round(float(member["strong_score"]), 2),
-                "strong": bool(member["strong"]),
+                "strong": bool(
+                    member["strong"]
+                    and float(attribution.get("attribution_weight") or 0.0)
+                    >= NIUONE_THEME_LEADER_MIN_ATTRIBUTION_WEIGHT
+                ),
                 "role": role,
-                "leader_rank": rank_index,
-                "leader_tier": bool(member["strong"] and rank_index <= NIUONE_LEADER_TIER_LIMIT),
+                "leader_rank": leader_rank,
+                "leader_tier": bool(
+                    leader_rank is not None
+                    and leader_rank <= NIUONE_LEADER_TIER_LIMIT
+                ),
                 "today_leader_rank": today_rank,
                 "today_leader_tier": bool(
                     today_rank is not None and today_rank <= NIUONE_LEADER_TIER_LIMIT
@@ -1193,26 +1833,8 @@ def build_niuone_context(
         "fading": 0,
     }
     stocks: dict[str, dict[str, Any]] = {}
-    previous_stocks = (
-        previous_context.get("stocks")
-        if isinstance(previous_context.get("stocks"), Mapping)
-        else {}
-    )
-    same_trading_day = bool(
-        as_of_date
-        and previous_context_date
-        and as_of_date == previous_context_date
-    )
     for code, profiles in stock_profiles.items():
-        attributed_profiles = _apply_theme_attributions(
-            profiles,
-            previous_stock=(
-                previous_stocks.get(code)
-                if isinstance(previous_stocks.get(code), Mapping)
-                else None
-            ),
-            same_trading_day=same_trading_day,
-        )
+        attributed_profiles = profiles
         ordered_profiles = sorted(
             attributed_profiles,
             key=lambda profile: (
@@ -1258,6 +1880,8 @@ def build_niuone_context(
             or (
                 float(leading_attribution.get("attribution_score") or 0.0)
                 >= NIUONE_THEME_ATTRIBUTION_CONFIDENCE_SCORE
+                and float(leading_attribution.get("attribution_weight") or 0.0)
+                >= 0.45
                 and attribution_gap is not None
                 and attribution_gap
                 >= NIUONE_THEME_ATTRIBUTION_CONFIDENCE_GAP
@@ -1267,9 +1891,14 @@ def build_niuone_context(
             attribution_gap,
             2,
         )
+        selected["unattributed_theme_weight"] = leading_attribution.get(
+            "unattributed_weight"
+        )
         selected["theme_attributions"] = [
             {
                 "theme": str(profile.get("industry") or ""),
+                "theme_member_count": profile.get("theme_member_count"),
+                "membership_source": profile.get("theme_membership_source"),
                 "current_score": profile.get("current_attribution_score"),
                 "historical_prior_score": profile.get(
                     "historical_prior_score"
@@ -1278,6 +1907,24 @@ def build_niuone_context(
                 "attribution_weight": profile.get("attribution_weight"),
                 "cohort_alignment_score": profile.get(
                     "cohort_alignment_score"
+                ),
+                "peer_resonance_score": profile.get(
+                    "peer_resonance_score"
+                ),
+                "return_correlation_score": profile.get(
+                    "return_correlation_score"
+                ),
+                "return_correlation_rank_score": profile.get(
+                    "return_correlation_rank_score"
+                ),
+                "return_correlation_observation_count": profile.get(
+                    "return_correlation_observation_count"
+                ),
+                "return_correlation_peer_count": profile.get(
+                    "return_correlation_peer_count"
+                ),
+                "theme_specificity_score": profile.get(
+                    "theme_specificity_score"
                 ),
                 "observation_count": profile.get(
                     "attribution_observation_count"
@@ -1298,8 +1945,10 @@ def build_niuone_context(
                     "industry",
                     "classification_industry",
                     "theme_basis",
+                    "theme_membership_source",
                     "theme_state",
                     "theme_score",
+                    "theme_member_count",
                     "strong",
                     "strong_score",
                     "role",
@@ -1313,10 +1962,17 @@ def build_niuone_context(
                     "theme_ret5_rank",
                     "theme_ret20_rank",
                     "cohort_alignment_score",
+                    "peer_resonance_score",
+                    "return_correlation_score",
+                    "return_correlation_rank_score",
+                    "return_correlation_observation_count",
+                    "return_correlation_peer_count",
+                    "theme_specificity_score",
                     "current_attribution_score",
                     "historical_prior_score",
                     "attribution_score",
                     "attribution_weight",
+                    "unattributed_weight",
                     "attribution_observation_count",
                     "attribution_wave_count",
                 )
@@ -1343,7 +1999,29 @@ def build_niuone_context(
         else None
     )
     primary = confirmed[0] if confirmed else None
-    secondary = confirmed[1] if len(confirmed) > 1 and float(confirmed[0]["score"]) - float(confirmed[1]["score"]) <= 8 else None
+
+    def driver_codes(theme: Mapping[str, Any]) -> set[str]:
+        return {
+            str(item.get("code") or "")
+            for item in list(theme.get("strong_stocks") or [])[:3]
+            if isinstance(item, Mapping) and item.get("code")
+        }
+
+    secondary = None
+    if primary is not None:
+        primary_drivers = driver_codes(primary)
+        for candidate in confirmed[1:]:
+            if float(primary["score"]) - float(candidate["score"]) > 8:
+                break
+            candidate_drivers = driver_codes(candidate)
+            if not primary_drivers or not candidate_drivers:
+                secondary = candidate
+                break
+            overlap = len(primary_drivers.intersection(candidate_drivers))
+            overlap_base = min(len(primary_drivers), len(candidate_drivers))
+            if overlap / overlap_base < 0.6:
+                secondary = candidate
+                break
     summary = {
         "mode": "dual" if secondary else ("single" if primary else "none"),
         "primary": primary["industry"] if primary else "",
@@ -1361,7 +2039,11 @@ def build_niuone_context(
         ),
         "today_primary": today_primary["industry"] if today_primary else "",
         "today_primary_score": today_primary["today_strength_score"] if today_primary else None,
-        "today_primary_breadth_pct": today_primary["today_breadth_pct"] if today_primary else None,
+        "today_primary_breadth_pct": (
+            today_primary.get("today_adjusted_breadth_pct")
+            if today_primary
+            else None
+        ),
         "today_observation_reason": (
             "今日强度仅作观察，不改变原有跨日主线确认门槛"
             if today_primary
@@ -1405,7 +2087,7 @@ def build_niuone_context(
             "description": "未归入已知数据质量分类",
         })
     return {
-        "version": 8,
+        "version": NIUONE_CONTEXT_VERSION,
         "strategy": "niuone",
         "theme_basis": resolved_theme_basis,
         "as_of_date": as_of_date,
@@ -1469,6 +2151,14 @@ def _action_theme_profile(
         candidates.append((merged, dict(theme)))
     if not candidates:
         return None
+    attributed_candidates = [
+        item
+        for item in candidates
+        if float(item[0].get("attribution_weight") or 0.0)
+        >= NIUONE_THEME_LEADER_MIN_ATTRIBUTION_WEIGHT
+    ]
+    if attributed_candidates:
+        candidates = attributed_candidates
 
     def action_compatible(item: tuple[dict[str, Any], dict[str, Any]]) -> bool:
         profile, theme = item
@@ -1809,13 +2499,46 @@ def _payload(
             "cohort_alignment_score",
             stock.get("cohort_alignment_score"),
         ),
+        "signal_theme_peer_resonance_score": selected_attribution.get(
+            "peer_resonance_score",
+            stock.get("peer_resonance_score"),
+        ),
+        "signal_theme_return_correlation_score": selected_attribution.get(
+            "return_correlation_score",
+            stock.get("return_correlation_score"),
+        ),
+        "signal_theme_return_correlation_rank_score": selected_attribution.get(
+            "return_correlation_rank_score",
+            stock.get("return_correlation_rank_score"),
+        ),
+        "signal_theme_return_correlation_observation_count": selected_attribution.get(
+            "return_correlation_observation_count",
+            stock.get("return_correlation_observation_count"),
+        ),
+        "signal_theme_return_correlation_peer_count": selected_attribution.get(
+            "return_correlation_peer_count",
+            stock.get("return_correlation_peer_count"),
+        ),
+        "signal_theme_specificity_score": selected_attribution.get(
+            "theme_specificity_score",
+            stock.get("theme_specificity_score"),
+        ),
+        "signal_theme_membership_source": selected_attribution.get(
+            "membership_source",
+            stock.get("theme_membership_source"),
+        ),
+        "unattributed_theme_weight": stock.get("unattributed_theme_weight"),
         "theme_attribution_confident": bool(
             stock.get("theme_attribution_confident")
             and _industry_name(stock.get("dominant_theme"))
             == metrics["industry"]
         ),
         "theme_attribution_gap": stock.get("theme_attribution_gap"),
-        "theme_basis": str(theme.get("theme_basis") or "industry_proxy"),
+        "theme_basis": str(
+            stock.get("theme_basis")
+            or theme.get("theme_basis")
+            or "industry_proxy"
+        ),
         "mainline_state": theme.get("state"),
         "niuone_lifecycle_stage": theme.get("niuone_lifecycle_stage"),
         "niuone_lifecycle_label": theme.get("niuone_lifecycle_label"),

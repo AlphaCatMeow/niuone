@@ -4178,6 +4178,15 @@ NIUONE_ENTRY_CONTEXT_FIELDS = (
     "entry_theme_attribution_score",
     "entry_theme_attribution_weight",
     "entry_theme_historical_prior_score",
+    "entry_theme_cohort_alignment_score",
+    "entry_theme_peer_resonance_score",
+    "entry_theme_return_correlation_score",
+    "entry_theme_return_correlation_rank_score",
+    "entry_theme_return_correlation_observation_count",
+    "entry_theme_return_correlation_peer_count",
+    "entry_theme_specificity_score",
+    "entry_theme_membership_source",
+    "entry_theme_unattributed_weight",
     "entry_model_requested_shares",
     "entry_executed_shares",
     "entry_maximum_permitted_shares",
@@ -4460,6 +4469,14 @@ PRACTICE_CANDIDATE_EVIDENCE_FIELDS = (
     "signal_theme_attribution_weight",
     "signal_theme_historical_prior_score",
     "signal_theme_cohort_alignment_score",
+    "signal_theme_peer_resonance_score",
+    "signal_theme_return_correlation_score",
+    "signal_theme_return_correlation_rank_score",
+    "signal_theme_return_correlation_observation_count",
+    "signal_theme_return_correlation_peer_count",
+    "signal_theme_specificity_score",
+    "signal_theme_membership_source",
+    "unattributed_theme_weight",
     "theme_attribution_confident",
     "theme_attribution_gap",
     "best_strategy",
@@ -8337,6 +8354,35 @@ def execute_actions(
                             candidate.get(
                                 "signal_theme_historical_prior_score"
                             )
+                        )
+                        pos["entry_theme_cohort_alignment_score"] = candidate.get(
+                            "signal_theme_cohort_alignment_score"
+                        )
+                        pos["entry_theme_peer_resonance_score"] = candidate.get(
+                            "signal_theme_peer_resonance_score"
+                        )
+                        pos["entry_theme_return_correlation_score"] = candidate.get(
+                            "signal_theme_return_correlation_score"
+                        )
+                        pos["entry_theme_return_correlation_rank_score"] = candidate.get(
+                            "signal_theme_return_correlation_rank_score"
+                        )
+                        pos["entry_theme_return_correlation_observation_count"] = candidate.get(
+                            "signal_theme_return_correlation_observation_count"
+                        )
+                        pos["entry_theme_return_correlation_peer_count"] = candidate.get(
+                            "signal_theme_return_correlation_peer_count"
+                        )
+                        pos["entry_theme_specificity_score"] = candidate.get(
+                            "signal_theme_specificity_score"
+                        )
+                        pos["entry_theme_membership_source"] = str(
+                            candidate.get("signal_theme_membership_source")
+                            or candidate.get("theme_basis")
+                            or ""
+                        )
+                        pos["entry_theme_unattributed_weight"] = candidate.get(
+                            "unattributed_theme_weight"
                         )
                     elif not str(pos.get("active_theme") or "").strip():
                         pos["active_theme"] = str(

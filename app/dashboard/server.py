@@ -1840,6 +1840,30 @@ def refresh_b1_candidate_cache_from_current_pool() -> dict[str, Any]:
                 "signal_theme_cohort_alignment_score": best.get(
                     "signal_theme_cohort_alignment_score"
                 ),
+                "signal_theme_peer_resonance_score": best.get(
+                    "signal_theme_peer_resonance_score"
+                ),
+                "signal_theme_return_correlation_score": best.get(
+                    "signal_theme_return_correlation_score"
+                ),
+                "signal_theme_return_correlation_rank_score": best.get(
+                    "signal_theme_return_correlation_rank_score"
+                ),
+                "signal_theme_return_correlation_observation_count": best.get(
+                    "signal_theme_return_correlation_observation_count"
+                ),
+                "signal_theme_return_correlation_peer_count": best.get(
+                    "signal_theme_return_correlation_peer_count"
+                ),
+                "signal_theme_specificity_score": best.get(
+                    "signal_theme_specificity_score"
+                ),
+                "signal_theme_membership_source": best.get(
+                    "signal_theme_membership_source"
+                ),
+                "unattributed_theme_weight": best.get(
+                    "unattributed_theme_weight"
+                ),
                 "theme_attribution_confident": best.get(
                     "theme_attribution_confident"
                 ),

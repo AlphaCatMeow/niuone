@@ -5,7 +5,7 @@ import math
 from typing import Any, Mapping
 
 
-NIUONE_MAINLINE_VIEW_SCHEMA_VERSION = 10
+NIUONE_MAINLINE_VIEW_SCHEMA_VERSION = 12
 NIUONE_MAINLINE_THEME_LIMIT = 5
 
 
@@ -42,6 +42,8 @@ def _strong_stock_view(value: Any) -> dict[str, Any] | None:
         "name": name,
         "strong_score": _number(value.get("strong_score")),
         "change_pct": _number(value.get("change_pct")),
+        "attribution_score": _number(value.get("attribution_score")),
+        "attribution_weight": _number(value.get("attribution_weight")),
         "role": _text(value.get("role"), 16),
     }
 
@@ -104,19 +106,39 @@ def _theme_view(value: Any) -> dict[str, Any] | None:
             value.get("niuone_lifecycle_entry_policy"), 32
         ),
         "member_count": member_count,
+        "attributed_member_count": _number(value.get("attributed_member_count")),
         "eligible_data": value.get("eligible_data") is True,
         "today_eligible_data": value.get("today_eligible_data") is True,
         "today_quote_count": _integer(value.get("today_quote_count")),
         "today_data_coverage": today_data_coverage,
+        "today_attributed_data_coverage": _number(
+            value.get("today_attributed_data_coverage")
+        ),
         "today_up_count": _integer(value.get("today_up_count")),
         "today_1_5pct_count": _integer(value.get("today_1_5pct_count")),
         "today_3pct_count": _integer(value.get("today_3pct_count")),
         "today_5pct_count": _integer(value.get("today_5pct_count")),
         "today_breadth_pct": today_breadth_pct,
+        "today_attributed_quote_count": _number(
+            value.get("today_attributed_quote_count")
+        ),
+        "today_attributed_up_count": _number(
+            value.get("today_attributed_up_count")
+        ),
+        "today_attributed_breadth_pct": _number(
+            value.get("today_attributed_breadth_pct")
+        ),
+        "today_adjusted_breadth_pct": _number(
+            value.get("today_adjusted_breadth_pct")
+        ),
         "today_median_change_pct": _number(value.get("today_median_change_pct")),
         "today_strength_score": _number(value.get("today_strength_score")),
         "today_leadership_score": _number(value.get("today_leadership_score")),
         "strong_stock_count": _integer(value.get("strong_stock_count")),
+        "raw_strong_stock_count": _integer(value.get("raw_strong_stock_count")),
+        "attributed_strong_stock_count": _number(
+            value.get("attributed_strong_stock_count")
+        ),
         "effective_strong_count": effective_strong_count,
         "effective_breadth_pct": effective_breadth_pct,
         "leader_concentration": _number(value.get("leader_concentration")),
@@ -137,7 +159,70 @@ def _theme_view(value: Any) -> dict[str, Any] | None:
         "strong_stocks": strong_stocks,
         "today_leader_stock": today_leader_stock,
         "today_leaders": today_leaders,
+        "related_themes": [
+            _text(label, 80)
+            for label in list(value.get("related_themes") or [])[:5]
+            if _text(label, 80)
+        ],
     }
+
+
+def _theme_driver_codes(theme: Mapping[str, Any], *, today: bool) -> list[str]:
+    key = "today_leaders" if today else "strong_stocks"
+    return [
+        _text(stock.get("code"), 12)
+        for stock in list(theme.get(key) or [])[:3]
+        if isinstance(stock, Mapping) and _text(stock.get("code"), 12)
+    ]
+
+
+def _diverse_themes(
+    ordered: list[dict[str, Any]],
+    *,
+    today: bool,
+) -> list[dict[str, Any]]:
+    """Collapse label clones driven by the same attributed stock cohort."""
+    selected: list[dict[str, Any]] = []
+    for raw_theme in ordered:
+        theme = dict(raw_theme)
+        drivers = _theme_driver_codes(theme, today=today)
+        duplicate: dict[str, Any] | None = None
+        for existing in selected:
+            existing_drivers = _theme_driver_codes(existing, today=today)
+            if not drivers or not existing_drivers:
+                continue
+            shared = set(drivers).intersection(existing_drivers)
+            overlap_base = min(len(drivers), len(existing_drivers))
+            high_overlap = bool(
+                overlap_base and len(shared) / overlap_base >= 0.6
+            )
+            same_leader = drivers[0] == existing_drivers[0]
+            leader_key = "today_leader_stock" if today else "leader_stock"
+            leader = theme.get(leader_key) if isinstance(theme.get(leader_key), Mapping) else {}
+            existing_leader = (
+                existing.get(leader_key)
+                if isinstance(existing.get(leader_key), Mapping)
+                else {}
+            )
+            weak_duplicate_leader = bool(
+                same_leader
+                and min(
+                    float(leader.get("attribution_weight") or 0.0),
+                    float(existing_leader.get("attribution_weight") or 0.0),
+                ) < 0.35
+            )
+            if high_overlap or weak_duplicate_leader:
+                duplicate = existing
+                break
+        if duplicate is None:
+            selected.append(theme)
+            continue
+        related = list(duplicate.get("related_themes") or [])
+        label = _text(theme.get("industry"), 80)
+        if label and label not in related:
+            related.append(label)
+        duplicate["related_themes"] = related[:5]
+    return selected
 
 
 def _coverage_reason_view(value: Any) -> dict[str, Any] | None:
@@ -165,12 +250,19 @@ def build_niuone_mainline_view(payload: Mapping[str, Any] | None) -> dict[str, A
     mainline = context.get("mainline") if isinstance(context.get("mainline"), Mapping) else {}
     today_primary = _text(mainline.get("today_primary"), 80)
     raw_themes = context.get("themes") if isinstance(context.get("themes"), Mapping) else {}
-    themes = [theme for value in raw_themes.values() if (theme := _theme_view(value)) is not None]
-    themes.sort(key=lambda theme: float(theme.get("score") or 0), reverse=True)
-    today_themes = sorted(
+    theme_views = [theme for value in raw_themes.values() if (theme := _theme_view(value)) is not None]
+    themes = _diverse_themes(
+        sorted(
+            theme_views,
+            key=lambda theme: float(theme.get("score") or 0),
+            reverse=True,
+        ),
+        today=False,
+    )
+    today_themes = _diverse_themes(sorted(
         (
             theme
-            for theme in themes
+            for theme in theme_views
             if theme.get("today_eligible_data") and theme.get("today_strength_score") is not None
         ),
         key=lambda theme: (
@@ -178,7 +270,7 @@ def build_niuone_mainline_view(payload: Mapping[str, Any] | None) -> dict[str, A
             float(theme.get("today_median_change_pct") or 0),
         ),
         reverse=True,
-    )
+    ), today=True)
     reference_pool_count = _integer(payload.get("reference_pool_count"))
     mapped_stock_count = _integer(context.get("mapped_stock_count"))
     diagnostics = (

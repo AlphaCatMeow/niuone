@@ -85,10 +85,12 @@ function percent(value) {
 function effectiveBreadthTitle(theme) {
   const breadth = numeric(theme.effective_breadth_pct)
   const todayBreadth = numeric(theme.today_breadth_pct)
+  const adjustedTodayBreadth = numeric(theme.today_adjusted_breadth_pct)
   const effective = numeric(theme.effective_strong_count)
+  const attributed = numeric(theme.attributed_member_count)
   const members = Number(theme.member_count)
   const sample = Number.isFinite(members) && members > 0 ? `${members}只` : '待补充'
-  return `结构有效广度 ${breadth}% · 等效强势股 ${effective}只 / 有效样本 ${sample}；今日上涨广度 ${todayBreadth}%`
+  return `结构有效广度 ${breadth}% · 等效强势股 ${effective}只 / 归因样本 ${attributed}（原始${sample}）；今日归因调整广度 ${adjustedTodayBreadth}%（原始 ${todayBreadth}%）`
 }
 
 function structuralLeaderStock(theme) {
@@ -124,16 +126,20 @@ function scoreDetail(theme) {
 }
 
 function displayedCount(theme) {
-  return activeFilter.value === 'today' ? theme.today_up_count : theme.strong_stock_count
+  return activeFilter.value === 'today'
+    ? theme.today_attributed_up_count ?? theme.today_up_count
+    : theme.attributed_strong_stock_count ?? theme.strong_stock_count
 }
 
 function displayedBreadth(theme) {
-  return activeFilter.value === 'today' ? theme.today_breadth_pct : theme.effective_breadth_pct
+  return activeFilter.value === 'today'
+    ? theme.today_adjusted_breadth_pct ?? theme.today_breadth_pct
+    : theme.effective_breadth_pct
 }
 
 function breadthDetail(theme) {
   return activeFilter.value === 'today'
-    ? `结构 ${numeric(theme.effective_breadth_pct)}%`
+    ? `归因 ${numeric(theme.today_attributed_breadth_pct)}% · 原始 ${numeric(theme.today_breadth_pct)}%`
     : `今日 ${numeric(theme.today_breadth_pct)}%`
 }
 
@@ -224,7 +230,7 @@ function marketLabel(value) {
 }
 
 function stateLabel(theme) {
-  if (activeFilter.value === 'today') return `今日广度 ${numeric(theme.today_breadth_pct)}%`
+  if (activeFilter.value === 'today') return `归因广度 ${numeric(theme.today_adjusted_breadth_pct ?? theme.today_breadth_pct)}%`
   if (theme.mainline_confirmed) return theme.niuone_lifecycle_label
     ? `${theme.niuone_lifecycle_label} · 已确认`
     : '已确认主线'
@@ -377,8 +383,8 @@ onBeforeUnmount(() => {
           <div class="theme-table-head" role="row">
             <span role="columnheader">题材</span>
             <span class="theme-column-help" role="columnheader" tabindex="0" data-tooltip="结构分用于跨日主线确认；今日强度只观察当日题材参与。" aria-label="强度：结构分和今日强度分别服务于跨日结构与当日观察。">{{ activeFilter === 'today' ? '今日强度' : '结构分' }}</span>
-            <span role="columnheader">{{ activeFilter === 'today' ? '上涨家数' : '结构强股' }}</span>
-            <span class="theme-column-help" role="columnheader" tabindex="0" data-tooltip="结构广度是等效强势股占比；今日广度是实时上涨家数占有效报价样本的比例。" aria-label="广度：区分结构有效广度与今日上涨广度。">{{ activeFilter === 'today' ? '今日广度' : '结构广度' }}</span>
+            <span role="columnheader">{{ activeFilter === 'today' ? '等效上涨' : '归因强股' }}</span>
+            <span class="theme-column-help" role="columnheader" tabindex="0" data-tooltip="结构广度按个股题材归因权重计算；今日广度还会按题材样本量向全市场广度收缩，原始广度保留在详情中。" aria-label="广度：使用题材归因和小样本收缩后的有效广度。">{{ activeFilter === 'today' ? '归因广度' : '结构广度' }}</span>
             <span class="theme-column-help" role="columnheader" tabindex="0" data-tooltip="与上一相邻交易日重合的核心强势股数量及比例。" aria-label="核心延续：与上一相邻交易日重合的核心强势股数量及比例。">核心延续</span>
             <span role="columnheader">{{ activeFilter === 'today' ? '日内领涨' : '结构龙头' }}</span>
             <span class="theme-column-help" role="columnheader" tabindex="0" data-tooltip="展示是否形成跨日延续，以及行业主力资金净额或数据状态。" aria-label="延续与资金：展示是否形成跨日延续，以及行业主力资金净额或数据状态。">延续与资金</span>
@@ -395,16 +401,17 @@ onBeforeUnmount(() => {
               <div>
                 <h4>{{ theme.industry }}</h4>
                 <span class="theme-state">{{ stateLabel(theme) }}</span>
+                <span v-if="theme.related_themes?.length" class="theme-state">关联：{{ theme.related_themes.join('、') }}</span>
               </div>
             </div>
             <div class="theme-score" role="cell">
               <strong>{{ numeric(displayedScore(theme)) }}</strong>
               <small>{{ scoreDetail(theme) }}</small>
             </div>
-            <div class="theme-data-cell strong-count" :data-label="activeFilter === 'today' ? '上涨家数' : '结构强股'" role="cell"><strong>{{ displayedCount(theme) }}</strong><small>只</small></div>
+            <div class="theme-data-cell strong-count" :data-label="activeFilter === 'today' ? '等效上涨' : '归因强股'" role="cell"><strong>{{ numeric(displayedCount(theme)) }}</strong><small>只</small></div>
             <div
               class="theme-data-cell breadth"
-              :data-label="activeFilter === 'today' ? '今日广度' : '结构广度'"
+              :data-label="activeFilter === 'today' ? '归因广度' : '结构广度'"
               role="cell"
               :title="effectiveBreadthTitle(theme)"
               :aria-label="effectiveBreadthTitle(theme)"
@@ -423,7 +430,7 @@ onBeforeUnmount(() => {
                   <span class="theme-leader-identity">
                     <span class="theme-leader-badge">{{ leaderBadge(theme) }}</span>
                     <strong>{{ leaderStock(theme).name || leaderStock(theme).code }}</strong>
-                    <small>{{ leaderStock(theme).code }}</small>
+                    <small>{{ leaderStock(theme).code }}<template v-if="leaderStock(theme).attribution_weight != null"> · 归因 {{ percent(leaderStock(theme).attribution_weight) }}</template></small>
                   </span>
                   <span class="theme-stock-change" :class="stockChangeTone(leaderStock(theme).change_pct)">{{ signed(leaderStock(theme).change_pct, '%') }}</span>
                   <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"></path></svg>
@@ -440,7 +447,7 @@ onBeforeUnmount(() => {
                     <span class="theme-stock-detail-name">
                       <b v-if="stockIndex === 0">{{ leaderBadge(theme) }}</b>
                       <strong>{{ stock.name || stock.code }}</strong>
-                      <small>{{ stock.code }}</small>
+                      <small>{{ stock.code }}<template v-if="stock.attribution_weight != null"> · 归因 {{ percent(stock.attribution_weight) }}</template></small>
                     </span>
                     <strong class="theme-stock-change" :class="stockChangeTone(stock.change_pct)">{{ signed(stock.change_pct, '%') }}</strong>
                   </div>

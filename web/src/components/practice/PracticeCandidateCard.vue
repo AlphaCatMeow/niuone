@@ -177,6 +177,14 @@ function toggleCandidateDetails() {
               <strong>{{ formatPracticeNumber(item.signal_theme_historical_prior_score) }} · {{ formatPracticeNumber(item.signal_theme_cohort_alignment_score) }}</strong>
             </div>
             <div class="niuone-fact">
+              <span>20日波形 / 候选相对</span>
+              <strong>{{ formatPracticeNumber(item.signal_theme_return_correlation_score) }} · {{ formatPracticeNumber(item.signal_theme_return_correlation_rank_score) }}</strong>
+            </div>
+            <div class="niuone-fact">
+              <span>题材特异度 / 波形样本</span>
+              <strong>{{ formatPracticeNumber(item.signal_theme_specificity_score) }} · {{ item.signal_theme_return_correlation_observation_count ?? 0 }}日</strong>
+            </div>
+            <div class="niuone-fact">
               <span>核心题材</span>
               <strong>{{ mainlineThemes }}</strong>
             </div>

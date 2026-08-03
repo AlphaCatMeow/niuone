@@ -55,7 +55,7 @@ DEFAULT_HISTORICAL_REFERENCE_WIN_RATE_PCT = 59.71
 DEFAULT_WIN_RATE_CONFIDENCE_LEVEL = 0.95
 DEFAULT_MAX_PORTFOLIO_DRAWDOWN_PCT = 6.0
 DEFAULT_MIN_RETURN_TO_DRAWDOWN_RATIO = 1.0
-FORWARD_PROTOCOL_VERSION = "niuone-strict-forward-v27"
+FORWARD_PROTOCOL_VERSION = "niuone-strict-forward-v30"
 FORWARD_PERFORMANCE_CLUSTER_UNIT = "entry_date_x_entry_theme"
 FORWARD_SHADOW_CANDIDATES = {
     "execution_gap": "round13_execution_gap_le_1pct",
@@ -80,6 +80,15 @@ FORWARD_REQUIRED_ENTRY_CONTEXT_FIELDS = (
     "entry_theme_attribution_score",
     "entry_theme_attribution_weight",
     "entry_theme_historical_prior_score",
+    "entry_theme_cohort_alignment_score",
+    "entry_theme_peer_resonance_score",
+    "entry_theme_return_correlation_score",
+    "entry_theme_return_correlation_rank_score",
+    "entry_theme_return_correlation_observation_count",
+    "entry_theme_return_correlation_peer_count",
+    "entry_theme_specificity_score",
+    "entry_theme_membership_source",
+    "entry_theme_unattributed_weight",
     "entry_model_requested_shares",
     "entry_executed_shares",
     "entry_maximum_permitted_shares",
@@ -1411,9 +1420,43 @@ def _entry_attribution_gaps(row: Mapping[str, Any]) -> tuple[str, ...]:
     for field in (
         "entry_theme_attribution_score",
         "entry_theme_historical_prior_score",
+        "entry_theme_cohort_alignment_score",
+        "entry_theme_peer_resonance_score",
+        "entry_theme_specificity_score",
     ):
         value = _number(context.get(field))
         if value is None or value < 0 or value > 100:
+            gaps.append(field)
+    correlation_observations = _number(
+        context.get("entry_theme_return_correlation_observation_count")
+    )
+    correlation_peers = _number(
+        context.get("entry_theme_return_correlation_peer_count")
+    )
+    for field, value in (
+        (
+            "entry_theme_return_correlation_observation_count",
+            correlation_observations,
+        ),
+        ("entry_theme_return_correlation_peer_count", correlation_peers),
+    ):
+        if value is None or value < 0 or not float(value).is_integer():
+            gaps.append(field)
+    for field in (
+        "entry_theme_return_correlation_score",
+        "entry_theme_return_correlation_rank_score",
+    ):
+        value = _number(context.get(field))
+        evidence_expected = bool(
+            correlation_observations is not None
+            and correlation_observations >= 8
+            and correlation_peers is not None
+            and correlation_peers >= 3
+        )
+        if (
+            value is not None
+            and (value < 0 or value > 100)
+        ) or (evidence_expected and value is None):
             gaps.append(field)
     attribution_weight = _number(
         context.get("entry_theme_attribution_weight")
@@ -1424,6 +1467,17 @@ def _entry_attribution_gaps(row: Mapping[str, Any]) -> tuple[str, ...]:
         or attribution_weight > 1
     ):
         gaps.append("entry_theme_attribution_weight")
+    unattributed_weight = _number(
+        context.get("entry_theme_unattributed_weight")
+    )
+    if (
+        unattributed_weight is None
+        or unattributed_weight < 0
+        or unattributed_weight > 1
+    ):
+        gaps.append("entry_theme_unattributed_weight")
+    if not str(context.get("entry_theme_membership_source") or "").strip():
+        gaps.append("entry_theme_membership_source")
     for field in (
         "entry_signal_score",
         "entry_execution_gap_pct",

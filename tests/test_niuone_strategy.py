@@ -67,6 +67,7 @@ from strategies.scoring.common import (  # noqa: E402
     niu_reversal_entry_stage_blocker,
 )
 from strategies.scoring.niuone import (  # noqa: E402
+    _apply_theme_attributions,
     _apply_markup_momentum_probe,
     _daily_v_reversal_metrics,
 )
@@ -141,6 +142,15 @@ def niu_candidate(**updates) -> dict:
         "signal_theme_attribution_score": 86.0,
         "signal_theme_attribution_weight": 1.0,
         "signal_theme_historical_prior_score": 84.0,
+        "signal_theme_cohort_alignment_score": 82.0,
+        "signal_theme_peer_resonance_score": 88.0,
+        "signal_theme_return_correlation_score": 90.0,
+        "signal_theme_return_correlation_rank_score": 95.0,
+        "signal_theme_return_correlation_observation_count": 20,
+        "signal_theme_return_correlation_peer_count": 10,
+        "signal_theme_specificity_score": 88.0,
+        "signal_theme_membership_source": "eastmoney_concept",
+        "unattributed_theme_weight": 0.0,
         "market_regime": "offensive",
         "market_score": 78.0,
         "market_hard_stop": False,
@@ -828,10 +838,359 @@ class NiuOneStrategyTests(unittest.TestCase):
             [item["theme"] for item in attributions],
             ["存储芯片", "先进封装"],
         )
+        total_weight = sum(
+            float(item["attribution_weight"])
+            for item in attributions
+        )
+        self.assertGreater(total_weight, 0.25)
+        self.assertLessEqual(total_weight, 1.0)
         self.assertAlmostEqual(
-            sum(float(item["attribution_weight"]) for item in attributions),
-            1.0,
+            float(attributions[0]["attribution_weight"]),
+            float(attributions[1]["attribution_weight"]),
             places=5,
+        )
+
+    def test_weak_multi_concept_candidates_keep_unattributed_mass(self):
+        profiles = _apply_theme_attributions(
+            [
+                {
+                    "industry": theme,
+                    "peer_resonance_score": 0,
+                    "cohort_alignment_score": 0,
+                    "today_rank_score": 0,
+                    "theme_rank": 0,
+                    "strong": False,
+                }
+                for theme in ("标签甲", "标签乙", "标签丙")
+            ],
+            previous_stock=None,
+            same_trading_day=False,
+        )
+
+        self.assertAlmostEqual(
+            sum(float(item["attribution_weight"]) for item in profiles),
+            0.25,
+            places=6,
+        )
+        self.assertTrue(all(item["current_attribution_score"] == 0.0 for item in profiles))
+        self.assertTrue(all(item["unattributed_weight"] == 0.75 for item in profiles))
+
+    def test_nested_theme_tie_prefers_the_more_specific_cohort(self):
+        profiles = _apply_theme_attributions(
+            [
+                {
+                    "industry": theme,
+                    "theme_member_count": member_count,
+                    "return_correlation_score": 90.0,
+                    "return_correlation_observation_count": 20,
+                    "peer_resonance_score": 80.0,
+                    "cohort_alignment_score": 80.0,
+                    "today_rank_score": 80.0,
+                    "theme_rank": 80.0,
+                    "strong": True,
+                }
+                for theme, member_count in (
+                    ("军工", 300),
+                    ("商业航天", 60),
+                )
+            ],
+            previous_stock=None,
+            same_trading_day=False,
+        )
+
+        self.assertEqual(profiles[0]["industry"], "商业航天")
+        self.assertEqual(profiles[0]["theme_specificity_score"], 100.0)
+        self.assertEqual(profiles[1]["theme_specificity_score"], 0.0)
+        self.assertGreater(
+            profiles[0]["attribution_score"],
+            profiles[1]["attribution_score"],
+        )
+
+    def test_multi_concept_leader_is_attributed_to_independent_peer_narrative(self):
+        def prepared_item(
+            code: str,
+            *,
+            step: float,
+            change_pct: float,
+            themes: list[str],
+            amount: float,
+            name: str = "测试",
+        ) -> dict:
+            rows = make_rows(code, "有色金属", step)
+            previous_close = float(rows[-2]["close"])
+            return {
+                "code": code,
+                "name": name,
+                "industry": "有色金属",
+                "themes": themes,
+                "rows": rows,
+                "quote": {
+                    "price": previous_close * (1 + change_pct / 100),
+                    "prev_close": previous_close,
+                    "low": previous_close,
+                    "change_pct": change_pct,
+                    "amount": amount,
+                },
+            }
+
+        prepared = [
+            prepared_item(
+                "002149",
+                step=0.12,
+                change_pct=7.4,
+                themes=["纳米银", "核能核电", "商业航天"],
+                amount=3e9,
+                name="西部材料",
+            )
+        ]
+        prepared.extend(
+            prepared_item(
+                f"60010{index}",
+                step=0.10,
+                change_pct=4.5 - index * 0.3,
+                themes=["商业航天"],
+                amount=1.8e9,
+            )
+            for index in range(3)
+        )
+        prepared.extend(
+            prepared_item(
+                f"60020{index}",
+                step=-0.01,
+                change_pct=0.3 - index * 0.2,
+                themes=["纳米银"],
+                amount=0.6e9,
+            )
+            for index in range(6)
+        )
+        prepared.extend(
+            prepared_item(
+                f"60030{index}",
+                step=0.01,
+                change_pct=0.8 - index * 0.15,
+                themes=["核能核电"],
+                amount=0.8e9,
+            )
+            for index in range(8)
+        )
+
+        context = build_niuone_context(
+            prepared,
+            market_snapshot={
+                "up": 9,
+                "down": 9,
+                "median_change_pct": 0,
+                "limit_up": 0,
+                "limit_down": 0,
+            },
+            news_snapshot={
+                "configured": True,
+                "records": [{
+                    "code": "002149",
+                    "checked": True,
+                    "available": True,
+                    "tone": "positive",
+                    "summary": "公司核电材料业务获得市场关注",
+                }],
+            },
+            theme_basis="eastmoney_concept",
+            as_of_date="2026-08-03",
+        )
+
+        stock = context["stocks"]["002149"]
+        weights = {
+            item["theme"]: float(item["attribution_weight"])
+            for item in stock["theme_attributions"]
+        }
+        self.assertEqual(stock["dominant_theme"], "商业航天")
+        self.assertIn("商业航天", stock["theme_memberships"])
+        self.assertTrue(stock["theme_attribution_confident"])
+        self.assertGreater(weights["商业航天"], 0.75)
+        self.assertLess(weights["纳米银"], 0.15)
+        self.assertLess(weights["核能核电"], 0.15)
+        self.assertEqual(
+            context["themes"]["商业航天"]["today_leaders"][0]["code"],
+            "002149",
+        )
+        self.assertNotIn(
+            "002149",
+            {
+                item["code"]
+                for theme_name in ("纳米银", "核能核电")
+                for item in context["themes"][theme_name]["today_leaders"]
+            },
+        )
+        self.assertGreater(
+            context["themes"]["商业航天"]["today_strength_score"],
+            context["themes"]["纳米银"]["today_strength_score"],
+        )
+        self.assertGreater(
+            context["themes"]["商业航天"]["today_strength_score"],
+            context["themes"]["核能核电"]["today_strength_score"],
+        )
+        self.assertEqual(context["mainline"]["today_primary"], "商业航天")
+        commercial_attribution = next(
+            item
+            for item in stock["theme_attributions"]
+            if item["theme"] == "商业航天"
+        )
+        self.assertEqual(
+            commercial_attribution["membership_source"],
+            "eastmoney_concept",
+        )
+
+        no_news_context = build_niuone_context(
+            prepared,
+            market_snapshot={
+                "up": 9,
+                "down": 9,
+                "median_change_pct": 0,
+                "limit_up": 0,
+                "limit_down": 0,
+            },
+            theme_basis="eastmoney_concept",
+            as_of_date="2026-08-03",
+        )
+        self.assertEqual(
+            stock["theme_attributions"],
+            no_news_context["stocks"]["002149"]["theme_attributions"],
+        )
+        self.assertEqual(
+            context["themes"]["商业航天"]["score"],
+            no_news_context["themes"]["商业航天"]["score"],
+        )
+
+        minute_context = build_niuone_context(
+            prepared,
+            market_snapshot={
+                "up": 9,
+                "down": 9,
+                "median_change_pct": 0,
+                "limit_up": 0,
+                "limit_down": 0,
+            },
+            previous_context=context,
+            reuse_previous_external_context=True,
+            theme_basis="eastmoney_concept",
+            as_of_date="2026-08-03",
+        )
+        minute_attribution = next(
+            item
+            for item in minute_context["stocks"]["002149"]["theme_attributions"]
+            if item["theme"] == "商业航天"
+        )
+        self.assertEqual(
+            minute_attribution["membership_source"],
+            "eastmoney_concept",
+        )
+
+    def test_market_neutral_return_wave_breaks_aggregate_theme_tie(self):
+        target_returns = [
+            1.2, -0.9, 2.1, -1.3, 0.8,
+            1.5, -0.7, 2.4, -1.1, 1.8,
+            0.6, -0.5, 2.2, -1.0, 1.4,
+            0.9, -0.4, 1.7, -0.8, 2.6,
+        ]
+
+        def patterned_item(
+            code: str,
+            returns: list[float],
+            themes: list[str],
+            *,
+            name: str = "测试",
+        ) -> dict:
+            rows = make_rows(code, "有色金属", 0.02)
+            close = float(rows[-len(returns) - 1]["close"])
+            for row, change_pct in zip(rows[-len(returns):], returns):
+                close *= 1.0 + change_pct / 100.0
+                row.update({
+                    "open": close * 0.997,
+                    "close": close,
+                    "high": close * 1.008,
+                    "low": close * 0.992,
+                    "volume": 1200.0,
+                })
+            enrich_rows(rows)
+            rows[-1].update({
+                "symbol_code": code,
+                "stock_name": name,
+                "industry": "有色金属",
+                "quote_amount": 2e9,
+            })
+            return {
+                "code": code,
+                "name": name,
+                "industry": "有色金属",
+                "themes": themes,
+                "rows": rows,
+                "quote": {
+                    "price": float(rows[-1]["close"]),
+                    "prev_close": float(rows[-2]["close"]),
+                    "change_pct": returns[-1],
+                    "amount": 2e9,
+                },
+            }
+
+        prepared = [
+            patterned_item(
+                "002149",
+                target_returns,
+                ["商业航天", "水利建设"],
+                name="西部材料",
+            )
+        ]
+        prepared.extend(
+            patterned_item(
+                f"60040{index}",
+                [value * (0.72 + index * 0.04) for value in target_returns],
+                ["商业航天"],
+            )
+            for index in range(4)
+        )
+        rotated = target_returns[5:] + target_returns[:5]
+        prepared.extend(
+            patterned_item(
+                f"60050{index}",
+                [value * (1.08 + index * 0.04) for value in rotated],
+                ["水利建设"],
+            )
+            for index in range(4)
+        )
+
+        context = build_niuone_context(
+            prepared,
+            market_snapshot={
+                "up": 5,
+                "down": 4,
+                "median_change_pct": 0.2,
+                "limit_up": 0,
+                "limit_down": 0,
+            },
+            theme_basis="eastmoney_concept",
+            as_of_date="2026-08-03",
+        )
+
+        stock = context["stocks"]["002149"]
+        attributions = {
+            item["theme"]: item
+            for item in stock["theme_attributions"]
+        }
+        self.assertEqual(stock["dominant_theme"], "商业航天")
+        self.assertGreater(
+            attributions["商业航天"]["return_correlation_score"],
+            attributions["水利建设"]["return_correlation_score"],
+        )
+        self.assertGreater(
+            attributions["商业航天"]["return_correlation_rank_score"],
+            attributions["水利建设"]["return_correlation_rank_score"],
+        )
+        self.assertEqual(
+            attributions["商业航天"]["return_correlation_observation_count"],
+            20,
+        )
+        self.assertEqual(
+            attributions["商业航天"]["return_correlation_peer_count"],
+            4,
         )
 
     def test_same_stage_multi_concept_route_prefers_attribution_evidence(self):
@@ -1071,12 +1430,15 @@ class NiuOneStrategyTests(unittest.TestCase):
         self.assertEqual(theme["today_3pct_count"], 4)
         self.assertEqual(theme["today_5pct_count"], 3)
         self.assertEqual(theme["today_breadth_pct"], 100)
+        self.assertEqual(theme["today_attributed_breadth_pct"], 100)
+        self.assertEqual(theme["today_adjusted_breadth_pct"], 75)
         self.assertEqual(theme["today_median_change_pct"], 5.25)
-        self.assertEqual(theme["today_strength_score"], 96.25)
+        self.assertEqual(theme["today_strength_score"], 72.92)
         self.assertEqual(theme["today_leadership_score"], 55)
         self.assertEqual(theme["today_leaders"][0]["change_pct"], 6)
         self.assertEqual(context["mainline"]["today_primary"], "半导体")
-        self.assertEqual(context["mainline"]["today_primary_score"], 96.25)
+        self.assertEqual(context["mainline"]["today_primary_score"], 72.92)
+        self.assertEqual(context["mainline"]["today_primary_breadth_pct"], 75)
         self.assertEqual(context["mainline"]["mode"], "none")
 
     def test_today_ranking_requires_fresh_quote_coverage(self):
@@ -2308,6 +2670,15 @@ class NiuOneStrategyTests(unittest.TestCase):
                 "entry_theme_attribution_score": 86.0,
                 "entry_theme_attribution_weight": 1.0,
                 "entry_theme_historical_prior_score": 84.0,
+                "entry_theme_cohort_alignment_score": 82.0,
+                "entry_theme_peer_resonance_score": 88.0,
+                "entry_theme_return_correlation_score": 90.0,
+                "entry_theme_return_correlation_rank_score": 95.0,
+                "entry_theme_return_correlation_observation_count": 20,
+                "entry_theme_return_correlation_peer_count": 10,
+                "entry_theme_specificity_score": 88.0,
+                "entry_theme_membership_source": "eastmoney_concept",
+                "entry_theme_unattributed_weight": 0.0,
                 "entry_model_requested_shares": 400,
                 "entry_executed_shares": 400,
                 "entry_maximum_permitted_shares": 600,

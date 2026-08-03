@@ -51,7 +51,6 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from core.json_cache import write_json_cache
-from core.model_api import build_model_request, request_model
 from niuone_paths import get_dashboard_env_file, get_dashboard_home
 from market_data.news_precheck import (
     NewsPrecheckConfig,
@@ -2049,27 +2048,6 @@ def main():
     if niuone_mainline_only:
         if niuone_context is None:
             raise RuntimeError("independent NiuOne mainline context was not generated")
-        news_shortlist = niuone_news_shortlist(niuone_context)
-        news_snapshot = fetch_sector_tide_news_precheck(news_shortlist)
-        niuone_context = build_niuone_context(
-            prepared_items,
-            reference_pool_count=len(reference_candidates),
-            market_snapshot=market_snapshot,
-            flow_rows=sector_tide_flow_rows,
-            previous_context=previous_niuone_context,
-            dragon_tiger_snapshot=dragon_tiger_snapshot,
-            news_snapshot=news_snapshot,
-            as_of_date=niuone_as_of_date,
-            previous_trading_day=niuone_previous_trading_day,
-            sample_at=str(market_snapshot.get("captured_at") or ""),
-            theme_basis="eastmoney_concept",
-        )
-        niuone_context["industry_money_flow"] = sector_tide_flow_rows
-        niuone_context["reference_stock_universe"] = list(reference_stock_universe)
-        niuone_context["reference_stock_universe_label"] = friendly_stock_universe(reference_stock_universe)
-        niuone_context["reference_pool_count"] = len(reference_candidates)
-        niuone_context["reference_prefilter_count"] = len(context_candidates)
-        niuone_context["reference_analysis_count"] = len(context_candidates)
         generated_at = time.strftime("%Y-%m-%d %H:%M:%S")
         output = {
             "generated_at": generated_at,
@@ -2082,12 +2060,10 @@ def main():
         }
         write_niuone_mainline_cache(NIUONE_MAINLINE_CACHE, output)
         print(json.dumps(output, ensure_ascii=False, indent=2))
-        news_meta = niuone_context.get("news") or {}
         print(
             "  Independent theme-strength cache updated: "
             f"generated_at={generated_at} themes={niuone_context.get('theme_count')} "
-            f"news_configured={news_meta.get('configured')} "
-            f"news_available={news_meta.get('available')}",
+            "theme_source=eastmoney_concept_and_market_resonance",
             file=sys.stderr,
         )
         return
@@ -2169,6 +2145,30 @@ def main():
             ),
             "signal_theme_cohort_alignment_score": best.get(
                 "signal_theme_cohort_alignment_score"
+            ),
+            "signal_theme_peer_resonance_score": best.get(
+                "signal_theme_peer_resonance_score"
+            ),
+            "signal_theme_return_correlation_score": best.get(
+                "signal_theme_return_correlation_score"
+            ),
+            "signal_theme_return_correlation_rank_score": best.get(
+                "signal_theme_return_correlation_rank_score"
+            ),
+            "signal_theme_return_correlation_observation_count": best.get(
+                "signal_theme_return_correlation_observation_count"
+            ),
+            "signal_theme_return_correlation_peer_count": best.get(
+                "signal_theme_return_correlation_peer_count"
+            ),
+            "signal_theme_specificity_score": best.get(
+                "signal_theme_specificity_score"
+            ),
+            "signal_theme_membership_source": best.get(
+                "signal_theme_membership_source"
+            ),
+            "unattributed_theme_weight": best.get(
+                "unattributed_theme_weight"
             ),
             "theme_attribution_confident": best.get(
                 "theme_attribution_confident"
@@ -2428,53 +2428,6 @@ def main():
             f"configured={news_meta.get('configured')} "
             f"checked={news_meta.get('matched_stock_count', 0)} "
             f"available={news_meta.get('available_stock_count', 0)}",
-            file=sys.stderr,
-        )
-    elif niuone_enabled and niuone_context is not None:
-        report_scan_progress("news_precheck", stage_label="正在检查候选股消息面", total=SECTOR_TIDE_NEWS_PRECHECK_LIMIT)
-        news_shortlist = niuone_news_shortlist(niuone_context)
-        news_snapshot = fetch_sector_tide_news_precheck(news_shortlist)
-        niuone_context = build_niuone_context(
-            prepared_items,
-            reference_pool_count=len(reference_candidates),
-            market_snapshot=market_snapshot,
-            flow_rows=sector_tide_flow_rows,
-            previous_context=previous_niuone_context,
-            dragon_tiger_snapshot=dragon_tiger_snapshot,
-            news_snapshot=news_snapshot,
-            as_of_date=niuone_as_of_date,
-            previous_trading_day=niuone_previous_trading_day,
-            sample_at=str(market_snapshot.get("captured_at") or ""),
-            theme_basis="eastmoney_concept",
-        )
-        niuone_context["industry_money_flow"] = sector_tide_flow_rows
-        niuone_context["reference_stock_universe"] = list(reference_stock_universe)
-        niuone_context["reference_stock_universe_label"] = friendly_stock_universe(reference_stock_universe)
-        niuone_context["reference_pool_count"] = len(reference_candidates)
-        niuone_context["reference_prefilter_count"] = len(context_candidates)
-        niuone_context["reference_analysis_count"] = len(context_candidates)
-        strategy_context = niuone_context
-        record_codes = {
-            normalize_stock_code(record.get("code"))
-            for record in news_snapshot.get("records") or []
-            if isinstance(record, dict) and normalize_stock_code(record.get("code"))
-        }
-        source_by_code = {str(candidate[0]): candidate for candidate in to_analyze}
-        refreshed_by_code: dict[str, dict[str, Any]] = {}
-        for code in record_codes:
-            source = source_by_code.get(code)
-            refreshed = analyze_candidate(source) if source else None
-            if refreshed is not None:
-                refreshed_by_code[code] = refreshed
-        if refreshed_by_code:
-            results = [refreshed_by_code.get(str(item.get("code") or ""), item) for item in results]
-            results.sort(key=sort_key, reverse=True)
-        news_meta = niuone_context.get("news") or {}
-        print(
-            "  牛牛消息面预检: "
-            f"configured={news_meta.get('configured')} "
-            f"checked={news_meta.get('matched_stock_count', 0)} "
-            f"available={news_meta.get('available')}",
             file=sys.stderr,
         )
     display_candidates = select_display_candidates(results)

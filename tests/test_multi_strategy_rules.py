@@ -110,6 +110,38 @@ class MultiStrategyRuleTests(unittest.TestCase):
         self.assertEqual(set(scorers), set(screen.NIUONE_STRATEGY_IDS))
         self.assertFalse(set(scorers).intersection(screen.ZETTARANC_STRATEGY_IDS))
 
+        source = (SRC / "screening" / "multi_strategy.py").read_text(
+            encoding="utf-8"
+        )
+        mainline_only_branch = source.split(
+            "    if niuone_mainline_only:\n"
+            "        if niuone_context is None:",
+            1,
+        )[1].split("    def analyze_candidate", 1)[0]
+        self.assertNotIn(
+            "fetch_sector_tide_news_precheck",
+            mainline_only_branch,
+        )
+
+    def test_niuone_scan_never_enters_news_or_model_precheck(self):
+        source = (SRC / "screening" / "multi_strategy.py").read_text(
+            encoding="utf-8"
+        )
+        post_scoring = source.split(
+            "    # Sort: best_score desc, above_bbi bonus, closer to BBI better",
+            1,
+        )[1].split(
+            "    display_candidates = select_display_candidates(results)",
+            1,
+        )[0]
+
+        self.assertEqual(
+            post_scoring.count("fetch_sector_tide_news_precheck(news_shortlist)"),
+            1,
+        )
+        self.assertNotIn("niuone_news_shortlist", post_scoring)
+        self.assertNotIn("elif niuone_enabled", post_scoring)
+
     def test_kline_prewarm_mode_is_independent_cli_task(self):
         self.assertTrue(screen.kline_prewarm_only_mode(["--json", "--prewarm-kline-cache"]))
         self.assertFalse(screen.kline_prewarm_only_mode(["--json", "--niuone-mainline-only"]))

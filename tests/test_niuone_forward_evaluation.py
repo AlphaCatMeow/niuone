@@ -62,6 +62,15 @@ def complete_context(**overrides):
         "entry_theme_attribution_score": 82.0,
         "entry_theme_attribution_weight": 1.0,
         "entry_theme_historical_prior_score": 80.0,
+        "entry_theme_cohort_alignment_score": 78.0,
+        "entry_theme_peer_resonance_score": 84.0,
+        "entry_theme_return_correlation_score": 91.0,
+        "entry_theme_return_correlation_rank_score": 96.0,
+        "entry_theme_return_correlation_observation_count": 20,
+        "entry_theme_return_correlation_peer_count": 12,
+        "entry_theme_specificity_score": 88.0,
+        "entry_theme_membership_source": "eastmoney_concept",
+        "entry_theme_unattributed_weight": 0.0,
         "entry_model_requested_shares": 100,
         "entry_executed_shares": 100,
         "entry_maximum_permitted_shares": 200,
@@ -2617,7 +2626,7 @@ class NiuOneForwardEvaluationTests(unittest.TestCase):
 
         self.assertEqual(report["overall"]["completed_trade_count"], 1)
         self.assertEqual(report["coverage"]["duplicate_trade_count"], 2)
-        self.assertEqual(report["protocol"]["version"], "niuone-strict-forward-v27")
+        self.assertEqual(report["protocol"]["version"], "niuone-strict-forward-v30")
         self.assertEqual(
             report["protocol"][
                 "niuone_markup_upgrade_absolute_position_cap_pct"

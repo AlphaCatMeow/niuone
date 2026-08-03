@@ -57,6 +57,14 @@ class PublicProjectionTests(unittest.TestCase):
                     "signal_theme_attribution_weight": 0.68,
                     "signal_theme_historical_prior_score": 81.0,
                     "signal_theme_cohort_alignment_score": 88.0,
+                    "signal_theme_peer_resonance_score": 91.0,
+                    "signal_theme_return_correlation_score": 93.0,
+                    "signal_theme_return_correlation_rank_score": 100.0,
+                    "signal_theme_return_correlation_observation_count": 20,
+                    "signal_theme_return_correlation_peer_count": 14,
+                    "signal_theme_specificity_score": 88.0,
+                    "signal_theme_membership_source": "eastmoney_concept",
+                    "unattributed_theme_weight": 0.08,
                     "theme_attribution_confident": True,
                     "theme_attribution_gap": 12.0,
                     "score_before_industry_flow": 8.0,
@@ -136,6 +144,24 @@ class PublicProjectionTests(unittest.TestCase):
                 "signal_theme_attribution_weight"
             ],
             0.68,
+        )
+        self.assertEqual(
+            sections["candidates"]["items"][0][
+                "signal_theme_membership_source"
+            ],
+            "eastmoney_concept",
+        )
+        self.assertEqual(
+            sections["candidates"]["items"][0][
+                "signal_theme_return_correlation_rank_score"
+            ],
+            100.0,
+        )
+        self.assertEqual(
+            sections["candidates"]["items"][0][
+                "unattributed_theme_weight"
+            ],
+            0.08,
         )
         self.assertEqual(sections["candidates"]["items"][0]["industry_flow_rank"], 2)
         self.assertEqual(sections["candidates"]["items"][0]["industry_flow_adjustment"], 0.55)
