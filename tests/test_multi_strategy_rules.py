@@ -81,6 +81,26 @@ class MultiStrategyRuleTests(unittest.TestCase):
         )
         self.assertEqual(reference, trade)
 
+    def test_niuone_candidate_projection_preserves_five_stage_contract(self):
+        projected = screen.niuone_lifecycle_candidate_metadata({
+            "niuone_lifecycle_stage": "divergence",
+            "niuone_lifecycle_label": "主线分歧",
+            "niuone_lifecycle_order": 40,
+            "niuone_lifecycle_entry_policy": (
+                "selective_repair_reclaim_or_reduce"
+            ),
+            "ignored": "value",
+        })
+
+        self.assertEqual(projected, {
+            "niuone_lifecycle_stage": "divergence",
+            "niuone_lifecycle_label": "主线分歧",
+            "niuone_lifecycle_order": 40,
+            "niuone_lifecycle_entry_policy": (
+                "selective_repair_reclaim_or_reduce"
+            ),
+        })
+
     def test_independent_mainline_mode_ignores_active_trading_strategy(self):
         os.environ[screen.ACTIVE_STRATEGY_ENV] = "zettaranc"
 
@@ -903,25 +923,27 @@ class MultiStrategyRuleTests(unittest.TestCase):
         self.assertEqual(len(margin_calls), 1)
         self.assertEqual(len(block_calls), 1)
 
-    def test_extract_industry_from_individual_info_rows(self):
-        rows = [
-            {"item": "股票简称", "value": "测试股份"},
-            {"item": "行业", "value": "半导体行业"},
-        ]
+    def test_eastmoney_board_annotation_adds_industry_and_concepts(self):
+        candidates = [{"code": "000977", "name": "浪潮信息"}]
+        original_loader = screen.load_bulk_stock_board_map
+        original_save = screen.save_stock_industry_cache
+        try:
+            screen.load_bulk_stock_board_map = lambda _codes: {
+                "000977": screen.EastmoneyStockBoard(
+                    code="000977",
+                    industry="计算机设备",
+                    concepts=("存储芯片", "先进封装概念"),
+                )
+            }
+            screen.save_stock_industry_cache = lambda _cache: None
+            screen.annotate_candidate_industries(candidates)
+        finally:
+            screen.load_bulk_stock_board_map = original_loader
+            screen.save_stock_industry_cache = original_save
 
-        self.assertEqual(screen.extract_industry_from_individual_info(rows), "半导体")
-        self.assertEqual(
-            screen.extract_industry_from_individual_info([{"所属板块": "消费电子板块"}]),
-            "消费电子",
-        )
-
-    def test_extract_industry_from_cninfo_prefers_sw_short_name(self):
-        rows = [
-            {"分类标准": "中证行业分类标准", "行业中类": "游戏", "变更日期": "2021-12-17"},
-            {"分类标准": "申银万国行业分类标准", "行业中类": "游戏Ⅲ", "变更日期": "2021-07-30"},
-        ]
-
-        self.assertEqual(screen.extract_industry_from_cninfo_change(rows), "游戏")
+        self.assertEqual(candidates[0]["industry"], "计算机设备")
+        self.assertEqual(candidates[0]["sector"], "计算机设备")
+        self.assertEqual(candidates[0]["themes"], ["存储芯片", "先进封装"])
 
     def test_annotate_candidate_industries_adds_sector_alias_once(self):
         display = [{"code": "600001", "name": "测试A"}]
@@ -975,69 +997,51 @@ class MultiStrategyRuleTests(unittest.TestCase):
         self.assertNotIn("industry", candidates[2])
         self.assertEqual(fallback_calls, [])
 
-    def test_threaded_industry_lookup_prewarms_native_javascript_runtime(self):
+    def test_eastmoney_board_annotation_uses_one_batch(self):
         candidates = [
             {"code": "600001", "name": "测试A"},
             {"code": "600002", "name": "测试B"},
         ]
-        events: list[str] = []
-        original_cache = screen._STOCK_INDUSTRY_MEMORY_CACHE
-        original_lookup = screen.lookup_stock_industry
-        original_prepare = screen.prepare_threaded_native_javascript_runtime
+        calls: list[set[str]] = []
+        original_loader = screen.load_bulk_stock_board_map
         original_save = screen.save_stock_industry_cache
-        screen._STOCK_INDUSTRY_MEMORY_CACHE = {}
-
-        def fake_prepare() -> bool:
-            events.append("prepare")
-            return True
-
-        def fake_lookup(code: str) -> str:
-            events.append(f"lookup:{code}")
-            return "银行"
 
         try:
-            screen.prepare_threaded_native_javascript_runtime = fake_prepare
-            screen.lookup_stock_industry = fake_lookup
+            def fake_loader(codes):
+                calls.append(set(codes))
+                return {
+                    code: screen.EastmoneyStockBoard(
+                        code=code,
+                        industry="银行",
+                        concepts=("中特估",),
+                    )
+                    for code in codes
+                }
+            screen.load_bulk_stock_board_map = fake_loader
             screen.save_stock_industry_cache = lambda _cache: None
             screen.annotate_candidate_industries(candidates, max_workers=2)
         finally:
-            screen._STOCK_INDUSTRY_MEMORY_CACHE = original_cache
-            screen.lookup_stock_industry = original_lookup
-            screen.prepare_threaded_native_javascript_runtime = original_prepare
+            screen.load_bulk_stock_board_map = original_loader
             screen.save_stock_industry_cache = original_save
 
-        self.assertEqual(events[0], "prepare")
-        self.assertCountEqual(events[1:], ["lookup:600001", "lookup:600002"])
+        self.assertEqual(calls, [{"600001", "600002"}])
         self.assertTrue(all(candidate["industry"] == "银行" for candidate in candidates))
+        self.assertTrue(all(candidate["themes"] == ["中特估"] for candidate in candidates))
 
-    def test_industry_lookup_falls_back_to_serial_when_native_prewarm_fails(self):
+    def test_eastmoney_board_failure_is_fail_closed(self):
         candidates = [
             {"code": "600001", "name": "测试A"},
             {"code": "600002", "name": "测试B"},
         ]
-        lookup_threads: list[int] = []
-        original_cache = screen._STOCK_INDUSTRY_MEMORY_CACHE
-        original_lookup = screen.lookup_stock_industry
-        original_prepare = screen.prepare_threaded_native_javascript_runtime
-        original_save = screen.save_stock_industry_cache
-        screen._STOCK_INDUSTRY_MEMORY_CACHE = {}
-
-        def fake_lookup(_code: str) -> str:
-            lookup_threads.append(threading.get_ident())
-            return "银行"
-
+        original_loader = screen.load_bulk_stock_board_map
         try:
-            screen.prepare_threaded_native_javascript_runtime = lambda: False
-            screen.lookup_stock_industry = fake_lookup
-            screen.save_stock_industry_cache = lambda _cache: None
-            screen.annotate_candidate_industries(candidates, max_workers=2)
+            screen.load_bulk_stock_board_map = lambda _codes: (_ for _ in ()).throw(
+                RuntimeError("eastmoney unavailable")
+            )
+            with self.assertRaisesRegex(RuntimeError, "eastmoney unavailable"):
+                screen.annotate_candidate_industries(candidates, max_workers=2)
         finally:
-            screen._STOCK_INDUSTRY_MEMORY_CACHE = original_cache
-            screen.lookup_stock_industry = original_lookup
-            screen.prepare_threaded_native_javascript_runtime = original_prepare
-            screen.save_stock_industry_cache = original_save
-
-        self.assertEqual(lookup_threads, [threading.get_ident(), threading.get_ident()])
+            screen.load_bulk_stock_board_map = original_loader
 
     def test_persona_strategies_are_registered(self):
         old = os.environ.get(screen.PERSONA_STRATEGY_ENV)

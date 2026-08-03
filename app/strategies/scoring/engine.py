@@ -32,14 +32,28 @@ def analyze_enriched_rows(
     if not strategies:
         return None
 
-    # Prefer strategies that meet their own entry threshold, then score and
-    # finally their registered certainty/priority.
-    def best_strategy_key(name: str) -> tuple[int, float, int]:
+    # Match the execution/backtest path: an actionable strategy must not be
+    # hidden by a higher-scoring alternative that its own hard gates reject.
+    # If no strategy is actionable, retain the strongest blocked/watch result
+    # for diagnostics and display.
+    def best_strategy_key(name: str) -> tuple[int, int, float, int]:
         item = strategies[name]
         score = float(item.get("score") or 0)
         threshold = float(item.get("entry_threshold") or 8)
         priority = int(item.get("strategy_priority") or 0)
-        return (1 if score >= threshold else 0, score, priority)
+        blockers = item.get("hard_blockers") or []
+        explicit_actionable = item.get("actionable")
+        actionable = bool(
+            (explicit_actionable if explicit_actionable is not None else True)
+            and score >= threshold
+            and not blockers
+        )
+        return (
+            1 if actionable else 0,
+            1 if score >= threshold else 0,
+            score,
+            priority,
+        )
 
     best_name = max(strategies, key=best_strategy_key)
     best_score = strategies[best_name]["score"]

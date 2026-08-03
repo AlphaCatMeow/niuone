@@ -25,6 +25,15 @@ from .attribution import (
     classify_exit_rule,
 )
 from .exits import evaluate_strategy_time_exit
+from .lifecycle import (
+    NIUONE_LIFECYCLE_CLIMAX_SCORE,
+    NIUONE_LIFECYCLE_STAGE_ORDER,
+    NIUONE_LIFECYCLE_STAGES,
+    niuone_lifecycle_entry_blocker,
+    niuone_lifecycle_metadata,
+    niuone_lifecycle_stage,
+    niuone_lifecycle_transition,
+)
 from .performance import track_strategy_performance
 from .policy import candidate_buy_blockers, candidate_is_buyable, strategy_position_limit_pct
 from .prompts import build_strategy_prompt_sections, format_preset_strategy_section
@@ -48,6 +57,9 @@ __all__ = [
     "STRATEGY_SUITES",
     "STRATEGY_SCORERS",
     "SECTOR_TIDE_STRATEGY_IDS",
+    "NIUONE_LIFECYCLE_STAGE_ORDER",
+    "NIUONE_LIFECYCLE_STAGES",
+    "NIUONE_LIFECYCLE_CLIMAX_SCORE",
     "analyze_enriched_rows",
     "build_sector_tide_context",
     "active_strategy_suite",
@@ -64,6 +76,10 @@ __all__ = [
     "evaluate_strategy_time_exit",
     "format_preset_strategy_section",
     "known_strategy_ids",
+    "niuone_lifecycle_metadata",
+    "niuone_lifecycle_entry_blocker",
+    "niuone_lifecycle_stage",
+    "niuone_lifecycle_transition",
     "select_display_candidates",
     "select_trade_candidates",
     "strategy_position_limit_pct",

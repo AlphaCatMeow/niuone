@@ -5,7 +5,7 @@ import math
 from typing import Any, Mapping
 
 
-NIUONE_MAINLINE_VIEW_SCHEMA_VERSION = 7
+NIUONE_MAINLINE_VIEW_SCHEMA_VERSION = 8
 NIUONE_MAINLINE_THEME_LIMIT = 5
 
 
@@ -93,6 +93,18 @@ def _theme_view(value: Any) -> dict[str, Any] | None:
         "state": _text(value.get("state"), 32),
         "raw_state": _text(value.get("raw_state"), 32),
         "intraday_state": _text(value.get("intraday_state"), 32),
+        "niuone_lifecycle_stage": _text(
+            value.get("niuone_lifecycle_stage"), 24
+        ),
+        "niuone_lifecycle_label": _text(
+            value.get("niuone_lifecycle_label"), 24
+        ),
+        "niuone_lifecycle_order": _integer(
+            value.get("niuone_lifecycle_order")
+        ),
+        "niuone_lifecycle_entry_policy": _text(
+            value.get("niuone_lifecycle_entry_policy"), 32
+        ),
         "member_count": member_count,
         "eligible_data": value.get("eligible_data") is True,
         "today_eligible_data": value.get("today_eligible_data") is True,

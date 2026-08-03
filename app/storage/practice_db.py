@@ -8,10 +8,13 @@
   - decisions 决策记录
   - 首次运行自动从 JSON 迁移历史数据
 """
+import hashlib
 import json
-import sqlite3
+import math
 import os
+import sqlite3
 import time
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 
@@ -26,6 +29,35 @@ STATE_FILE = Path(
         DASHBOARD_HOME / "cron" / "output" / "niuniu_practice_portfolio.json",
     )
 ).expanduser()
+
+
+def _json_safe(value):
+    if isinstance(value, Mapping):
+        return {
+            str(key): _json_safe(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def _canonical_payload(value: Mapping) -> str:
+    return json.dumps(
+        _json_safe(value),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+def _decision_event_key(payload_json: str) -> str:
+    return hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
 
 
 def _is_trading_day_text(value: str) -> bool:
@@ -53,6 +85,7 @@ def init_db():
         cash       REAL NOT NULL,      -- 现金
         market_value REAL NOT NULL,    -- 持仓市值
         pnl_pct    REAL NOT NULL,      -- 累计收益率%
+        account_created_at TEXT NOT NULL DEFAULT '', -- 账户会话创建时间
         created_at TEXT NOT NULL       -- 'YYYY-MM-DD HH:MM:SS'
     );
     
@@ -85,6 +118,7 @@ def init_db():
         stamp_duty REAL DEFAULT 0,
         pnl        REAL,               -- SELL时才有的盈亏
         reason     TEXT DEFAULT '',
+        payload_json TEXT NOT NULL DEFAULT '', -- 完整成交证据，供严格前向评估
         created_at TEXT NOT NULL
     );
     
@@ -98,6 +132,11 @@ def init_db():
         summary    TEXT DEFAULT '',
         actions_json TEXT DEFAULT '',   -- JSON array of actions
         error      TEXT DEFAULT '',
+        b1_generated_at TEXT DEFAULT '',
+        schedule_slot TEXT DEFAULT '',
+        schedule_run_kind TEXT DEFAULT '',
+        event_key TEXT,
+        payload_json TEXT NOT NULL DEFAULT '', -- 完整候选与决策证据
         created_at TEXT NOT NULL
     );
     
@@ -106,13 +145,66 @@ def init_db():
     CREATE INDEX IF NOT EXISTS idx_positions_date ON position_snapshots(date);
     CREATE INDEX IF NOT EXISTS idx_daily_equity_date ON daily_equity(date);
     """)
+    _ensure_trade_payload_column(conn)
+    _ensure_decision_evidence_columns(conn)
+    _ensure_daily_equity_evidence_columns(conn)
     _deduplicate_trades(conn)
     conn.execute("""
         CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_unique_event
         ON trades(time, action, code, shares, price, amount, reason)
     """)
+    conn.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_decisions_unique_event
+        ON decisions(event_key)
+        WHERE event_key IS NOT NULL AND event_key <> ''
+    """)
     conn.commit()
     conn.close()
+
+
+def _ensure_trade_payload_column(conn: sqlite3.Connection):
+    """Add the lossless trade payload to upgraded databases without rewriting rows."""
+    columns = {
+        str(row[1])
+        for row in conn.execute("PRAGMA table_info(trades)").fetchall()
+    }
+    if "payload_json" not in columns:
+        conn.execute(
+            "ALTER TABLE trades ADD COLUMN payload_json TEXT NOT NULL DEFAULT ''"
+        )
+
+
+def _ensure_decision_evidence_columns(conn: sqlite3.Connection):
+    """Add durable decision evidence without rewriting legacy rows."""
+    columns = {
+        str(row[1])
+        for row in conn.execute("PRAGMA table_info(decisions)").fetchall()
+    }
+    additions = {
+        "b1_generated_at": "TEXT DEFAULT ''",
+        "schedule_slot": "TEXT DEFAULT ''",
+        "schedule_run_kind": "TEXT DEFAULT ''",
+        "event_key": "TEXT",
+        "payload_json": "TEXT NOT NULL DEFAULT ''",
+    }
+    for name, definition in additions.items():
+        if name not in columns:
+            conn.execute(
+                f"ALTER TABLE decisions ADD COLUMN {name} {definition}"
+            )
+
+
+def _ensure_daily_equity_evidence_columns(conn: sqlite3.Connection):
+    """Add account-session continuity without rewriting historical marks."""
+    columns = {
+        str(row[1])
+        for row in conn.execute("PRAGMA table_info(daily_equity)").fetchall()
+    }
+    if "account_created_at" not in columns:
+        conn.execute(
+            "ALTER TABLE daily_equity ADD COLUMN account_created_at "
+            "TEXT NOT NULL DEFAULT ''"
+        )
 
 
 def _deduplicate_trades(conn: sqlite3.Connection):
@@ -148,9 +240,9 @@ def migrate_from_json():
                 if not date:
                     continue
                 conn.execute("""
-                    INSERT OR REPLACE INTO daily_equity (date, equity, cash, market_value, pnl_pct, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """, (date, pt.get("equity", 0), pt.get("cash", 0), pt.get("market_value", 0), pt.get("pnl_pct", 0), pt.get("time", now)))
+                    INSERT OR REPLACE INTO daily_equity (date, equity, cash, market_value, pnl_pct, account_created_at, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (date, pt.get("equity", 0), pt.get("cash", 0), pt.get("market_value", 0), pt.get("pnl_pct", 0), state.get("created_at", ""), pt.get("time", now)))
                 migrated += 1
             print(f"[niuniu_db] 迁移 daily_equity: {migrated} 条")
         
@@ -163,13 +255,14 @@ def migrate_from_json():
                 if not action:
                     continue
                 conn.execute("""
-                    INSERT OR IGNORE INTO trades (time, action, code, name, shares, price, amount, commission, transfer_fee, stamp_duty, pnl, reason, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT OR IGNORE INTO trades (time, action, code, name, shares, price, amount, commission, transfer_fee, stamp_duty, pnl, reason, payload_json, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     t.get("time", now), action, t.get("code", ""), t.get("name", ""),
                     t.get("shares", 0), t.get("price", 0), t.get("amount", 0),
                     t.get("commission", 0), t.get("transfer_fee", 0), t.get("stamp_duty", 0),
-                    t.get("pnl"), t.get("reason", ""), t.get("time", now)
+                    t.get("pnl"), t.get("reason", ""),
+                    json.dumps(t, ensure_ascii=False, sort_keys=True), t.get("time", now)
                 ))
                 migrated += 1
             print(f"[niuniu_db] 迁移 trades: {migrated} 条")
@@ -180,14 +273,22 @@ def migrate_from_json():
             migrated = 0
             for d in decision_log:
                 dec = d.get("decision", {})
+                payload_json = _canonical_payload(d)
                 conn.execute("""
-                    INSERT OR IGNORE INTO decisions (time, model, provider, trade_allowed, trade_reason, summary, actions_json, error, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT OR IGNORE INTO decisions (
+                        time, model, provider, trade_allowed, trade_reason,
+                        summary, actions_json, error, b1_generated_at,
+                        schedule_slot, schedule_run_kind, event_key,
+                        payload_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     d.get("time", now), dec.get("model", ""), dec.get("provider", ""),
                     int(d.get("trade_allowed", True)), d.get("trade_reason", ""),
                     dec.get("summary", ""), json.dumps(dec.get("actions", []), ensure_ascii=False),
-                    dec.get("error", ""), d.get("time", now)
+                    dec.get("error", ""), d.get("b1_generated_at", ""),
+                    d.get("schedule_slot", ""), d.get("schedule_run_kind", ""),
+                    _decision_event_key(payload_json), payload_json,
+                    d.get("time", now),
                 ))
                 migrated += 1
             print(f"[niuniu_db] 迁移 decisions: {migrated} 条")
@@ -229,52 +330,95 @@ def record_daily_equity(pt: dict):
             conn.close()
             return
         conn.execute("""
-            INSERT OR REPLACE INTO daily_equity (date, equity, cash, market_value, pnl_pct, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (date, pt.get("equity", 0), pt.get("cash", 0), pt.get("market_value", 0), pt.get("pnl_pct", 0), pt.get("time", "")))
+            INSERT OR REPLACE INTO daily_equity (date, equity, cash, market_value, pnl_pct, account_created_at, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (date, pt.get("equity", 0), pt.get("cash", 0), pt.get("market_value", 0), pt.get("pnl_pct", 0), pt.get("account_created_at", ""), pt.get("time", "")))
         conn.commit()
         conn.close()
     except Exception as e:
         print(f"[niuniu_db] 写入 daily_equity 失败: {e}")
 
 
-def record_trade(t: dict):
+def record_trade(t: dict) -> bool:
     """记录单笔交易到 DB。"""
+    conn = None
     try:
         conn = _connect()
+        payload_json = _canonical_payload(t)
         conn.execute("""
-            INSERT OR IGNORE INTO trades (time, action, code, name, shares, price, amount, commission, transfer_fee, stamp_duty, pnl, reason, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT OR IGNORE INTO trades (time, action, code, name, shares, price, amount, commission, transfer_fee, stamp_duty, pnl, reason, payload_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             t.get("time", ""), t.get("action", ""), t.get("code", ""), t.get("name", ""),
             t.get("shares", 0), t.get("price", 0), t.get("amount", 0),
             t.get("commission", 0), t.get("transfer_fee", 0), t.get("stamp_duty", 0),
-            t.get("pnl"), t.get("reason", ""), t.get("time", "")
+            t.get("pnl"), t.get("reason", ""), payload_json, t.get("time", "")
+        ))
+        conn.execute("""
+            UPDATE trades
+            SET payload_json = ?
+            WHERE time = ? AND action = ? AND code = ? AND shares = ?
+              AND price = ? AND amount = ? AND reason = ?
+              AND payload_json = ''
+        """, (
+            payload_json,
+            t.get("time", ""), t.get("action", ""), t.get("code", ""),
+            t.get("shares", 0), t.get("price", 0), t.get("amount", 0),
+            t.get("reason", ""),
         ))
         conn.commit()
         conn.close()
+        return True
     except Exception as e:
-        print(f"[niuniu_db] 写入 trade 失败: {e}")
+        if conn is not None:
+            try:
+                conn.rollback()
+                conn.close()
+            except sqlite3.Error:
+                pass
+        print(f"[niuniu_db] 写入 trade 失败: {type(e).__name__}")
+        return False
 
 
-def record_decision(d: dict):
+def record_decision(d: dict) -> bool:
     """记录单条决策到 DB。"""
+    conn = None
     try:
         conn = _connect()
         dec = d.get("decision", {})
+        payload_json = _canonical_payload(d)
+        event_key = _decision_event_key(payload_json)
         conn.execute("""
-            INSERT INTO decisions (time, model, provider, trade_allowed, trade_reason, summary, actions_json, error, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT OR IGNORE INTO decisions (
+                time, model, provider, trade_allowed, trade_reason,
+                summary, actions_json, error, b1_generated_at,
+                schedule_slot, schedule_run_kind, event_key,
+                payload_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             d.get("time", ""), dec.get("model", ""), dec.get("provider", ""),
             int(d.get("trade_allowed", True)), d.get("trade_reason", ""),
             dec.get("summary", ""), json.dumps(dec.get("actions", []), ensure_ascii=False),
-            dec.get("error", ""), d.get("time", "")
+            dec.get("error", ""), d.get("b1_generated_at", ""),
+            d.get("schedule_slot", ""), d.get("schedule_run_kind", ""),
+            event_key, payload_json, d.get("time", ""),
         ))
         conn.commit()
+        persisted = conn.execute(
+            "SELECT 1 FROM decisions WHERE event_key = ? LIMIT 1",
+            (event_key,),
+        ).fetchone()
         conn.close()
+        return persisted is not None
     except Exception as e:
-        print(f"[niuniu_db] 写入 decision 失败: {e}")
+        if conn is not None:
+            try:
+                conn.rollback()
+                conn.close()
+            except sqlite3.Error:
+                pass
+        print(f"[niuniu_db] 写入 decision 失败: {type(e).__name__}")
+        return False
 
 
 def snapshot_positions(positions: dict):
@@ -307,8 +451,8 @@ def query_daily_equity() -> list[dict]:
     """查询每日资金快照，用于累计收益曲线。"""
     try:
         conn = _connect()
-        cur = conn.execute("SELECT date, equity, cash, market_value, pnl_pct, created_at FROM daily_equity ORDER BY date")
-        rows = [{"time": r[5] or (r[0] + " 15:00:00"), "date": r[0], "equity": r[1], "cash": r[2], "market_value": r[3], "pnl_pct": r[4]} for r in cur.fetchall()]
+        cur = conn.execute("SELECT date, equity, cash, market_value, pnl_pct, account_created_at, created_at FROM daily_equity ORDER BY date")
+        rows = [{"time": r[6] or (r[0] + " 15:00:00"), "date": r[0], "equity": r[1], "cash": r[2], "market_value": r[3], "pnl_pct": r[4], "account_created_at": r[5]} for r in cur.fetchall()]
         conn.close()
         return rows
     except Exception as e:

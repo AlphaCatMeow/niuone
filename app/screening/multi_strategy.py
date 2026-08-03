@@ -35,8 +35,6 @@
 """
 import concurrent.futures
 import http.client
-import importlib
-import io
 import json
 import os
 import re
@@ -57,6 +55,10 @@ from niuone_paths import get_dashboard_env_file, get_dashboard_home
 from market_data.news_precheck import (
     NewsPrecheckConfig,
     fetch_candidate_news_records,
+)
+from market_data.eastmoney_boards import (
+    EastmoneyStockBoard,
+    load_eastmoney_board_snapshot,
 )
 from market_data.tencent_kline_cache import (
     DEFAULT_KLINE_COUNT,
@@ -164,6 +166,7 @@ MULTI_STRATEGY_CACHE = B1_OUTPUT_DIR / "multi_strategy_latest.json"
 NIUONE_MAINLINE_CACHE = B1_OUTPUT_DIR / "niuone_mainline_latest.json"
 NIUONE_MAINLINE_MINUTE_CACHE = B1_OUTPUT_DIR / "niuone_mainline_minute_latest.json"
 STOCK_INDUSTRY_CACHE = B1_OUTPUT_DIR / "stock_industry_cache.json"
+EASTMONEY_BOARD_CACHE = B1_OUTPUT_DIR / "eastmoney_stock_boards.json"
 B1_HISTORY_DIR = B1_OUTPUT_DIR / "b1_history"
 MULTI_STRATEGY_HISTORY = B1_OUTPUT_DIR / "multi_strategy_history"
 DISPLAY_CANDIDATE_LIMIT = 16
@@ -174,21 +177,7 @@ NIUONE_MAINLINE_ONLY_FLAG = "--niuone-mainline-only"
 KLINE_PREWARM_ONLY_FLAG = "--prewarm-kline-cache"
 HIGH_LIQUIDITY_MIN_AMOUNT = 8e8
 MAX_TRADE_ANALYSIS_COUNT = 500
-SW_STOCK_CLASSIFICATION_URL = (
-    "https://www.swsresearch.com/swindex/pdf/SwClass2021/StockClassifyUse_stock.xls"
-)
-SW_INDUSTRY_TAXONOMY_URL = "https://webapi.cninfo.com.cn/api/stock/p_public0002"
-SW_INDUSTRY_HTTP_TIMEOUT_SECONDS = 10
-SW_INDUSTRY_HTTP_MAX_ATTEMPTS = 2
-THS_INDUSTRY_DETAIL_URL = "https://q.10jqka.com.cn/thshy/detail/code/{code}/page/{page}/"
-THS_INDUSTRY_INDEX_CODE = "881272"
-THS_INDUSTRY_PAGE_LIMIT = 20
-THS_INDUSTRY_WORKERS = 4
-THS_INDUSTRY_MIN_REQUEST_INTERVAL_SECONDS = 0.18
-THS_INDUSTRY_LOGIN_RETRY_ATTEMPTS = 3
 STOCK_INDUSTRY_BULK_CACHE_MIN_COVERAGE = 0.85
-NIUONE_INDUSTRY_FALLBACK_LOOKUP_LIMIT = 128
-_LOCAL_SITE_PACKAGES_READY = False
 _STOCK_INDUSTRY_MEMORY_CACHE: dict[str, str] | None = None
 _MARGIN_DETAIL_CACHE: dict[tuple[str, str], Any] = {}
 _MARGIN_DETAIL_CACHE_LOCK = threading.Lock()
@@ -358,6 +347,21 @@ def candidate_in_configured_stock_universe(candidate: dict[str, Any]) -> bool:
         candidate.get("name"),
         configured_stock_universe(),
     )
+
+
+def niuone_lifecycle_candidate_metadata(
+    scored: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Project the complete five-stage contract into candidate telemetry."""
+    return {
+        key: scored.get(key)
+        for key in (
+            "niuone_lifecycle_stage",
+            "niuone_lifecycle_label",
+            "niuone_lifecycle_order",
+            "niuone_lifecycle_entry_policy",
+        )
+    }
 
 
 # ========== Tencent data fetchers ==========
@@ -1214,106 +1218,14 @@ def normalize_stock_code(code: Any) -> str:
     return digits.zfill(6) if digits else ""
 
 
-def _record_value(row: Any, key: str) -> Any:
-    if hasattr(row, "get"):
-        return row.get(key)
-    try:
-        return row[key]
-    except Exception:
-        return None
-
-
-def _iter_record_rows(data: Any):
-    if data is None:
-        return
-    iterrows = getattr(data, "iterrows", None)
-    if callable(iterrows):
-        for _, row in iterrows():
-            yield row
-        return
-    if isinstance(data, dict):
-        yield data
-        return
-    try:
-        for row in data:
-            yield row
-    except TypeError:
-        return
-
-
-def extract_industry_from_individual_info(info: Any) -> str:
-    """Read the industry/sector name from akshare.stock_individual_info_em output."""
-    direct_keys = ("行业", "所属行业", "板块", "所属板块")
-    item_keys = ("item", "项目", "指标")
-    value_keys = ("value", "值", "内容")
-
-    for row in _iter_record_rows(info):
-        for key in direct_keys:
-            industry = normalize_industry_name(_record_value(row, key))
-            if industry:
-                return industry
-
-        item_name = ""
-        for key in item_keys:
-            item_name = str(_record_value(row, key) or "").strip()
-            if item_name:
-                break
-        if item_name not in direct_keys:
-            continue
-
-        for key in value_keys:
-            industry = normalize_industry_name(_record_value(row, key))
-            if industry:
-                return industry
-    return ""
-
-
-def extract_industry_from_cninfo_change(info: Any) -> str:
-    rows = list(_iter_record_rows(info) or [])
-    standard_priority = (
-        "申银万国行业分类标准",
-        "中证行业分类标准",
-        "巨潮行业分类标准",
-        "中国上市公司协会上市公司行业分类标准",
-    )
-    value_keys = ("行业中类", "行业大类", "行业次类", "行业门类")
-
-    def row_date(row: Any) -> str:
-        return str(_record_value(row, "变更日期") or "")
-
-    def row_industry(row: Any) -> str:
-        for key in value_keys:
-            industry = normalize_industry_name(_record_value(row, key))
-            if industry:
-                return industry
-        return ""
-
-    for standard in standard_priority:
-        selected = [
-            row for row in rows
-            if standard in str(_record_value(row, "分类标准") or "")
-        ]
-        for row in sorted(selected, key=row_date, reverse=True):
-            industry = row_industry(row)
-            if industry:
-                return industry
-
-    for row in sorted(rows, key=row_date, reverse=True):
-        industry = row_industry(row)
-        if industry:
-            return industry
-    return ""
-
-
-def _add_local_runtime_site_packages() -> None:
-    global _LOCAL_SITE_PACKAGES_READY
-    if _LOCAL_SITE_PACKAGES_READY:
-        return
-    _LOCAL_SITE_PACKAGES_READY = True
-    version_dir = f"python{sys.version_info.major}.{sys.version_info.minor}"
-    site_packages = DASHBOARD_HOME.parent / ".venv" / "lib" / version_dir / "site-packages"
-    if site_packages.exists() and str(site_packages) not in sys.path:
-        sys.path.insert(0, str(site_packages))
+def load_bulk_stock_board_map(codes: set[str]) -> dict[str, EastmoneyStockBoard]:
+    """Load one batch of current Eastmoney industries and concepts."""
+    targets = {normalize_stock_code(code) for code in codes}
+    targets.discard("")
+    if not targets:
+        return {}
+    snapshot = load_eastmoney_board_snapshot(cache_path=EASTMONEY_BOARD_CACHE)
+    return snapshot.subset(targets)
 
 
 def load_stock_industry_cache() -> dict[str, str]:
@@ -1350,281 +1262,22 @@ def save_stock_industry_cache(cache: dict[str, str]) -> None:
         print(f"[WARN] stock industry cache save failed: {type(exc).__name__}", file=sys.stderr)
 
 
-def _bounded_requests_get(
-    requests_module: Any,
-    url: str,
-    *,
-    headers: Mapping[str, str] | None = None,
-    params: Mapping[str, str] | None = None,
-    timeout: int = SW_INDUSTRY_HTTP_TIMEOUT_SECONDS,
-    max_attempts: int = SW_INDUSTRY_HTTP_MAX_ATTEMPTS,
-) -> Any:
-    """GET one bounded external resource with a small retry budget."""
-    last_error: Exception | None = None
-    for attempt in range(max(1, int(max_attempts or 1))):
-        try:
-            response = requests_module.get(
-                url,
-                headers=dict(headers or {}),
-                params=dict(params or {}),
-                timeout=max(1, int(timeout)),
-            )
-            raise_for_status = getattr(response, "raise_for_status", None)
-            if callable(raise_for_status):
-                raise_for_status()
-            return response
-        except Exception as exc:
-            last_error = exc
-            if attempt + 1 < max_attempts:
-                time.sleep(0.4 * (attempt + 1))
-    if last_error is not None:
-        raise last_error
-    raise RuntimeError("industry data request failed")
-
-
-def load_sw_stock_industry_map(
-    codes: set[str] | list[str] | tuple[str, ...],
-    *,
-    ak_module: Any | None = None,
-) -> dict[str, str]:
-    """Load a consistent SW level-2 industry map in two bounded requests.
-
-    The all-market NiuOne scan must not fan out thousands of per-stock industry
-    calls.  SW publishes one classification workbook, while CNInfo publishes
-    the matching taxonomy.  Joining both locally keeps the scan bounded and
-    gives every stock in the same run one consistent classification standard.
-    """
-    targets = {normalize_stock_code(code) for code in codes}
-    targets.discard("")
-    if not targets:
-        return {}
-
-    _add_local_runtime_site_packages()
-    if ak_module is None:
-        import akshare as ak_module
-    import pandas as pd
-
-    taxonomy_module = importlib.import_module(
-        ak_module.stock_industry_category_cninfo.__module__
-    )
-    javascript = taxonomy_module.py_mini_racer.MiniRacer()
-    javascript.eval(taxonomy_module._get_file_content_ths("cninfo.js"))
-    enckey = javascript.call("getResCode1")
-    taxonomy_response = _bounded_requests_get(
-        taxonomy_module.requests,
-        SW_INDUSTRY_TAXONOMY_URL,
-        params={"indcode": "", "indtype": "008003", "format": "json"},
-        headers={
-            "Accept": "*/*",
-            "Accept-Enckey": str(enckey),
-            "Origin": "https://webapi.cninfo.com.cn",
-            "Referer": "https://webapi.cninfo.com.cn/",
-            "User-Agent": UA,
-            "X-Requested-With": "XMLHttpRequest",
-        },
-    )
-    taxonomy_payload = taxonomy_response.json()
-    taxonomy_rows = taxonomy_payload.get("records") if isinstance(taxonomy_payload, dict) else []
-    taxonomy: dict[str, tuple[bool, str]] = {}
-    for row in taxonomy_rows or []:
-        if not isinstance(row, Mapping):
-            continue
-        category_code = re.sub(r"^S", "", str(row.get("SORTCODE") or "").strip())
-        industry = normalize_industry_name(row.get("SORTNAME"))
-        if not category_code or not industry:
-            continue
-        active = not str(row.get("F002D") or "").strip()
-        if active or category_code not in taxonomy:
-            taxonomy[category_code] = (active, industry)
-
-    workbook_module = importlib.import_module(
-        ak_module.stock_industry_clf_hist_sw.__module__
-    )
-    workbook_response = _bounded_requests_get(
-        workbook_module.requests,
-        SW_STOCK_CLASSIFICATION_URL,
-        headers=getattr(workbook_module, "headers", {}),
-    )
-    frame = pd.read_excel(
-        io.BytesIO(workbook_response.content),
-        dtype={"股票代码": "str", "行业代码": "str"},
-    )
-    required_columns = {"股票代码", "行业代码", "计入日期", "更新日期"}
-    if not required_columns.issubset(frame.columns):
-        raise ValueError("unexpected SW industry workbook columns")
-
-    current: dict[str, tuple[tuple[int, int, int], str]] = {}
-    for row_index, row in frame.iterrows():
-        code = normalize_stock_code(row.get("股票代码"))
-        if code not in targets:
-            continue
-        industry_code = re.sub(r"\.0$", "", str(row.get("行业代码") or "").strip())
-        if not industry_code:
-            continue
-        start_date = pd.to_datetime(row.get("计入日期"), errors="coerce")
-        update_date = pd.to_datetime(row.get("更新日期"), errors="coerce")
-        rank = (
-            int(start_date.value) if not pd.isna(start_date) else -1,
-            int(update_date.value) if not pd.isna(update_date) else -1,
-            int(row_index),
-        )
-        existing = current.get(code)
-        if existing is None or rank > existing[0]:
-            current[code] = (rank, industry_code)
-
-    result: dict[str, str] = {}
-    for code, (_rank, industry_code) in current.items():
-        # SW level 2 is a useful theme proxy: broad enough to show resonance,
-        # but more actionable than grouping the whole market into 31 sectors.
-        industry = (
-            taxonomy.get(industry_code[:4])
-            or taxonomy.get(industry_code[:2])
-            or taxonomy.get(industry_code)
-        )
-        normalized = normalize_industry_name(industry[1] if industry else "")
-        if normalized:
-            result[code] = normalized
-    return result
-
-
-def load_ths_stock_industry_map(
-    codes: set[str] | list[str] | tuple[str, ...],
-    *,
-    ak_module: Any | None = None,
-) -> dict[str, str]:
-    """Build one all-market industry map from bounded THS industry pages."""
-    targets = {normalize_stock_code(code) for code in codes}
-    targets.discard("")
-    if not targets:
-        return {}
-
-    _add_local_runtime_site_packages()
-    if ak_module is None:
-        import akshare as ak_module
-    ths_module = importlib.import_module(ak_module.stock_board_industry_name_ths.__module__)
-    javascript = ths_module.py_mini_racer.MiniRacer()
-    javascript.eval(ths_module._get_file_content_ths("ths.js"))
-    cookie = javascript.call("v")
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/89.0.4389.90 Safari/537.36"
-        ),
-        "Cookie": f"v={cookie}",
-    }
-    request_lock = threading.Lock()
-    last_request_at = [0.0]
-
-    def fetch_page(industry_code: str, page: int) -> str:
-        for attempt in range(THS_INDUSTRY_LOGIN_RETRY_ATTEMPTS):
-            with request_lock:
-                elapsed = time.monotonic() - last_request_at[0]
-                delay = THS_INDUSTRY_MIN_REQUEST_INTERVAL_SECONDS - elapsed
-                if delay > 0:
-                    time.sleep(delay)
-                response = _bounded_requests_get(
-                    ths_module.requests,
-                    THS_INDUSTRY_DETAIL_URL.format(code=industry_code, page=page),
-                    headers=headers,
-                )
-                last_request_at[0] = time.monotonic()
-            if "account/login" not in str(getattr(response, "url", "")):
-                return response.content.decode("gb18030", "ignore")
-            if attempt + 1 < THS_INDUSTRY_LOGIN_RETRY_ATTEMPTS:
-                time.sleep(attempt + 1)
-        raise RuntimeError("THS industry page redirected to login")
-
-    index_html = fetch_page(THS_INDUSTRY_INDEX_CODE, 1)
-    industries: list[tuple[str, str]] = []
-    seen_industries: set[str] = set()
-    for industry_code, raw_name in re.findall(
-        r"/thshy/detail/code/(\d+)/[^>]*>([^<]+)</a>",
-        index_html,
-    ):
-        industry = normalize_industry_name(raw_name)
-        if industry_code in seen_industries or not industry:
-            continue
-        seen_industries.add(industry_code)
-        industries.append((industry_code, industry))
-    if not industries:
-        raise ValueError("THS industry index contained no industries")
-
-    def fetch_industry(industry_item: tuple[str, str]) -> tuple[str, set[str], str]:
-        industry_code, industry = industry_item
-        members: set[str] = set()
-        page_total = 1
-        for page in range(1, THS_INDUSTRY_PAGE_LIMIT + 1):
-            try:
-                html = fetch_page(industry_code, page)
-            except Exception as exc:
-                return industry, members, type(exc).__name__
-            members.update(
-                code for code in re.findall(r"stockpage\.10jqka\.com\.cn/(\d{6})", html)
-                if code in targets
-            )
-            page_match = re.search(r'class="page_info">\s*\d+/(\d+)', html)
-            page_total = max(1, int(page_match.group(1))) if page_match else 1
-            if page >= page_total:
-                break
-            time.sleep(0.12)
-        return industry, members, ""
-
-    result: dict[str, str] = {}
-    failures: list[str] = []
-    workers = min(THS_INDUSTRY_WORKERS, len(industries))
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-        for industry, members, error in pool.map(fetch_industry, industries):
-            for code in members:
-                result.setdefault(code, industry)
-            if error:
-                failures.append(f"{industry}:{error}")
-    if failures:
-        print(
-            f"[WARN] THS bulk industry lookup was partial: {len(failures)}/{len(industries)} industries",
-            file=sys.stderr,
-        )
-    return result
-
-
 def load_bulk_stock_industry_map(codes: set[str]) -> dict[str, str]:
-    """Prefer the compact SW download and fall back to bounded THS pages."""
-    try:
-        return load_sw_stock_industry_map(codes)
-    except Exception as exc:
-        print(
-            f"[WARN] SW bulk industry lookup failed: {type(exc).__name__}; trying THS",
-            file=sys.stderr,
-        )
-    return load_ths_stock_industry_map(codes)
+    """Return only Eastmoney ``f100`` industries for compatibility callers."""
+    return {
+        code: stock.industry
+        for code, stock in load_bulk_stock_board_map(codes).items()
+        if stock.industry
+    }
 
 
 def lookup_stock_industry(code: str, ak_module: Any | None = None) -> str:
+    """Resolve one industry from the same Eastmoney batch source."""
     code = normalize_stock_code(code)
     if not code:
         return ""
-    if ak_module is None:
-        _add_local_runtime_site_packages()
-        import akshare as ak_module
-
-    for attempt in range(2):
-        try:
-            info = ak_module.stock_industry_change_cninfo(
-                symbol=code,
-                start_date="19900101",
-                end_date=time.strftime("%Y%m%d"),
-            )
-            industry = extract_industry_from_cninfo_change(info)
-            if industry:
-                return industry
-        except Exception:
-            if attempt == 0:
-                time.sleep(0.4)
-                continue
-            break
-
-    info = ak_module.stock_individual_info_em(symbol=code)
-    return extract_industry_from_individual_info(info)
+    stock = load_bulk_stock_board_map({code}).get(code)
+    return stock.industry if stock is not None else ""
 
 
 def annotate_candidate_industries(
@@ -1634,7 +1287,49 @@ def annotate_candidate_industries(
     max_fallback_lookups: int | None = None,
     max_workers: int = 1,
 ) -> None:
-    """Attach industry/sector labels to candidate rows without making them required."""
+    """Attach Eastmoney industry plus multi-label concepts to candidate rows."""
+    if lookup is None and bulk_lookup is None:
+        items = [
+            item
+            for group in groups
+            for item in (group or [])
+            if isinstance(item, dict)
+        ]
+        codes = {
+            code for item in items if (code := normalize_stock_code(item.get("code")))
+        }
+        boards = load_bulk_stock_board_map(codes)
+        industry_cache: dict[str, str] = {}
+        for item in items:
+            code = normalize_stock_code(item.get("code"))
+            stock = boards.get(code)
+            if stock is None:
+                item.pop("industry", None)
+                item.pop("sector", None)
+                item.pop("themes", None)
+                continue
+            industry = normalize_industry_name(stock.industry)
+            themes = list(dict.fromkeys(
+                label
+                for raw in stock.themes
+                if (label := normalize_industry_name(raw))
+            ))
+            if industry:
+                item["industry"] = industry
+                item["sector"] = industry
+                industry_cache[code] = industry
+            else:
+                item.pop("industry", None)
+                item.pop("sector", None)
+            if themes:
+                item["themes"] = themes
+            else:
+                item.pop("themes", None)
+        save_stock_industry_cache(industry_cache)
+        return
+
+    # Explicit test/compatibility hooks retain the former single-label contract,
+    # but production does not call them and never reads a non-Eastmoney cache.
     missing_by_code: dict[str, list[dict[str, Any]]] = {}
 
     for group in groups:
@@ -1752,42 +1447,6 @@ def annotate_candidate_industries(
 
 
 # ========== Main ==========
-
-def grok_industry_classify(candidates: list[dict]) -> None:
-    """用 Grok 一次性查询所有候选股的行业分类。"""
-    if not candidates:
-        return
-    try:
-        import yaml
-        cfg_path = Path(os.environ.get("DASHBOARD_CONFIG", DASHBOARD_HOME / "config.yaml")).expanduser()
-        cfg = yaml.safe_load(cfg_path.read_text()) if cfg_path.exists() else {}
-        providers = cfg.get("custom_providers", [])
-        crossdesk = next((p for p in providers if "crossdesk" in str(p.get("name","")).lower()), None)
-        if not crossdesk: return
-        base = crossdesk["base_url"].rstrip("/"); api_key = crossdesk["api_key"]
-        stock_list = "\n".join(f"{c['code']} {c['name']}" for c in candidates)
-        prompt = f"对以下A股每只给一个简短行业标签（如通信设备、半导体、汽车零部件）。只输出：代码 名称：行业\n\n{stock_list}"
-        model = "grok-4.20-multi-agent-xhigh"
-        model_request = build_model_request(
-            base,
-            model,
-            [{"role": "user", "content": prompt}],
-            max_tokens=200,
-            api_mode="chat",
-        )
-        parsed = request_model(
-            model_request,
-            api_key,
-            timeout=10,
-            opener=urllib.request.urlopen,
-        )
-        for line in parsed.content.strip().split("\n"):
-            for c in candidates:
-                if c["code"] in line and c["name"] in line:
-                    parts = line.split("：",1) if "：" in line else line.split(":",1) if ":" in line else [line,""]
-                    if len(parts) >= 2: c["industry"] = parts[1].strip()
-                    break
-    except Exception: pass
 
 
 def write_outputs(json_str: str, generated_at: str) -> None:
@@ -2065,11 +1724,6 @@ def main():
         annotate_candidate_industries(
             industry_members,
             trade_only_industry_members,
-            bulk_lookup=load_bulk_stock_industry_map if niuone_enabled else None,
-            max_fallback_lookups=(
-                NIUONE_INDUSTRY_FALLBACK_LOOKUP_LIMIT if niuone_enabled else None
-            ),
-            max_workers=8 if scan_workers > 1 else 1,
         )
         industry_by_code = {
             str(item["code"]): normalize_industry_name(item.get("industry"))
@@ -2110,6 +1764,7 @@ def main():
                 code = str(item["code"])
                 name = str(item["name"])
                 industry = normalize_industry_name(item.get("industry"))
+                themes = list(item.get("themes") or ())
                 quote = item.get("quote") if isinstance(item.get("quote"), dict) else {}
                 if rows:
                     prepared_by_code[code] = rows
@@ -2118,6 +1773,7 @@ def main():
                         "code": code,
                         "name": name,
                         "industry": industry,
+                        "themes": themes,
                         "quote": quote,
                         "rows": rows,
                     })
@@ -2172,6 +1828,7 @@ def main():
                 as_of_date=niuone_as_of_date,
                 previous_trading_day=niuone_previous_trading_day,
                 sample_at=str(market_snapshot.get("captured_at") or ""),
+                theme_basis="eastmoney_concept",
             )
             niuone_context["industry_money_flow"] = sector_tide_flow_rows
             niuone_context["reference_stock_universe"] = list(reference_stock_universe)
@@ -2210,6 +1867,7 @@ def main():
             as_of_date=niuone_as_of_date,
             previous_trading_day=niuone_previous_trading_day,
             sample_at=str(market_snapshot.get("captured_at") or ""),
+            theme_basis="eastmoney_concept",
         )
         niuone_context["industry_money_flow"] = sector_tide_flow_rows
         niuone_context["reference_stock_universe"] = list(reference_stock_universe)
@@ -2310,6 +1968,7 @@ def main():
             "sector_score": best.get("sector_score"),
             "theme_basis": best.get("theme_basis"),
             "mainline_state": best.get("mainline_state"),
+            **niuone_lifecycle_candidate_metadata(best),
             "mainline_raw_state": best.get("mainline_raw_state"),
             "mainline_intraday_state": best.get("mainline_intraday_state"),
             "mainline_score": best.get("mainline_score"),
@@ -2350,6 +2009,18 @@ def main():
             "reversal_flow_flip": best.get("reversal_flow_flip"),
             "reversal_flow_improving": best.get("reversal_flow_improving"),
             "reversal_score": best.get("reversal_score"),
+            "reversal_basis": best.get("reversal_basis"),
+            "daily_v_reversal": best.get("daily_v_reversal"),
+            "daily_v_left_peak_date": best.get("daily_v_left_peak_date"),
+            "daily_v_trough_date": best.get("daily_v_trough_date"),
+            "daily_v_left_days": best.get("daily_v_left_days"),
+            "daily_v_right_days": best.get("daily_v_right_days"),
+            "daily_v_decline_pct": best.get("daily_v_decline_pct"),
+            "daily_v_rebound_pct": best.get("daily_v_rebound_pct"),
+            "daily_v_recovery_ratio": best.get("daily_v_recovery_ratio"),
+            "daily_v_rising_ratio": best.get("daily_v_rising_ratio"),
+            "daily_v_right_trend_confirmed": best.get("daily_v_right_trend_confirmed"),
+            "daily_v_pattern_score": best.get("daily_v_pattern_score"),
             "strong_stock_count": best.get("strong_stock_count"),
             "effective_strong_count": best.get("effective_strong_count"),
             "leader_concentration": best.get("leader_concentration"),
@@ -2532,6 +2203,7 @@ def main():
             as_of_date=niuone_as_of_date,
             previous_trading_day=niuone_previous_trading_day,
             sample_at=str(market_snapshot.get("captured_at") or ""),
+            theme_basis="eastmoney_concept",
         )
         niuone_context["industry_money_flow"] = sector_tide_flow_rows
         niuone_context["reference_stock_universe"] = list(reference_stock_universe)

@@ -16,7 +16,7 @@ import sys
 import threading
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -179,6 +179,7 @@ B1_CACHE_FILE = CRON_OUTPUT_DIR / "b1_screen_latest.json"
 NIUONE_MAINLINE_CACHE_FILE = CRON_OUTPUT_DIR / "niuone_mainline_latest.json"
 NIUONE_MAINLINE_MINUTE_CACHE_FILE = CRON_OUTPUT_DIR / "niuone_mainline_minute_latest.json"
 STOCK_INDUSTRY_CACHE_FILE = CRON_OUTPUT_DIR / "stock_industry_cache.json"
+EASTMONEY_BOARD_CACHE_FILE = CRON_OUTPUT_DIR / "eastmoney_stock_boards.json"
 MONEY_FLOW_SNAPSHOT_FILE = CRON_OUTPUT_DIR / "industry_main_money_flow_cache.json"
 TURNOVER_PROFILE_CACHE_FILE = CRON_OUTPUT_DIR / "turnover_profile_cache.json"
 # Main-net samples use a new history file so legacy total-flow observations
@@ -267,6 +268,8 @@ B1_SCAN_TIMEOUT_SECONDS = int(os.environ.get("DASHBOARD_B1_SCAN_TIMEOUT_SECONDS"
 PRACTICE_SCHEDULE_TIMES_ENV = "DASHBOARD_PRACTICE_SCHEDULE_TIMES"
 LEGACY_B1_SCHEDULE_TIMES_ENV = "DASHBOARD_B1_SCHEDULE_TIMES"
 DEFAULT_PRACTICE_SCHEDULE_TIMES = "09:25,10:00,10:30,11:00,11:20,13:00,13:30,14:00,14:30,14:50"
+NIUONE_FORWARD_COHORT_START_ENV = "DASHBOARD_NIUONE_FORWARD_COHORT_START"
+DEFAULT_NIUONE_FORWARD_COHORT_START = "2026-08-04"
 
 
 def resolve_practice_schedule_times(values: Mapping[str, str] | None = None) -> tuple[str, ...]:
@@ -287,6 +290,7 @@ def resolve_practice_schedule_times(values: Mapping[str, str] | None = None) -> 
 PRACTICE_SCHEDULE_TIMES = resolve_practice_schedule_times()
 B1_SCHEDULE_ENABLED = os.environ.get("DASHBOARD_B1_SCHEDULE_ENABLED", "1").lower() not in {"0", "false", "no"}
 B1_SCHEDULE_STATE_FILE = CRON_STATE_DIR / "b1_schedule_state.json"
+B1_SCHEDULE_HISTORY_RETENTION_DAYS = 400
 B1_SCHEDULE_CATCHUP_MINUTES = int(os.environ.get("DASHBOARD_B1_SCHEDULE_CATCHUP_MINUTES", "35") or "35")
 B1_SCHEDULE_STALE_SECONDS = int(os.environ.get("DASHBOARD_B1_SCHEDULE_STALE_SECONDS", "900") or "900")
 B1_SCHEDULE_RUN_KEYS: set[str] = set()
@@ -565,6 +569,10 @@ ENV_CONFIG_SCHEMA: list[dict[str, Any]] = [
     {"name": "DASHBOARD_TRADE_CANDIDATE_LIMIT", "label": "买卖决策候选数量", "group": "选股与买卖设置", "kind": "int", "default": "10", "effect": "runtime"},
     {"name": "DASHBOARD_B3_EXIT_TIME", "label": "B3开盘离场检查时间", "group": "选股与买卖设置", "kind": "time", "default": "09:37", "effect": "runtime"},
     {"name": "DASHBOARD_TIME_EXIT_TIME", "label": "尾盘离场检查时间", "group": "选股与买卖设置", "kind": "time", "default": "14:45", "effect": "runtime"},
+    {"name": "DASHBOARD_NIUONE_FORWARD_PREFLIGHT_CRON", "label": "牛牛严格前向开盘前协议预检", "group": "选股与买卖设置", "kind": "cron_time", "default": "5 9 * * 1-5", "effect": "next_run"},
+    {"name": "DASHBOARD_NIUONE_EQUITY_SNAPSHOT_CRON", "label": "牛牛严格前向盘后净值快照", "group": "选股与买卖设置", "kind": "cron_time", "default": "15 15 * * 1-5", "effect": "next_run"},
+    {"name": "DASHBOARD_NIUONE_FORWARD_CRON", "label": "牛牛严格前向评估时间", "group": "选股与买卖设置", "kind": "cron_time", "default": "20 15 * * 1-5", "effect": "next_run"},
+    {"name": NIUONE_FORWARD_COHORT_START_ENV, "label": "牛牛严格前向队列起始日", "group": "选股与买卖设置", "kind": "text", "default": DEFAULT_NIUONE_FORWARD_COHORT_START, "effect": "next_run"},
     {"name": ACTIVE_STRATEGY_ENV, "label": "当前独立策略", "group": "选股与交易策略", "kind": "strategy_suite", "default": default_enabled_persona_strategies_value(), "effect": "runtime"},
     {"name": PRESET_STRATEGY_TEXT_ENV, "label": "预设文字策略", "group": "选股与交易策略", "kind": "preset_strategy_text", "default": "", "effect": "runtime"},
     {"name": "DASHBOARD_B1_SCAN_TIMEOUT_SECONDS", "label": "实战选股扫描超时秒数", "group": "任务调度", "kind": "int", "default": "480", "effect": "restart"},
@@ -769,6 +777,10 @@ ADMIN_VISIBLE_ENV_NAMES = [
     "DASHBOARD_TRADE_CANDIDATE_LIMIT",
     "DASHBOARD_B3_EXIT_TIME",
     "DASHBOARD_TIME_EXIT_TIME",
+    "DASHBOARD_NIUONE_FORWARD_PREFLIGHT_CRON",
+    "DASHBOARD_NIUONE_EQUITY_SNAPSHOT_CRON",
+    "DASHBOARD_NIUONE_FORWARD_CRON",
+    NIUONE_FORWARD_COHORT_START_ENV,
     ACTIVE_STRATEGY_ENV,
     PRESET_STRATEGY_TEXT_ENV,
     "DASHBOARD_US_MARKET_SUMMARY_CRON",
@@ -1430,7 +1442,18 @@ def _candidate_rows(payload: dict[str, Any], *keys: str) -> list[Any]:
 
 def normalize_b1_payload_for_trader(b1_payload: dict[str, Any]) -> dict[str, Any]:
     items = _candidate_rows(b1_payload, "trade_items", "items", "candidates")
-    payload = {"items": items, "generated_at": b1_payload.get("generated_at", "")}
+    observed_items = _candidate_rows(
+        b1_payload,
+        "observed_items",
+        "items",
+        "candidates",
+        "trade_items",
+    )
+    payload = {
+        "items": items,
+        "observed_items": observed_items,
+        "generated_at": b1_payload.get("generated_at", ""),
+    }
     if isinstance(b1_payload.get("market_snapshot"), dict):
         payload["market_snapshot"] = b1_payload.get("market_snapshot")
     if isinstance(b1_payload.get("sector_tide_context"), dict):
@@ -1778,6 +1801,7 @@ def run_practice_decision_logged(
     except Exception as exc:
         print(f"[WARN] 此刻盘面总结与评价刷新失败: {type(exc).__name__}: {exc}", flush=True)
     item_count = len(payload.get("items") or [])
+    observed_count = len(payload.get("observed_items") or [])
     slot_note = ""
     if payload.get("schedule_slot"):
         kind_label = "补跑" if payload.get("schedule_run_kind") == "catchup" else "定时"
@@ -1785,14 +1809,16 @@ def run_practice_decision_logged(
     if not item_count:
         record_practice_decision_event(
             payload,
-            f"选股完成{slot_note}但没有候选股，继续检查已有持仓的原策略退出规则。",
-            f"选股完成{slot_note}：0只候选，开始持仓退出检查",
+            f"选股完成{slot_note}：候选池{observed_count}只，其中0只进入买卖决策，"
+            "继续检查已有持仓的原策略退出规则。",
+            f"选股完成{slot_note}：候选池{observed_count}只，0只进入买卖决策，开始持仓退出检查",
         )
     elif record_start:
         record_practice_decision_event(
             payload,
-            f"选股完成{slot_note}：{item_count}只候选，开始生成买卖决策。",
-            f"选股后买卖决策开始{slot_note}",
+            f"选股完成{slot_note}：候选池{observed_count}只，其中{item_count}只进入买卖决策，"
+            "开始生成买卖决策。",
+            f"选股后买卖决策开始{slot_note}：候选池{observed_count}只，决策池{item_count}只",
         )
     try:
         return run_practice_decision(payload)
@@ -1964,7 +1990,7 @@ def get_niuone_mainline_minute_engine() -> NiuOneMinuteEngine:
     """Return one in-process engine for the active private cache paths."""
 
     global NIUONE_MAINLINE_MINUTE_ENGINE, NIUONE_MAINLINE_MINUTE_ENGINE_PATHS
-    resolved_paths = (str(kline_cache_path()), str(STOCK_INDUSTRY_CACHE_FILE))
+    resolved_paths = (str(kline_cache_path()), str(EASTMONEY_BOARD_CACHE_FILE))
     with NIUONE_MAINLINE_MINUTE_STATE_LOCK:
         if (
             NIUONE_MAINLINE_MINUTE_ENGINE is None
@@ -2259,13 +2285,17 @@ def _trigger_b1_scan_unlocked(
             items = _candidate_rows(data, "items", "candidates")
             candidates = _candidate_rows(data, "candidates", "items")
             trade_items = _candidate_rows(data, "trade_items", "items", "candidates")
-            schedule_meta = {}
+            schedule_meta = {
+                "schedule_run_kind": schedule_run_kind or "manual",
+                "schedule_triggered_at": datetime.now().strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                ),
+            }
             if schedule_slot:
-                schedule_meta = {
+                schedule_meta.update({
                     "schedule_slot": schedule_slot,
                     "schedule_run_kind": schedule_run_kind or "scheduled",
-                    "schedule_triggered_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                }
+                })
             cache = {**data, "items": items, "candidates": candidates, "count": len(items),
                      "trade_items": trade_items, "trade_count": len(trade_items),
                      "total_analyzed": data.get("total_analyzed", 0),
@@ -2361,6 +2391,13 @@ def _run_practice_manual_cycle() -> None:
             raise RuntimeError(str(cache.get("error")))
         if not isinstance(cache.get("niuone_context"), dict):
             start_independent_niuone_mainline_scan()
+        cache = {
+            **cache,
+            "schedule_run_kind": "manual",
+            "schedule_triggered_at": datetime.now().strftime(
+                "%Y-%m-%d %H:%M:%S"
+            ),
+        }
 
         _set_practice_manual_cycle_state(
             stage="trading",
@@ -2470,6 +2507,47 @@ def _b1_schedule_slot_lag_seconds(slot_key: str) -> float:
         return 0.0
 
 
+def _remember_b1_schedule_terminal(
+    state: dict[str, Any],
+    slot_key: str,
+    slot: dict[str, Any],
+) -> None:
+    """Retain bounded terminal slot outcomes for strict-forward coverage."""
+    try:
+        scheduled = datetime.strptime(slot_key, "%Y-%m-%d %H:%M")
+    except (TypeError, ValueError):
+        return
+    status = str(slot.get("status") or "")
+    if status not in {"ok", "error", "skipped"}:
+        return
+    raw_history = state.get("day_history")
+    history = raw_history if isinstance(raw_history, dict) else {}
+    day_key = scheduled.strftime("%Y-%m-%d")
+    raw_day = history.get(day_key)
+    day = raw_day if isinstance(raw_day, dict) else {}
+    raw_slots = day.get("slots")
+    slots = raw_slots if isinstance(raw_slots, dict) else {}
+    slots[scheduled.strftime("%H:%M")] = {
+        key: slot.get(key)
+        for key in (
+            "scheduled_at",
+            "status",
+            "started_at",
+            "finished_at",
+            "run_kind",
+            "reason",
+        )
+        if slot.get(key) not in {None, ""}
+    }
+    day["slots"] = slots
+    day["updated_at"] = str(slot.get("updated_at") or "")
+    history[day_key] = day
+    state["day_history"] = {
+        key: history[key]
+        for key in sorted(history)[-B1_SCHEDULE_HISTORY_RETENTION_DAYS:]
+    }
+
+
 def _mark_b1_schedule_slot(slot_key: str, status: str, **fields: Any) -> None:
     with B1_SCHEDULE_LOCK:
         state = _load_b1_schedule_state_unlocked()
@@ -2488,6 +2566,7 @@ def _mark_b1_schedule_slot(slot_key: str, status: str, **fields: Any) -> None:
             slot["finished_at"] = now_text
             slot["finished_ts"] = time.time()
             B1_SCHEDULE_RUN_KEYS.discard(slot_key)
+            _remember_b1_schedule_terminal(state, slot_key, slot)
         state["slots"] = slots
         _save_b1_schedule_state_unlocked(state)
 
@@ -2553,6 +2632,7 @@ def claim_due_b1_schedule_slot(now: datetime | None = None) -> str | None:
                 "finished_at": now_text,
                 "finished_ts": now_float,
             })
+            _remember_b1_schedule_terminal(state, skipped_key, skipped)
         selected_slot = {**(slots.get(selected_key) or {})}
         selected_slot.pop("error", None)
         slots[selected_key] = {
@@ -2581,7 +2661,7 @@ def run_scheduled_b1_scan(slot_key: str) -> None:
             start_independent_niuone_mainline_scan(slot_key)
             _mark_b1_schedule_slot(
                 slot_key,
-                "ok",
+                "skipped",
                 reason="cache_already_generated_for_slot",
                 market_summary_generated_at=str(summary.get("generated_at") or ""),
             )
@@ -2602,11 +2682,50 @@ def run_scheduled_b1_scan(slot_key: str) -> None:
         else:
             if isinstance(summary, dict):
                 cache["market_summary"] = summary
-            cache["decision_result"] = run_practice_decision_logged(
+            decision_result = run_practice_decision_logged(
                 cache,
                 record_start=True,
                 refresh_market_summary=False,
             )
+            cache["decision_result"] = decision_result
+            decision = (
+                decision_result.get("decision")
+                if isinstance(decision_result, dict)
+                else None
+            )
+            if not isinstance(decision_result, dict):
+                decision_error = "invalid_practice_decision_result"
+            elif decision_result.get("error"):
+                decision_error = str(decision_result.get("error") or "")[:500]
+            elif isinstance(decision, dict) and decision.get("error"):
+                decision_error = str(decision.get("error") or "")[:500]
+            elif decision_result.get("durable_evidence_persisted") is not True:
+                decision_error = "practice_decision_evidence_not_persisted"
+            elif isinstance(decision, dict):
+                decision_error = ""
+            elif (
+                decision_result.get("skipped") is True
+                and decision_result.get("reason") == "already_decided_for_this_b1"
+            ):
+                decision_error = ""
+            else:
+                decision_error = "missing_practice_decision_payload"
+            if decision_error:
+                _mark_b1_schedule_slot(
+                    slot_key,
+                    "error",
+                    error=decision_error,
+                    count=int(cache.get("count") or 0),
+                    generated_at=cache.get("generated_at") or "",
+                    run_kind=run_kind,
+                    reason="practice_decision_failed",
+                )
+                print(
+                    f"[Practice schedule] {slot_key} decision failed: "
+                    f"{decision_error}",
+                    flush=True,
+                )
+                return
             _mark_b1_schedule_slot(
                 slot_key,
                 "ok",
@@ -4370,6 +4489,9 @@ CRON_CONFIG_NAMES = {
     "DASHBOARD_MARKET_AUCTION_CRON",
     "DASHBOARD_MARKET_MIDDAY_CRON",
     "DASHBOARD_MARKET_CLOSE_CRON",
+    "DASHBOARD_NIUONE_FORWARD_PREFLIGHT_CRON",
+    "DASHBOARD_NIUONE_EQUITY_SNAPSHOT_CRON",
+    "DASHBOARD_NIUONE_FORWARD_CRON",
     "DASHBOARD_US_RATING_CRON",
 }
 CRON_TIME_CONFIGS = {
@@ -4378,6 +4500,9 @@ CRON_TIME_CONFIGS = {
     "DASHBOARD_MARKET_AUCTION_CRON": {"day_label": "周一至周五"},
     "DASHBOARD_MARKET_MIDDAY_CRON": {"day_label": "周一至周五"},
     "DASHBOARD_MARKET_CLOSE_CRON": {"day_label": "周一至周五"},
+    "DASHBOARD_NIUONE_FORWARD_PREFLIGHT_CRON": {"day_label": "A股交易日"},
+    "DASHBOARD_NIUONE_EQUITY_SNAPSHOT_CRON": {"day_label": "A股交易日"},
+    "DASHBOARD_NIUONE_FORWARD_CRON": {"day_label": "A股交易日"},
     "DASHBOARD_US_RATING_CRON": {"day_label": "每天"},
 }
 ADMIN_GROUP_NOTES = {
@@ -4386,7 +4511,7 @@ ADMIN_GROUP_NOTES = {
     "买卖决策模型": "推荐使用 deepseek-v4-pro；也可填写其他兼容 /chat/completions 的模型服务。长度默认：上下文 128000 tokens，最大输出 4096 tokens。",
     "交易规则与风控": "约束买卖决策必须遵守的交易纪律、持仓数量、仓位比例、现金缓冲与盘面控仓规则。交易纪律 Prompt 会直接写入决策模型的必须遵守段。",
     "交易通知": "模拟买入或卖出成交落盘后推送。从下拉框按需添加渠道并分块配置；每个渠道可独立启用或关闭，关闭会保留配置，移除并保存后才会清除配置。Webhook、Bot Token 和签名密钥只保存、不回显。",
-    "选股与买卖设置": "配置主板、创业板、科创板和 ST 选股范围、候选数量，并维护北京时间 HH:MM 的选股、决策及离场时间。",
+    "选股与买卖设置": "配置选股范围、候选数量和北京时间交易时点；板块分类固定使用东方财富概念与行业。",
     "综合决策参考": "为买卖决策汇总指数、板块、资金流向、热门股票等参考数据。缓存秒数控制数据复用周期，单类参考数据上限可设置为 1～8。",
     "选股与交易策略": "选择一套独立策略；基础策略、Z哥、李大霄、板块潮汐、牛牛战法和预设文字策略的候选、买入、卖出、仓位与 Prompt 规则互不混用。",
     "盘面监控生产时间点": "直接填写北京时间 HH:MM；隔夜美股总结默认交易日 08:00 生成，A 股盘面监控在交易时段触发；长度默认：上下文 128000 tokens，最大输出 4096 tokens。",
@@ -4808,6 +4933,18 @@ def validate_business_updates(updates: dict[str, str]) -> None:
                 raise ValueError(f"{name} 必须在 {minimum} 到 {maximum} 之间")
         elif name == PRACTICE_SCHEDULE_TIMES_ENV:
             normalize_time_list_update(value)
+        elif name == NIUONE_FORWARD_COHORT_START_ENV:
+            raw_date = str(value or "").strip()
+            try:
+                parsed_date = date.fromisoformat(raw_date)
+            except ValueError:
+                raise ValueError(
+                    f"{name} 必须使用 YYYY-MM-DD，例如 2026-08-03"
+                ) from None
+            if parsed_date.isoformat() != raw_date:
+                raise ValueError(
+                    f"{name} 必须使用 YYYY-MM-DD，例如 2026-08-03"
+                )
         elif name in {
             "DASHBOARD_B3_EXIT_TIME",
             "DASHBOARD_TIME_EXIT_TIME",

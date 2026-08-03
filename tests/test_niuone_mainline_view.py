@@ -98,6 +98,10 @@ def sample_scan() -> dict[str, object]:
                     "industry": "工业金属",
                     "score": 72.5,
                     "state": "emerging",
+                    "niuone_lifecycle_stage": "markup",
+                    "niuone_lifecycle_label": "主线主升",
+                    "niuone_lifecycle_order": 20,
+                    "niuone_lifecycle_entry_policy": "participate",
                     "intraday_state": "intraday_mainline",
                     "member_count": 8,
                     "strong_stock_count": 4,
@@ -216,6 +220,13 @@ class NiuOneMainlineViewTests(unittest.TestCase):
         self.assertEqual([theme["industry"] for theme in view["reversal_themes"]], ["工业金属"])
         industrial_metals = next(theme for theme in view["themes"] if theme["industry"] == "工业金属")
         self.assertEqual(industrial_metals["effective_strong_count"], 3.2)
+        self.assertEqual(industrial_metals["niuone_lifecycle_stage"], "markup")
+        self.assertEqual(industrial_metals["niuone_lifecycle_label"], "主线主升")
+        self.assertEqual(industrial_metals["niuone_lifecycle_order"], 20)
+        self.assertEqual(
+            industrial_metals["niuone_lifecycle_entry_policy"],
+            "participate",
+        )
         self.assertEqual(industrial_metals["effective_breadth_pct"], 40)
         self.assertEqual(industrial_metals["leader_stock"]["code"], "603979")
         self.assertEqual(industrial_metals["leader_stock"]["role"], "leader")

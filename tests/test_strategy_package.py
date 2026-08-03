@@ -52,7 +52,7 @@ class StrategyPackageTests(unittest.TestCase):
             "zettaranc": ("Z哥评分基准", ("基础策略：", "李大霄")),
             "li_daxiao_bottom": ("李大霄", ("Z哥评分基准", "基础策略：")),
             "sector_tide": ("板块潮汐（市场→行业→个股", ("Z哥评分基准", "基础策略：", "李大霄")),
-            "niuone": ("牛牛战法（日内反转试仓→跨日启动→主线领航/回踩", ("板块潮汐（市场→行业→个股", "Z哥评分基准", "基础策略：", "李大霄")),
+            "niuone": ("牛牛战法（主线酝酿→主线主升→主线高潮→主线分歧→主线退幕", ("板块潮汐（市场→行业→个股", "Z哥评分基准", "基础策略：", "李大霄")),
         }
         for suite, (included, excluded) in cases.items():
             sections = build_strategy_prompt_sections(
@@ -79,16 +79,34 @@ class StrategyPackageTests(unittest.TestCase):
         self.assertIn("30%是单票绝对上限", active)
         self.assertIn("25%是单票绝对上限", active)
         self.assertIn("15%是单票绝对上限", active)
-        self.assertIn("反转试仓仅≤0.35%/0.30%/0.25%", active)
-        self.assertIn("间隔≥20分钟的两次快照确认", active)
-        self.assertIn("当日只建一次不超过5%的试仓", active)
-        self.assertIn("单笔权益风险≤1.50%/1.00%/0.60%", active)
-        self.assertIn("总仓≤70%/55%/35%", active)
-        self.assertIn("主题敞口≤55%/40%/25%", active)
-        self.assertIn("主题敞口≤12%/10%/8%", active)
+        self.assertIn("牛牛试仓仅≤0.35%/0.30%/0.25%/0.15%", active)
+        self.assertIn("左侧回落至少5个交易日且跌幅≥8%", active)
+        self.assertIn(
+            "右侧反弹≥6%、收复左侧跌幅须在60%（含）至200%（不含）之间",
+            active,
+        )
+        self.assertIn("达到200%后不再按早期试仓", active)
+        self.assertIn("上涨交易日占比至少2/3", active)
+        self.assertIn("每天最多保留评分最高的2只", active)
+        self.assertIn("至少有6只强势股", active)
+        self.assertIn("酝酿状态已连续3个交易日", active)
+        self.assertIn("单票绝对上限6.25%", active)
+        self.assertIn("已确认mainline必须改走牛牛领涨", active)
+        self.assertNotIn("mainline再加速", active)
+        self.assertIn("止损距离不得超过6%/2ATR", active)
+        self.assertIn("单笔权益风险≤1.50%/1.00%/0.60%/0.30%", active)
+        self.assertIn("总仓≤70%/55%/35%/20%", active)
+        self.assertIn("主题敞口≤55%/40%/25%/12%", active)
+        self.assertIn("主题敞口≤12%/10%/8%/5%", active)
+        self.assertIn("防守允许开仓，复合风险硬停止才禁止新仓", active)
         self.assertIn("策略同时最多持有5只", active)
         self.assertIn("strong_score前三且仍为强势股", active)
         self.assertIn("第一名涨停或无有效买点时可顺延", active)
+        self.assertIn(
+            "高潮仍允许满足领涨或企稳转强条件的核心股开仓，分歧只观察核心股调整后转强或减仓，持续回落不触发买点，退幕只退出",
+            active,
+        )
+        self.assertIn("不设固定单日涨幅上限，实际执行价达到涨停才拒绝", active)
         self.assertIn("连续两个交易日跌出行业前三龙头梯队时换出", active)
         self.assertNotIn("单笔权益风险≤0.25%/0.18%/0.10%", active)
         self.assertNotIn("总仓≤40%/28%/15%", active)
@@ -114,9 +132,10 @@ class StrategyPackageTests(unittest.TestCase):
                 else:
                     os.environ[name] = value
 
-        self.assertIn("单笔权益风险分别≤1.50%/1.00%/0.60%", discipline)
-        self.assertIn("总仓≤70%/55%/35%", discipline)
-        self.assertIn("领航/回踩/启动/反转试仓单票30%/25%/15%/5%", discipline)
+        self.assertIn("单笔权益风险分别≤1.50%/1.00%/0.60%/0.30%", discipline)
+        self.assertIn("总仓≤70%/55%/35%/20%", discipline)
+        self.assertIn("仅市场复合硬停止禁止新仓", discipline)
+        self.assertIn("领涨/转强/启动/试仓单票30%/25%/15%/6.25%", discipline)
         self.assertIn("同时最多持有5只", discipline)
         self.assertNotIn("单笔权益风险分别≤0.25%/0.18%/0.10%", discipline)
 
@@ -146,7 +165,7 @@ class StrategyPackageTests(unittest.TestCase):
             time_exit_hhmm="14:45",
         )
         self.assertIn("牛牛战法历史持仓退出纪律", niuone_exits)
-        self.assertIn("strategy_mark=牛牛领航", niuone_exits)
+        self.assertIn("strategy_mark=牛牛领涨", niuone_exits)
         self.assertIn("连续两个交易日跌出强势行业前三龙头梯队时换出", niuone_exits)
 
     def test_legacy_registry_is_a_compatibility_view(self):
@@ -237,12 +256,27 @@ assert 'b3_accelerate' in module.STRATEGY_DEFINITIONS
                 "verdict": "可执行",
             }
 
+        def blocked_high_score(rows):
+            return {
+                "score": 9.8,
+                "entry_threshold": 8.0,
+                "strategy_priority": 100,
+                "decision_score": 8.3,
+                "verdict": "高分但被阶段门槛阻止",
+                "actionable": False,
+                "hard_blockers": ["等待下一阶段"],
+            }
+
         source_rows = [{"close": 10.0}]
-        result = analyze_enriched_rows(source_rows, {"watch": watch_only, "action": actionable})
+        result = analyze_enriched_rows(source_rows, {
+            "watch": watch_only,
+            "blocked": blocked_high_score,
+            "action": actionable,
+        })
 
         self.assertEqual(result["best_strategy"], "action")
-        self.assertEqual(result["consensus_count"], 2)
-        self.assertEqual(result["consensus_boost"], 0.5)
+        self.assertEqual(result["consensus_count"], 3)
+        self.assertEqual(result["consensus_boost"], 1)
         self.assertNotIn("private_annotation", source_rows[0])
 
 

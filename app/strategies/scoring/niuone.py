@@ -11,10 +11,25 @@ from typing import Any, Mapping
 
 from ..niuone_risk import (
     NIUONE_ABSOLUTE_POSITION_CAP_PCT,
+    NIUONE_MARKUP_MOMENTUM_PROBE_MAX_ENTRY_EXTENSION_ATR,
+    NIUONE_MARKUP_MOMENTUM_PROBE_MIN_SCORE,
+    NIUONE_MARKUP_MOMENTUM_PROBE_ORDINARY_MIN_SCORE,
+    NIUONE_MARKUP_MOMENTUM_PROBE_POSITION_CAP_PCT,
+    NIUONE_MARKUP_MOMENTUM_PROBE_SUBROUTE,
     niuone_chase_limits,
+    niuone_markup_momentum_probe_eligible,
+    niuone_markup_momentum_probe_is_acceleration,
     niuone_risk_budget,
     niuone_structure_risk_ok,
     niuone_structural_stop_limits,
+)
+from ..policy import (
+    NIUONE_DAILY_V_MIN_RECOVERY_RATIO,
+    NIUONE_TODAY_OBSERVATION_THRESHOLD,
+)
+from ..lifecycle import (
+    niuone_lifecycle_entry_blocker,
+    niuone_lifecycle_metadata,
 )
 from ..sector_tide_risk import (
     SECTOR_TIDE_EXECUTION_BUFFER_PCT,
@@ -23,7 +38,12 @@ from ..sector_tide_risk import (
     risk_sized_position_cap_pct,
     structural_stop_distance_pct,
 )
-from .common import safe_float, safe_round, with_strategy_profile
+from .common import (
+    niu_emerging_theme_eligible,
+    safe_float,
+    safe_round,
+    with_strategy_profile,
+)
 
 
 NIUONE_STRATEGY_IDS = frozenset({
@@ -39,7 +59,6 @@ NIUONE_CORE_STOCK_LIMIT = 5
 NIUONE_LEADER_TIER_LIMIT = 3
 NIUONE_MIN_CROSS_DAY_CORE_OVERLAP = 2
 NIUONE_TODAY_MIN_QUOTE_COVERAGE = 0.8
-NIUONE_TODAY_OBSERVATION_THRESHOLD = 60.0
 NIUONE_REVERSAL_MIN_SAMPLE_GAP_MINUTES = 20.0
 NIUONE_REVERSAL_MIN_QUOTE_COVERAGE = 0.70
 NIUONE_REVERSAL_MIN_BREADTH_PCT = 60.0
@@ -47,6 +66,14 @@ NIUONE_REVERSAL_MIN_MEDIAN_CHANGE_PCT = 0.5
 NIUONE_REVERSAL_MIN_REBOUND_PCT = 1.5
 NIUONE_REVERSAL_MIN_STRENGTH_SCORE = 60.0
 NIUONE_REVERSAL_MIN_CORE_COUNT = 2
+NIUONE_DAILY_V_LOOKBACK = 30
+NIUONE_DAILY_V_LEFT_LOOKBACK = 15
+NIUONE_DAILY_V_MIN_LEFT_DAYS = 5
+NIUONE_DAILY_V_MIN_RIGHT_DAYS = 3
+NIUONE_DAILY_V_MAX_RIGHT_DAYS = 15
+NIUONE_DAILY_V_MIN_DECLINE_PCT = 8.0
+NIUONE_DAILY_V_MIN_REBOUND_PCT = 6.0
+NIUONE_DAILY_V_MIN_RISING_RATIO = 2 / 3
 
 
 def _mean(values: list[float], default: float = 0.0) -> float:
@@ -63,6 +90,22 @@ def _industry_name(value: Any) -> str:
         if text.endswith(suffix) and len(text) > len(suffix) + 1:
             text = text[: -len(suffix)]
     return text
+
+
+def _theme_names(value: Any, *, fallback: Any = "") -> tuple[str, ...]:
+    if isinstance(value, str):
+        values = value.split(",")
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        values = value
+    else:
+        values = ()
+    labels = tuple(dict.fromkeys(
+        label for item in values if (label := _industry_name(item))
+    ))
+    if labels:
+        return labels
+    fallback_label = _industry_name(fallback)
+    return (fallback_label,) if fallback_label else ()
 
 
 def _stock_code(value: Any) -> str:
@@ -112,6 +155,112 @@ def _atr(rows: list[dict[str, Any]], lookback: int = NIUONE_ATR_LOOKBACK) -> flo
     return _mean(ranges) if ranges else None
 
 
+def _daily_v_reversal_metrics(
+    rows: list[dict[str, Any]],
+    *,
+    current_close: float | None = None,
+) -> dict[str, Any]:
+    """Detect a multi-session V using only information visible in daily bars."""
+    defaults = {
+        "daily_v_reversal": False,
+        "daily_v_left_peak_date": "",
+        "daily_v_trough_date": "",
+        "daily_v_left_days": 0,
+        "daily_v_right_days": 0,
+        "daily_v_decline_pct": 0.0,
+        "daily_v_rebound_pct": 0.0,
+        "daily_v_recovery_ratio": 0.0,
+        "daily_v_rising_ratio": 0.0,
+        "daily_v_right_trend_confirmed": False,
+        "daily_v_pattern_score": 0.0,
+        "daily_v_stop_price": None,
+    }
+    window = rows[-(NIUONE_DAILY_V_LOOKBACK + 1):]
+    if len(window) < NIUONE_DAILY_V_MIN_LEFT_DAYS + NIUONE_DAILY_V_MIN_RIGHT_DAYS + 1:
+        return defaults
+
+    closes: list[float] = []
+    lows: list[float] = []
+    for row in window:
+        close = safe_float(row.get("close"))
+        low = safe_float(row.get("low"))
+        if close is None or close <= 0:
+            return defaults
+        closes.append(close)
+        lows.append(low if low is not None and low > 0 else close)
+    if current_close is not None and current_close > 0:
+        closes[-1] = current_close
+
+    latest_index = len(window) - 1
+    first_trough = NIUONE_DAILY_V_MIN_LEFT_DAYS
+    last_trough = latest_index - NIUONE_DAILY_V_MIN_RIGHT_DAYS
+    first_trough = max(first_trough, latest_index - NIUONE_DAILY_V_MAX_RIGHT_DAYS)
+    if first_trough > last_trough:
+        return defaults
+    trough_index = min(
+        range(first_trough, last_trough + 1),
+        key=lambda index: closes[index],
+    )
+    left_start = max(0, trough_index - NIUONE_DAILY_V_LEFT_LOOKBACK)
+    left_candidates = range(left_start, trough_index)
+    if not left_candidates:
+        return defaults
+    left_peak_index = max(left_candidates, key=lambda index: closes[index])
+    left_peak = closes[left_peak_index]
+    trough = closes[trough_index]
+    current = closes[-1]
+    if left_peak <= trough or current <= trough:
+        return defaults
+
+    left_days = trough_index - left_peak_index
+    right_days = latest_index - trough_index
+    decline_pct = (left_peak / trough - 1.0) * 100.0
+    rebound_pct = (current / trough - 1.0) * 100.0
+    recovery_ratio = (current - trough) / (left_peak - trough)
+    right_steps = [
+        closes[index] > closes[index - 1]
+        for index in range(trough_index + 1, latest_index + 1)
+    ]
+    rising_ratio = sum(right_steps) / len(right_steps) if right_steps else 0.0
+    recent_right = closes[max(trough_index + 1, latest_index - 4):]
+    right_trend_confirmed = bool(
+        right_steps
+        and rising_ratio >= NIUONE_DAILY_V_MIN_RISING_RATIO
+        and current >= max(closes[max(trough_index + 1, latest_index - 2):])
+        and current >= _mean(recent_right, current)
+    )
+    pattern_score = _clamp(
+        _clamp(decline_pct / 12.0 * 100.0) * 0.20
+        + _clamp(rebound_pct / 10.0 * 100.0) * 0.30
+        + _clamp(recovery_ratio / 0.80 * 100.0) * 0.30
+        + rising_ratio * 100.0 * 0.20
+    )
+    stop_start = max(trough_index + 1, latest_index - 2)
+    stop_price = min(lows[stop_start:]) if lows[stop_start:] else trough
+    matched = bool(
+        left_days >= NIUONE_DAILY_V_MIN_LEFT_DAYS
+        and NIUONE_DAILY_V_MIN_RIGHT_DAYS <= right_days <= NIUONE_DAILY_V_MAX_RIGHT_DAYS
+        and decline_pct >= NIUONE_DAILY_V_MIN_DECLINE_PCT
+        and rebound_pct >= NIUONE_DAILY_V_MIN_REBOUND_PCT
+        and recovery_ratio >= NIUONE_DAILY_V_MIN_RECOVERY_RATIO
+        and right_trend_confirmed
+    )
+    return {
+        "daily_v_reversal": matched,
+        "daily_v_left_peak_date": str(window[left_peak_index].get("date") or "")[:10],
+        "daily_v_trough_date": str(window[trough_index].get("date") or "")[:10],
+        "daily_v_left_days": left_days,
+        "daily_v_right_days": right_days,
+        "daily_v_decline_pct": round(decline_pct, 2),
+        "daily_v_rebound_pct": round(rebound_pct, 2),
+        "daily_v_recovery_ratio": round(recovery_ratio, 4),
+        "daily_v_rising_ratio": round(rising_ratio, 4),
+        "daily_v_right_trend_confirmed": right_trend_confirmed,
+        "daily_v_pattern_score": round(pattern_score, 2),
+        "daily_v_stop_price": stop_price,
+    }
+
+
 def _member_metrics(item: dict[str, Any]) -> dict[str, Any] | None:
     rows = item.get("rows") if isinstance(item.get("rows"), list) else []
     if len(rows) < NIUONE_MIN_ROWS:
@@ -152,10 +301,16 @@ def _member_metrics(item: dict[str, Any]) -> dict[str, Any] | None:
         if intraday_low is not None and intraday_low > 0
         else None
     )
+    industry = _industry_name(item.get("industry") or latest.get("industry"))
+    themes = _theme_names(
+        item.get("themes") or latest.get("themes"),
+        fallback=industry,
+    )
     return {
         "code": _stock_code(item.get("code") or latest.get("symbol_code")),
         "name": str(item.get("name") or latest.get("stock_name") or ""),
-        "industry": _industry_name(item.get("industry") or latest.get("industry")),
+        "industry": industry,
+        "themes": themes,
         "ret5": ret5,
         "ret20": ret20,
         "above_ema20": bool(ema20 and close >= ema20),
@@ -552,7 +707,7 @@ def _market_context(
         "state": state,
         "confirmation_count": confirmation_count,
         "hard_stop": hard_stop,
-        "allow_new_buys": raw_state != "defensive" and state != "defensive" and not hard_stop,
+        "allow_new_buys": not hard_stop,
         "breadth_score": round(breadth, 2),
         "median_change_pct": round(median_change, 3),
         "limit_up": limit_up,
@@ -706,11 +861,12 @@ def build_niuone_context(
     previous_trading_day: str = "",
     sample_at: str = "",
     reuse_previous_external_context: bool = False,
+    theme_basis: str = "industry_proxy",
 ) -> dict[str, Any]:
     """Build a market-mainline context without forcing a winner.
 
-    Industry is the deterministic theme proxy. A future concept-tag provider can
-    supply a richer mapping without changing the state or execution contracts.
+    A member may belong to multiple themes. ``industry_proxy`` is
+    retained for legacy callers; production supplies Eastmoney concept labels.
     """
     members: list[dict[str, Any]] = []
     insufficient_history_count = 0
@@ -730,7 +886,8 @@ def build_niuone_context(
         int(reference_pool_count or 0),
     )
     unavailable_kline_count = max(0, resolved_reference_pool_count - len(prepared_items))
-    missing_industry_count = sum(1 for member in members if not member.get("industry"))
+    resolved_theme_basis = str(theme_basis or "industry_proxy").strip() or "industry_proxy"
+    missing_theme_count = sum(1 for member in members if not member.get("themes"))
     previous_context = previous_context if isinstance(previous_context, dict) else {}
     as_of_date = str(as_of_date or "")[:10]
     previous_trading_day = str(previous_trading_day or "")[:10]
@@ -784,14 +941,14 @@ def build_niuone_context(
             news = dict(previous_context["news"])
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for member in members:
-        if member["industry"]:
-            grouped[str(member["industry"])].append(member)
+        for theme_name in member.get("themes") or ():
+            grouped[str(theme_name)].append(member)
     flows = _flow_map(flow_rows)
     flow_population = list(flows.values())
     theme_amounts = [sum(float(member["amount"]) for member in group) for group in grouped.values()]
     previous_themes = previous_context.get("themes") if isinstance(previous_context.get("themes"), dict) else {}
     themes: dict[str, dict[str, Any]] = {}
-    stocks: dict[str, dict[str, Any]] = {}
+    stock_profiles: dict[str, list[dict[str, Any]]] = defaultdict(list)
 
     for industry, theme_members in grouped.items():
         today_metrics = _today_theme_metrics(theme_members)
@@ -887,15 +1044,32 @@ def build_niuone_context(
         )
         raw_state = str(state_detail["raw_state"])
         state = str(state_detail["state"])
+        lifecycle = niuone_lifecycle_metadata(
+            {
+                "state": state,
+                "score": score,
+                "cross_day_persistent": state_detail[
+                    "cross_day_persistent"
+                ],
+                "cross_day_confirmed": state_detail[
+                    "cross_day_confirmed"
+                ],
+                "mainline_confirmed": state_detail[
+                    "mainline_confirmed"
+                ],
+            },
+            previous=previous,
+        )
         themes[industry] = {
             "industry": industry,
-            "theme_basis": "industry_proxy",
+            "theme_basis": resolved_theme_basis,
             "member_count": len(theme_members),
             **today_metrics,
             "eligible_data": eligible,
             "score": round(score, 2),
             "raw_state": raw_state,
             "state": state,
+            **lifecycle,
             "intraday_state": state_detail["intraday_state"],
             "confirmation_count": state_detail["confirmation_count"],
             "intraday_confirmation_count": state_detail["intraday_confirmation_count"],
@@ -945,8 +1119,8 @@ def build_niuone_context(
             ],
         }
 
-        theme_ret5 = [float(member["ret5"]) for member in theme_members]
-        theme_ret20 = [float(member["ret20"]) for member in theme_members]
+        theme_ret5 = sorted(float(member["ret5"]) for member in theme_members)
+        theme_ret20 = sorted(float(member["ret20"]) for member in theme_members)
         for rank_index, member in enumerate(sorted(theme_members, key=lambda item: float(item["strong_score"]), reverse=True), start=1):
             code = str(member["code"])
             today_rank = today_rank_by_code.get(code)
@@ -965,8 +1139,9 @@ def build_niuone_context(
             dragon_stock = dragon_stocks.get(code) or {}
             news_stock = news_stocks.get(code) or {}
             role = "leader" if rank_index == 1 and member["strong"] else ("core" if member["strong"] else "follower")
-            stocks[code] = {
+            stock_profiles[code].append({
                 "industry": industry,
+                "theme_basis": resolved_theme_basis,
                 "theme_state": state,
                 "theme_score": round(score, 2),
                 "strong_score": round(float(member["strong_score"]), 2),
@@ -985,8 +1160,12 @@ def build_niuone_context(
                 "rebound_from_low_pct": safe_round(member.get("rebound_from_low_pct"), 2),
                 "reclaim_previous_close": bool(member.get("reclaim_previous_close")),
                 "theme_rank": round(100 - (rank_index - 1) / max(1, len(theme_members) - 1) * 100, 2),
-                "theme_ret5_rank": round(_percentile(float(member["ret5"]), theme_ret5), 2),
-                "theme_ret20_rank": round(_percentile(float(member["ret20"]), theme_ret20), 2),
+                "theme_ret5_rank": round(
+                    _percentile_from_sorted(float(member["ret5"]), theme_ret5), 2
+                ),
+                "theme_ret20_rank": round(
+                    _percentile_from_sorted(float(member["ret20"]), theme_ret20), 2
+                ),
                 "market_rank": round(float(member["ret20_percentile"]), 2),
                 "dragon_tiger_listed": bool(dragon_stock.get("listed")),
                 "dragon_tiger_signal": dragon_stock.get("signal", "neutral"),
@@ -1005,7 +1184,59 @@ def build_niuone_context(
                     "error": news_stock.get("error", ""),
                 },
                 "news_adjustment": float(news_stock.get("adjustment") or 0.0),
+            })
+
+    state_priority = {
+        "mainline": 4,
+        "emerging": 3,
+        "candidate": 2,
+        "diverging": 1,
+        "fading": 0,
+    }
+    stocks: dict[str, dict[str, Any]] = {}
+    for code, profiles in stock_profiles.items():
+        ordered_profiles = sorted(
+            profiles,
+            key=lambda profile: (
+                -state_priority.get(str(profile.get("theme_state") or ""), -1),
+                -float(profile.get("theme_score") or 0.0),
+                -float(profile.get("strong_score") or 0.0),
+                -float(profile.get("theme_rank") or 0.0),
+                str(profile.get("industry") or ""),
+            ),
+        )
+        selected = dict(ordered_profiles[0])
+        selected["theme_memberships"] = [
+            str(profile.get("industry") or "")
+            for profile in ordered_profiles
+            if str(profile.get("industry") or "")
+        ]
+        # A stock may lead one concept while being only a follower in another.
+        # Keep the compact per-theme routing fields so every NiuOne action can
+        # choose a lifecycle-compatible branch instead of inheriting one global
+        # profile selected before the action is known.  External/news fields are
+        # intentionally not duplicated for every membership.
+        selected["theme_profiles"] = [
+            {
+                key: profile.get(key)
+                for key in (
+                    "industry",
+                    "theme_basis",
+                    "role",
+                    "leader_rank",
+                    "leader_tier",
+                    "today_leader_rank",
+                    "today_leader_tier",
+                    "today_rank_score",
+                    "reversal_strong",
+                    "theme_rank",
+                    "theme_ret5_rank",
+                    "theme_ret20_rank",
+                )
             }
+            for profile in ordered_profiles
+        ]
+        stocks[code] = selected
 
     ordered = sorted(themes.values(), key=lambda theme: float(theme["score"]), reverse=True)
     confirmed = [theme for theme in ordered if theme["state"] == "mainline"]
@@ -1059,9 +1290,9 @@ def build_niuone_context(
             reversal_primary["reversal_confirmation_count"] if reversal_primary else 0
         ),
         "today_observation_reason": (
-            "V型反转已完成分时双确认，仅允许牛牛反转小仓试错"
+            "日内V形修复已完成分时双确认，仅作题材研究观察"
             if reversal_primary
-            else "V型反转正在等待间隔确认，不降低原有跨日主线门槛"
+            else "日内V形修复正在等待间隔确认，不改变牛牛试仓或跨日主线门槛"
             if reversal_ordered
             else "今日强度仅作观察，不改变原有跨日主线确认门槛"
             if today_primary
@@ -1091,9 +1322,9 @@ def build_niuone_context(
         },
         {
             "key": "industry_unmapped",
-            "label": "行业映射缺失",
-            "count": missing_industry_count,
-            "description": "强度指标有效，但没有可用于题材聚类的行业归属",
+            "label": "题材映射缺失",
+            "count": missing_theme_count,
+            "description": "强度指标有效，但没有可用于题材聚类的东方财富概念或行业归属",
         },
     ]
     classified_uncovered_count = sum(int(reason["count"]) for reason in coverage_reasons)
@@ -1105,9 +1336,9 @@ def build_niuone_context(
             "description": "未归入已知数据质量分类",
         })
     return {
-        "version": 5,
+        "version": 6,
         "strategy": "niuone",
-        "theme_basis": "industry_proxy",
+        "theme_basis": resolved_theme_basis,
         "as_of_date": as_of_date,
         "previous_trading_day": previous_trading_day,
         "sample_at": sample_at,
@@ -1135,14 +1366,119 @@ def build_niuone_context(
     }
 
 
-def _entry_metrics(rows: list[dict[str, Any]], context: dict[str, Any]) -> dict[str, Any] | None:
+def _action_theme_profile(
+    stock: Mapping[str, Any],
+    context: Mapping[str, Any],
+    strategy_name: str,
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Choose the best concept membership that matches an entry action.
+
+    The old global stock profile preferred the most mature membership before
+    the action was known.  For multi-concept names that could route a startup
+    leader through an unrelated mature theme where it was only a follower.
+    Selection is now action-aware while retaining a deterministic fallback so
+    blocked candidates still expose useful diagnostics.
+    """
+    themes = context.get("themes") if isinstance(context.get("themes"), Mapping) else {}
+    raw_profiles = stock.get("theme_profiles")
+    profiles = (
+        [dict(item) for item in raw_profiles if isinstance(item, Mapping)]
+        if isinstance(raw_profiles, list)
+        else []
+    )
+    if not profiles:
+        profiles = [dict(stock)]
+
+    candidates: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for profile in profiles:
+        industry = _industry_name(profile.get("industry"))
+        theme = themes.get(industry) if isinstance(themes, Mapping) else None
+        if not industry or not isinstance(theme, Mapping):
+            continue
+        merged = dict(stock)
+        merged.update(profile)
+        candidates.append((merged, dict(theme)))
+    if not candidates:
+        return None
+
+    def action_compatible(item: tuple[dict[str, Any], dict[str, Any]]) -> bool:
+        profile, theme = item
+        if niuone_lifecycle_entry_blocker(strategy_name, theme) is not None:
+            return False
+        state = str(theme.get("state") or "")
+        confirmed = bool(
+            theme.get("mainline_confirmed")
+            or theme.get("cross_day_confirmed")
+        )
+        if strategy_name == "niu_reversal_probe":
+            return bool(
+                state in {"candidate", "emerging"}
+                and not confirmed
+                and not (state == "candidate" and profile.get("strong") is True)
+            )
+        if strategy_name == "niu_emerging":
+            return bool(
+                state == "emerging"
+                and theme.get("cross_day_persistent") is True
+            )
+        if strategy_name in {"niu_leader", "niu_pullback"}:
+            return bool(state in {"mainline", "diverging"} and confirmed)
+        return True
+
+    compatible = [item for item in candidates if action_compatible(item)]
+    routed = compatible or candidates
+    state_priority = {
+        "mainline": 5,
+        "diverging": 4,
+        "emerging": 3,
+        "candidate": 2,
+        "fading": 1,
+        "inactive": 0,
+    }
+    routed.sort(
+        key=lambda item: (
+            -int(item[0].get("leader_tier") is True),
+            -float(item[0].get("theme_rank") or 0.0),
+            -state_priority.get(str(item[1].get("state") or ""), -1),
+            -float(item[1].get("score") or 0.0),
+            str(item[0].get("industry") or ""),
+        )
+    )
+    return routed[0]
+
+
+def _entry_metrics(
+    rows: list[dict[str, Any]],
+    context: dict[str, Any],
+    strategy_name: str,
+) -> dict[str, Any] | None:
     if len(rows) < NIUONE_MIN_ROWS or not isinstance(context, dict):
         return None
     latest = rows[-1]
     code = _stock_code(latest.get("symbol_code"))
-    industry = _industry_name(latest.get("industry"))
-    theme = (context.get("themes") or {}).get(industry)
-    stock = (context.get("stocks") or {}).get(code)
+    source_stock = (context.get("stocks") or {}).get(code)
+    routed = (
+        _action_theme_profile(source_stock, context, strategy_name)
+        if isinstance(source_stock, Mapping)
+        else None
+    )
+    if routed is not None:
+        stock, theme = routed
+    elif isinstance(source_stock, Mapping):
+        # Compatibility for older cached/manual contexts whose stock payload
+        # predates per-theme routing fields and relies on the row's industry.
+        stock = dict(source_stock)
+        fallback_industry = _industry_name(
+            stock.get("industry") or latest.get("industry")
+        )
+        fallback_theme = (context.get("themes") or {}).get(fallback_industry)
+        theme = dict(fallback_theme) if isinstance(fallback_theme, Mapping) else None
+    else:
+        stock, theme = None, None
+    industry = _industry_name(
+        (stock.get("industry") or latest.get("industry"))
+        if isinstance(stock, dict) else latest.get("industry")
+    )
     market = context.get("market") if isinstance(context.get("market"), dict) else {}
     if not isinstance(theme, dict) or not isinstance(stock, dict):
         return None
@@ -1158,13 +1494,18 @@ def _entry_metrics(rows: list[dict[str, Any]], context: dict[str, Any]) -> dict[
     prior_close = safe_float(rows[-2].get("close")) or close
     prior_highs = [safe_float(row.get("high")) for row in rows[-21:-1]]
     highs = [value for value in prior_highs if value is not None and value > 0]
+    breakout_level = max(highs) if highs else None
     current_volume = safe_float(latest.get("volume")) or 0.0
     prior_volumes = [safe_float(row.get("volume")) for row in rows[-21:-1]]
     volumes = [value for value in prior_volumes if value is not None and value > 0]
     volume_ratio = current_volume / _mean(volumes) if volumes else 1.0
     live_change = safe_float(latest.get("quote_change_pct"))
     change_pct = live_change if live_change is not None else (safe_float(latest.get("change_pct")) or 0.0)
-    breakout = bool(highs and close >= max(highs) * 1.002 and 1.15 <= volume_ratio <= 2.5)
+    breakout = bool(
+        breakout_level is not None
+        and close >= breakout_level * 1.002
+        and 1.15 <= volume_ratio <= 2.5
+    )
     recent_lows = [safe_float(row.get("low")) for row in rows[-4:]]
     lows = [value for value in recent_lows if value is not None and value > 0]
     pullback = bool(lows and min(lows) <= ema20 * 1.02 and close >= ema20 and volume_ratio <= 1.15 and change_pct >= -0.8)
@@ -1185,6 +1526,7 @@ def _entry_metrics(rows: list[dict[str, Any]], context: dict[str, Any]) -> dict[
         and close > previous_close
         and change_pct > 0
     )
+    daily_v = _daily_v_reversal_metrics(rows, current_close=close)
     structure_low = min(lows) if lows else close - atr * 1.5
     stop_distance = structural_stop_distance_pct(close, structure_low)
     stop_atr = (close - structure_low) / atr
@@ -1199,9 +1541,19 @@ def _entry_metrics(rows: list[dict[str, Any]], context: dict[str, Any]) -> dict[
         execution_buffer_pct=SECTOR_TIDE_EXECUTION_BUFFER_PCT,
     )
     extension_atr = (close - ema20) / atr
+    breakout_extension_atr = (
+        max(0.0, (close - breakout_level) / atr)
+        if breakout_level is not None
+        else None
+    )
+    breakout_stop_price = (
+        breakout_level - atr * 0.5
+        if breakout_level is not None and breakout_level - atr * 0.5 > 0
+        else None
+    )
     score_before_external = (float(theme["score"]) * 0.55 + float(stock["strong_score"]) * 0.45) / 10
     raw_external = float(stock.get("dragon_tiger_adjustment") or 0.0) + float(stock.get("news_adjustment") or 0.0)
-    positive_suppressed = bool(raw_external > 0 and (change_pct > 7 or extension_atr > 1.5))
+    positive_suppressed = bool(raw_external > 0 and extension_atr > 1.5)
     external = 0.0 if positive_suppressed else _clamp(raw_external, -0.6, 0.4)
     return {
         "code": code,
@@ -1221,6 +1573,9 @@ def _entry_metrics(rows: list[dict[str, Any]], context: dict[str, Any]) -> dict[
         "atr20": atr,
         "distance_pct": (close / ema20 - 1) * 100,
         "extension_atr": extension_atr,
+        "breakout_level": breakout_level,
+        "breakout_extension_atr": breakout_extension_atr,
+        "breakout_stop_price": breakout_stop_price,
         "volume_ratio": volume_ratio,
         "change_pct": change_pct,
         "breakout": breakout,
@@ -1229,6 +1584,7 @@ def _entry_metrics(rows: list[dict[str, Any]], context: dict[str, Any]) -> dict[
         "intraday_low": intraday_low,
         "rebound_from_low_pct": rebound_from_low_pct,
         "reclaim_previous_close": reclaim_previous_close,
+        **daily_v,
         "trend_aligned": trend_aligned,
         "stop_price": structure_low,
         "stop_distance_pct": stop_distance,
@@ -1243,6 +1599,51 @@ def _entry_metrics(rows: list[dict[str, Any]], context: dict[str, Any]) -> dict[
         "external_context_adjustment": external,
         "external_positive_suppressed": positive_suppressed,
         "composite_score": _clamp(score_before_external + external, 0.0, 10.0),
+    }
+
+
+def _strategy_entry_geometry(
+    strategy_name: str,
+    metrics: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Resolve chase distance and stop from the entry setup's own price anchor."""
+    reversal_probe = strategy_name == "niu_reversal_probe"
+    breakout_entry = bool(
+        strategy_name in {"niu_leader", "niu_emerging"}
+        and metrics.get("breakout")
+        and safe_float(metrics.get("breakout_level")) is not None
+    )
+    if reversal_probe:
+        stop_price = safe_float(metrics.get("daily_v_stop_price"))
+        stop_source = "niu_reversal_right_low"
+        entry_extension_atr = safe_float(metrics.get("extension_atr"))
+        entry_extension_source = "ema20"
+        entry_setup = "daily_v_reversal"
+    elif breakout_entry:
+        stop_price = safe_float(metrics.get("breakout_stop_price"))
+        stop_source = "niu_breakout_pivot"
+        entry_extension_atr = safe_float(metrics.get("breakout_extension_atr"))
+        entry_extension_source = "breakout_level"
+        entry_setup = "breakout"
+    else:
+        stop_price = safe_float(metrics.get("stop_price"))
+        stop_source = "niu_structure_low"
+        entry_extension_atr = safe_float(metrics.get("extension_atr"))
+        entry_extension_source = "ema20"
+        entry_setup = (
+            "pullback" if metrics.get("pullback")
+            else "reclaim" if metrics.get("reclaim")
+            else "none"
+        )
+    if stop_price is None or stop_price <= 0:
+        stop_price = safe_float(metrics.get("stop_price"))
+        stop_source = "niu_structure_low"
+    return {
+        "stop_price": stop_price,
+        "stop_source": stop_source,
+        "entry_extension_atr": entry_extension_atr,
+        "entry_extension_source": entry_extension_source,
+        "entry_setup": entry_setup,
     }
 
 
@@ -1268,8 +1669,8 @@ def _payload(
         str(market.get("risk_state") or market.get("state") or ""),
     )
     absolute_cap = NIUONE_ABSOLUTE_POSITION_CAP_PCT[strategy_name]
-    reversal_probe = strategy_name == "niu_reversal_probe"
-    stop_price = metrics["intraday_low"] if reversal_probe else metrics["stop_price"]
+    geometry = _strategy_entry_geometry(strategy_name, metrics)
+    stop_price = geometry["stop_price"]
     stop_distance_pct = structural_stop_distance_pct(metrics["close"], stop_price)
     stop_atr = (
         (metrics["close"] - stop_price) / metrics["atr"]
@@ -1300,8 +1701,14 @@ def _payload(
         "score_total": 10,
         "verdict": verdict,
         "industry": metrics["industry"],
-        "theme_basis": "industry_proxy",
+        "theme_basis": str(theme.get("theme_basis") or "industry_proxy"),
         "mainline_state": theme.get("state"),
+        "niuone_lifecycle_stage": theme.get("niuone_lifecycle_stage"),
+        "niuone_lifecycle_label": theme.get("niuone_lifecycle_label"),
+        "niuone_lifecycle_order": theme.get("niuone_lifecycle_order"),
+        "niuone_lifecycle_entry_policy": theme.get(
+            "niuone_lifecycle_entry_policy"
+        ),
         "mainline_raw_state": theme.get("raw_state"),
         "mainline_intraday_state": theme.get("intraday_state"),
         "mainline_score": theme.get("score"),
@@ -1350,7 +1757,7 @@ def _payload(
         "reversal_flow_flip": bool(theme.get("reversal_flow_flip")),
         "reversal_flow_improving": bool(theme.get("reversal_flow_improving")),
         "reversal_score": theme.get("reversal_score"),
-        "market_regime": market.get("state"),
+        "market_regime": regime,
         "market_score": market.get("score"),
         "market_hard_stop": bool(market.get("hard_stop")),
         "market_allows_buys": bool(market.get("allow_new_buys")),
@@ -1391,6 +1798,11 @@ def _payload(
         "atr20": safe_round(metrics["atr20"], 3),
         "distance_pct": safe_round(metrics["distance_pct"], 2),
         "extension_atr": safe_round(metrics["extension_atr"], 2),
+        "breakout_level": safe_round(metrics.get("breakout_level"), 3),
+        "breakout_extension_atr": safe_round(metrics.get("breakout_extension_atr"), 2),
+        "entry_extension_atr": safe_round(geometry["entry_extension_atr"], 2),
+        "entry_extension_source": geometry["entry_extension_source"],
+        "entry_setup": geometry["entry_setup"],
         "volume_ratio": safe_round(metrics["volume_ratio"], 2),
         "change_pct": safe_round(metrics["change_pct"], 2),
         "trend_aligned": metrics["trend_aligned"],
@@ -1398,15 +1810,36 @@ def _payload(
         "pullback": metrics["pullback"],
         "reclaim": metrics["reclaim"],
         "reclaim_previous_close": metrics["reclaim_previous_close"],
+        "reversal_basis": "daily_v" if strategy_name == "niu_reversal_probe" else "",
+        "daily_v_reversal": bool(metrics.get("daily_v_reversal")),
+        "daily_v_left_peak_date": metrics.get("daily_v_left_peak_date"),
+        "daily_v_trough_date": metrics.get("daily_v_trough_date"),
+        "daily_v_left_days": metrics.get("daily_v_left_days"),
+        "daily_v_right_days": metrics.get("daily_v_right_days"),
+        "daily_v_decline_pct": safe_round(metrics.get("daily_v_decline_pct"), 2),
+        "daily_v_rebound_pct": safe_round(metrics.get("daily_v_rebound_pct"), 2),
+        "daily_v_recovery_ratio": safe_round(metrics.get("daily_v_recovery_ratio"), 4),
+        "daily_v_rising_ratio": safe_round(metrics.get("daily_v_rising_ratio"), 4),
+        "daily_v_right_trend_confirmed": bool(
+            metrics.get("daily_v_right_trend_confirmed")
+        ),
+        "daily_v_pattern_score": safe_round(metrics.get("daily_v_pattern_score"), 2),
         "intraday_low": safe_round(metrics["intraday_low"], 3),
         "rebound_from_low_pct": safe_round(metrics["rebound_from_low_pct"], 2),
         "stop_price": safe_round(stop_price, 3),
-        "stop_source": "niu_reversal_low" if reversal_probe else "niu_structure_low",
+        "stop_source": geometry["stop_source"],
         "stop_distance_pct": safe_round(stop_distance_pct, 2),
         "stop_atr": safe_round(stop_atr, 2),
         "max_stop_distance_pct": structural_limits["max_stop_distance_pct"],
         "max_stop_atr": structural_limits["max_stop_atr"],
-        "max_entry_change_pct": chase_limits["max_entry_change_pct"],
+        "min_entry_extension_atr": chase_limits.get(
+            "min_entry_extension_atr",
+            0.0,
+        ),
+        # Retained as a compatibility field for older Dashboard payloads.  A
+        # NiuOne entry no longer has a fixed daily-gain cap; the execution
+        # layer rejects only a quote that is actually at its board limit.
+        "max_entry_change_pct": chase_limits.get("max_entry_change_pct"),
         "max_entry_extension_atr": chase_limits["max_entry_extension_atr"],
         "gap_buffer_pct": safe_round(metrics["gap_buffer_pct"], 3),
         "execution_buffer_pct": SECTOR_TIDE_EXECUTION_BUFFER_PCT,
@@ -1424,16 +1857,112 @@ def _payload(
     }
 
 
+def _apply_markup_momentum_probe(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Conditionally exchange wider markup geometry for a micro position."""
+    if not niuone_markup_momentum_probe_eligible(payload):
+        return payload
+
+    acceleration_entry = niuone_markup_momentum_probe_is_acceleration(payload)
+
+    regime = str(payload.get("market_regime") or "")
+    stop_distance_pct = safe_float(payload.get("stop_distance_pct")) or 0.0
+    stop_atr = safe_float(payload.get("stop_atr")) or 0.0
+    limits = niuone_structural_stop_limits(
+        regime,
+        "niu_emerging",
+        NIUONE_MARKUP_MOMENTUM_PROBE_SUBROUTE,
+    )
+    risk_ok = niuone_structure_risk_ok(
+        stop_distance_pct,
+        stop_atr,
+        regime,
+        "niu_emerging",
+        NIUONE_MARKUP_MOMENTUM_PROBE_SUBROUTE,
+    )
+    budget = niuone_risk_budget(regime, "niu_emerging")
+    effective_loss = safe_float(payload.get("effective_loss_distance_pct")) or 0.0
+    dynamic_cap = risk_sized_position_cap_pct(
+        per_trade_risk_pct=budget["per_trade_risk_pct"],
+        effective_loss_distance_pct_value=effective_loss,
+        absolute_cap_pct=NIUONE_MARKUP_MOMENTUM_PROBE_POSITION_CAP_PCT,
+    )
+    standard_only_flags = {
+        "启动买点尚未确认",
+        "启动战法拒绝追高",
+    }
+    risk_flags = [
+        str(flag)
+        for flag in (payload.get("risk_flags") or [])
+        if str(flag) not in standard_only_flags
+        and not str(flag).startswith("结构止损超过当前行情上限")
+    ]
+    if not risk_ok:
+        risk_flags.append(
+            "主升动量试仓结构止损超过"
+            f"{limits['max_stop_distance_pct']:g}%或"
+            f"{limits['max_stop_atr']:g}ATR"
+        )
+    extension = safe_float(payload.get("entry_extension_atr"))
+    if (
+        extension is not None
+        and extension > NIUONE_MARKUP_MOMENTUM_PROBE_MAX_ENTRY_EXTENSION_ATR
+    ):
+        risk_flags.append("主升动量试仓价格扩张过大")
+
+    payload.update({
+        "niuone_entry_subroute": NIUONE_MARKUP_MOMENTUM_PROBE_SUBROUTE,
+        "niuone_entry_subroute_label": "主升动量试仓",
+        "niuone_markup_momentum_acceleration": acceleration_entry,
+        "entry_threshold_override": (
+            NIUONE_MARKUP_MOMENTUM_PROBE_MIN_SCORE
+            if acceleration_entry
+            else NIUONE_MARKUP_MOMENTUM_PROBE_ORDINARY_MIN_SCORE
+        ),
+        "entry_setup": NIUONE_MARKUP_MOMENTUM_PROBE_SUBROUTE,
+        "max_entry_extension_atr": (
+            NIUONE_MARKUP_MOMENTUM_PROBE_MAX_ENTRY_EXTENSION_ATR
+        ),
+        "max_stop_distance_pct": limits["max_stop_distance_pct"],
+        "max_stop_atr": limits["max_stop_atr"],
+        "absolute_position_cap_pct": (
+            NIUONE_MARKUP_MOMENTUM_PROBE_POSITION_CAP_PCT
+        ),
+        "max_position_pct_by_risk": dynamic_cap,
+        "risk_ok": risk_ok,
+        "risk_flags": list(dict.fromkeys(risk_flags)),
+        "verdict": "高匹配主升动量试仓",
+    })
+    return payload
+
+
 def _common_risks(
     metrics: dict[str, Any],
     *,
+    strategy_name: str,
     require_mature_leader: bool = True,
 ) -> list[str]:
     risks: list[str] = []
-    if not metrics["risk_ok"]:
+    geometry = _strategy_entry_geometry(strategy_name, metrics)
+    stop_price = safe_float(geometry["stop_price"])
+    stop_distance_pct = structural_stop_distance_pct(metrics["close"], stop_price)
+    stop_atr = (
+        (metrics["close"] - stop_price) / metrics["atr"]
+        if stop_price is not None and stop_price > 0 and metrics["atr"] > 0
+        else 0.0
+    )
+    regime = str(metrics["market"].get("risk_state") or metrics["market"].get("state") or "")
+    if not niuone_structure_risk_ok(
+        stop_distance_pct,
+        stop_atr,
+        regime,
+        strategy_name,
+    ):
+        limits = niuone_structural_stop_limits(regime, strategy_name)
         risks.append(
             "结构止损超过当前行情上限"
-            f"({metrics['max_stop_distance_pct']:g}%或{metrics['max_stop_atr']:g}ATR)"
+            f"({limits['max_stop_distance_pct']:g}%或{limits['max_stop_atr']:g}ATR)"
         )
     if require_mature_leader and metrics["theme"].get("single_stock_dominated"):
         risks.append("主题由单只强股主导")
@@ -1451,104 +1980,113 @@ def _common_risks(
 def _reversal_strategy_score(metrics: dict[str, Any]) -> float:
     theme = metrics["theme"]
     stock = metrics["stock"]
-    change_quality = _clamp(float(metrics["change_pct"]) / 4.0 * 100)
-    rebound_quality = _clamp(float(metrics["rebound_from_low_pct"]) / 3.0 * 100)
-    stock_score = _clamp(
-        float(stock.get("today_rank_score") or 0.0) * 0.35
-        + change_quality * 0.25
-        + rebound_quality * 0.20
-        + (100.0 if metrics["reclaim_previous_close"] else 0.0) * 0.20
-    )
+    pattern_score = float(metrics.get("daily_v_pattern_score") or 0.0)
+    stock_score = float(stock.get("strong_score") or 0.0)
     base_score = (
-        float(theme.get("reversal_score") or 0.0) * 0.60
-        + stock_score * 0.40
+        pattern_score * 0.75
+        + float(theme.get("score") or 0.0) * 0.15
+        + stock_score * 0.10
     ) / 10.0
     raw_external = float(metrics.get("raw_external_context_adjustment") or 0.0)
     positive_suppressed = bool(
         raw_external > 0
-        and (metrics["change_pct"] > 5 or metrics["extension_atr"] > 1.0)
+        and metrics["extension_atr"] > 1.0
     )
     external = 0.0 if positive_suppressed else _clamp(raw_external, -0.6, 0.4)
     metrics["external_context_adjustment"] = external
     metrics["external_positive_suppressed"] = positive_suppressed
-    metrics["reversal_stock_score"] = stock_score
+    metrics["reversal_stock_score"] = pattern_score
     return _clamp(base_score + external, 0.0, 10.0)
 
 
 def score_niu_leader(rows: list[dict[str, Any]], context: dict[str, Any]) -> dict[str, Any] | None:
-    metrics = _entry_metrics(rows, context)
+    metrics = _entry_metrics(rows, context, "niu_leader")
     if metrics is None:
         return None
-    risks = _common_risks(metrics)
-    if metrics["theme"].get("state") != "mainline":
-        risks.append("主题尚未确认为市场主线")
-    if not metrics["theme"].get("cross_day_confirmed"):
+    risks = _common_risks(metrics, strategy_name="niu_leader")
+    if metrics["theme"].get("state") not in {"mainline", "diverging"}:
+        risks.append("主题不处于已确认主线或有效分歧")
+    if not (
+        metrics["theme"].get("mainline_confirmed")
+        or metrics["theme"].get("cross_day_confirmed")
+    ):
         risks.append("主线未完成跨交易日核心股延续确认")
     if not (metrics["breakout"] or metrics["pullback"]):
         risks.append("未形成突破或首次缩量回踩")
-    if metrics["change_pct"] > 4 or metrics["extension_atr"] > 1.0:
-        risks.append("领航买点偏扩张，已按行情弹性上限复核")
-    verdict = "高匹配牛牛领航" if metrics["composite_score"] >= 8 else ("观察牛牛领航" if metrics["composite_score"] >= 6.5 else "不匹配")
+    entry_extension = safe_float(
+        _strategy_entry_geometry("niu_leader", metrics).get("entry_extension_atr")
+    )
+    if entry_extension is not None and entry_extension > 1.0:
+        risks.append("领涨买点偏扩张，已按行情弹性上限复核")
+    verdict = "高匹配牛牛领涨" if metrics["composite_score"] >= 8 else ("观察牛牛领涨" if metrics["composite_score"] >= 6.5 else "不匹配")
     return with_strategy_profile("niu_leader", _payload("niu_leader", metrics, verdict=verdict, risk_flags=risks))
 
 
 def score_niu_pullback(rows: list[dict[str, Any]], context: dict[str, Any]) -> dict[str, Any] | None:
-    metrics = _entry_metrics(rows, context)
+    metrics = _entry_metrics(rows, context, "niu_pullback")
     if metrics is None:
         return None
-    risks = _common_risks(metrics)
+    risks = _common_risks(metrics, strategy_name="niu_pullback")
     if metrics["theme"].get("state") not in {"mainline", "diverging"} or float(metrics["theme"].get("score") or 0) < 70:
         risks.append("主线强度不足以参与分歧")
     if not metrics["theme"].get("mainline_confirmed"):
         risks.append("主题没有有效的跨交易日主线确认记录")
     if not (metrics["pullback"] or metrics["reclaim"]):
-        risks.append("未出现EMA20承接或收复买点")
-    if metrics["change_pct"] > 4 or metrics["extension_atr"] > 1.0:
-        risks.append("回踩买点偏扩张，已按行情弹性上限复核")
-    verdict = "高匹配牛牛回踩" if metrics["composite_score"] >= 8.2 else ("观察牛牛回踩" if metrics["composite_score"] >= 6.5 else "不匹配")
+        risks.append("未出现EMA20企稳转强或收复买点")
+    if metrics["extension_atr"] > 1.0:
+        risks.append("转强买点偏扩张，已按行情弹性上限复核")
+    verdict = "高匹配牛牛转强" if metrics["composite_score"] >= 8.2 else ("观察牛牛转强" if metrics["composite_score"] >= 6.5 else "不匹配")
     return with_strategy_profile("niu_pullback", _payload("niu_pullback", metrics, verdict=verdict, risk_flags=risks))
 
 
 def score_niu_emerging(rows: list[dict[str, Any]], context: dict[str, Any]) -> dict[str, Any] | None:
-    metrics = _entry_metrics(rows, context)
+    metrics = _entry_metrics(rows, context, "niu_emerging")
     if metrics is None:
         return None
-    risks = _common_risks(metrics)
-    if metrics["theme"].get("state") != "emerging":
-        risks.append("主题不是待确认的新主线")
+    risks = _common_risks(metrics, strategy_name="niu_emerging")
+    if not niu_emerging_theme_eligible(metrics["theme"]):
+        risks.append("主题不处于跨日延续的待确认启动阶段")
     if not metrics["theme"].get("cross_day_persistent"):
         risks.append("启动主题尚未跨交易日延续")
     if int(metrics["theme"].get("strong_stock_count") or 0) < 2:
         risks.append("少于两只强势股共同确认")
     if not (metrics["breakout"] or metrics["reclaim"]):
         risks.append("启动买点尚未确认")
-    if metrics["change_pct"] > 7 or metrics["extension_atr"] > 1.5:
+    entry_extension = safe_float(
+        _strategy_entry_geometry("niu_emerging", metrics).get("entry_extension_atr")
+    )
+    if entry_extension is not None and entry_extension > 1.5:
         risks.append("启动战法拒绝追高")
     verdict = "高匹配牛牛启动" if metrics["composite_score"] >= 8.4 else ("观察牛牛启动" if metrics["composite_score"] >= 6.5 else "不匹配")
-    return with_strategy_profile("niu_emerging", _payload("niu_emerging", metrics, verdict=verdict, risk_flags=risks))
+    payload = _payload(
+        "niu_emerging",
+        metrics,
+        verdict=verdict,
+        risk_flags=risks,
+    )
+    return with_strategy_profile(
+        "niu_emerging",
+        _apply_markup_momentum_probe(payload),
+    )
 
 
 def score_niu_reversal_probe(rows: list[dict[str, Any]], context: dict[str, Any]) -> dict[str, Any] | None:
-    metrics = _entry_metrics(rows, context)
+    metrics = _entry_metrics(rows, context, "niu_reversal_probe")
     if metrics is None:
         return None
     metrics = dict(metrics)
     metrics["strategy_score"] = _reversal_strategy_score(metrics)
-    risks = _common_risks(metrics, require_mature_leader=False)
-    theme = metrics["theme"]
-    stock = metrics["stock"]
-    if not theme.get("reversal_candidate"):
-        risks.append("题材尚未形成广度型V型反转")
-    elif not theme.get("reversal_confirmed"):
-        risks.append("V型反转尚未完成分时间隔确认")
-    if stock.get("reversal_strong") is not True:
-        risks.append("个股未进入反转领涨前三并完成低点回升")
-    if not metrics["reclaim_previous_close"]:
-        risks.append("个股尚未收复昨收")
-    if metrics["change_pct"] > 5 or metrics["extension_atr"] > 1.0:
-        risks.append("反转试仓拒绝追高")
+    risks = _common_risks(
+        metrics,
+        strategy_name="niu_reversal_probe",
+        require_mature_leader=False,
+    )
+    if not metrics.get("daily_v_reversal"):
+        risks.append("日线区间尚未形成完整V型趋势反转")
+    if metrics["extension_atr"] > 1.0:
+        risks.append("日线V型反转买点偏扩张")
     score = float(metrics["strategy_score"])
-    verdict = "高匹配牛牛反转" if score >= 8.4 else ("观察牛牛反转" if score >= 7.0 else "不匹配")
+    verdict = "高匹配牛牛试仓" if score >= 8.4 else ("观察牛牛试仓" if score >= 7.0 else "不匹配")
     payload = _payload("niu_reversal_probe", metrics, verdict=verdict, risk_flags=risks)
     payload["reversal_stock_score"] = safe_round(metrics.get("reversal_stock_score"), 2)
     return with_strategy_profile("niu_reversal_probe", payload)

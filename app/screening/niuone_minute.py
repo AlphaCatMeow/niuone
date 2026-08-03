@@ -107,6 +107,44 @@ def load_stock_industry_map(path: Path) -> dict[str, str]:
     return result
 
 
+def _classification_record(value: Any) -> dict[str, Any]:
+    if isinstance(value, Mapping):
+        industry = re.sub(r"\s+", "", str(value.get("industry") or "")).strip()
+        raw_themes = value.get("concepts") or value.get("themes") or ()
+    else:
+        industry = re.sub(r"\s+", "", str(value or "")).strip()
+        raw_themes = ()
+    if isinstance(raw_themes, str):
+        raw_themes = raw_themes.split(",")
+    themes = list(dict.fromkeys(
+        label
+        for item in raw_themes
+        if (label := re.sub(r"\s+", "", str(item or "")).strip())
+    ))
+    if not themes and industry:
+        themes = [industry]
+    return {"industry": industry, "themes": themes}
+
+
+def load_stock_board_map(path: Path) -> dict[str, dict[str, Any]]:
+    """Read the private Eastmoney classification snapshot without network I/O."""
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        return {}
+    if not isinstance(payload, Mapping):
+        return {}
+    raw_stocks = payload.get("stocks")
+    source = raw_stocks if isinstance(raw_stocks, Mapping) else payload
+    result: dict[str, dict[str, Any]] = {}
+    for raw_code, raw_value in source.items():
+        match = re.search(r"\d{6}", str(raw_code or ""))
+        record = _classification_record(raw_value)
+        if match and (record["industry"] or record["themes"]):
+            result[match.group(0)] = record
+    return result
+
+
 class NiuOneMinuteEngine:
     """Cache slow local inputs and rebuild themes from each fresh quote batch."""
 
@@ -116,7 +154,7 @@ class NiuOneMinuteEngine:
         kline_cache_path: Path,
         industry_cache_path: Path,
         kline_loader: Callable[..., dict[str, list[dict[str, Any]]]] = load_kline_series_map,
-        industry_loader: Callable[[Path], dict[str, str]] = load_stock_industry_map,
+        industry_loader: Callable[[Path], Mapping[str, Any]] = load_stock_board_map,
         trading_day_status_loader: Callable[..., Mapping[str, Any]] = default_trading_day_status,
         minimum_coverage: float = DEFAULT_MINIMUM_COVERAGE,
         max_quote_age_seconds: float = DEFAULT_MAX_QUOTE_AGE_SECONDS,
@@ -132,7 +170,7 @@ class NiuOneMinuteEngine:
         self._history_date = ""
         self._histories: dict[str, list[dict[str, Any]]] = {}
         self._industry_signature = (0, 0)
-        self._industries: dict[str, str] = {}
+        self._industries: dict[str, dict[str, Any]] = {}
 
     def _eligible_quotes(
         self,
@@ -169,7 +207,7 @@ class NiuOneMinuteEngine:
         *,
         quote_date: str,
         accepted_last_dates: set[str],
-    ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, str]]:
+    ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, dict[str, Any]]]:
         unique_symbols = list(dict.fromkeys(symbols))
         with self._lock:
             if self._history_date != quote_date:
@@ -189,7 +227,10 @@ class NiuOneMinuteEngine:
 
             signature = _industry_cache_signature(self.industry_cache_path)
             if not self._industries or signature != self._industry_signature:
-                self._industries = self.industry_loader(self.industry_cache_path)
+                self._industries = {
+                    str(code): _classification_record(value)
+                    for code, value in self.industry_loader(self.industry_cache_path).items()
+                }
                 self._industry_signature = signature
 
             return (
@@ -264,10 +305,12 @@ class NiuOneMinuteEngine:
             rows[-1]["ema20"] = ema20[-1] if ema20 else None
             rows[-1]["ema50"] = ema50[-1] if ema50 else None
             code = str(quote.get("code") or "")
+            classification = industries.get(code) or {}
             prepared_items.append({
                 "code": code,
                 "name": str(quote.get("name") or ""),
-                "industry": str(industries.get(code) or ""),
+                "industry": str(classification.get("industry") or ""),
+                "themes": list(classification.get("themes") or ()),
                 "quote": quote,
                 "rows": rows,
             })
@@ -296,6 +339,7 @@ class NiuOneMinuteEngine:
             previous_trading_day=previous_trading_day,
             sample_at=quote_generated_at,
             reuse_previous_external_context=True,
+            theme_basis="eastmoney_concept",
         )
         if float(context.get("data_coverage") or 0.0) < self.minimum_coverage:
             raise ValueError("minute theme coverage is below the safe publish threshold")
@@ -324,5 +368,6 @@ __all__ = [
     "DEFAULT_MINIMUM_COVERAGE",
     "MINUTE_REFRESH_MODE",
     "NiuOneMinuteEngine",
+    "load_stock_board_map",
     "load_stock_industry_map",
 ]

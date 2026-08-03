@@ -1,8 +1,21 @@
 """Shared constants, indicators, and score-profile helpers."""
+from collections.abc import Mapping
 import math
 import statistics
 from typing import Any
 
+from ..lifecycle import niuone_lifecycle_entry_blocker
+from ..niuone_risk import (
+    NIUONE_ENTRY_REGIMES,
+    NIUONE_MARKUP_MOMENTUM_PROBE_SUBROUTE,
+    niuone_markup_momentum_probe_eligible,
+)
+from ..policy import (
+    niu_leader_entry_breadth_blocker,
+    niu_reversal_continuation_blocker,
+    niu_reversal_recovery_blocker,
+    niu_startup_theme_blocker,
+)
 from ..registry import STRATEGY_SCORE_PROFILES
 
 
@@ -42,13 +55,51 @@ def _limit_label(value: float) -> str:
     return f"{value:g}"
 
 
+def niu_emerging_theme_eligible(values: dict[str, Any]) -> bool:
+    """Accept only a newly emerging theme; confirmed mainlines use leader actions."""
+    return niu_startup_theme_blocker(values) is None
+
+
+def niu_reversal_entry_stage_blocker(
+    values: Mapping[str, Any],
+) -> str | None:
+    """Keep reversal entries in the early theme stages they are meant to trade."""
+    lifecycle_blocker = niuone_lifecycle_entry_blocker(
+        "niu_reversal_probe",
+        values,
+    )
+    if lifecycle_blocker:
+        return lifecycle_blocker
+    status = str(
+        values.get("sector_status")
+        or values.get("mainline_state")
+        or values.get("state")
+        or ""
+    )
+    confirmed = bool(
+        values.get("mainline_confirmed")
+        or values.get("mainline_cross_day_confirmed")
+        or values.get("cross_day_confirmed")
+    )
+    if status not in {"candidate", "emerging"} or confirmed:
+        return "牛牛试仓只参与主线酝酿，后续阶段应使用启动/领涨/转强"
+    if status == "candidate" and values.get("stock_strong") is True:
+        return "候选题材中的强势股需等待牛牛启动确认"
+    return None
+
+
 def with_strategy_profile(strategy_name: str, payload: dict[str, Any]) -> dict[str, Any]:
     profile = STRATEGY_SCORE_PROFILES.get(strategy_name, {})
-    score = float(payload.get("score") or 0)
-    threshold = float(profile.get("entry_threshold", 8.0))
+    score = round(float(payload.get("score") or 0), 1)
+    threshold_override = safe_float(payload.get("entry_threshold_override"))
+    threshold = (
+        threshold_override
+        if threshold_override is not None
+        else float(profile.get("entry_threshold", 8.0))
+    )
     priority = int(profile.get("priority", 50))
     payload["strategy_id"] = strategy_name
-    payload["score"] = round(score, 1)
+    payload["score"] = score
     payload["entry_threshold"] = threshold
     payload["strategy_priority"] = priority
     blockers = strategy_hard_blockers(strategy_name, payload)
@@ -162,8 +213,16 @@ def strategy_hard_blockers(strategy_name: str, payload: dict[str, Any]) -> list[
             blockers.append("市场风控禁止新开仓")
         if not payload.get("sector_data_eligible"):
             blockers.append("行业有效样本不足")
+        if is_niuone:
+            lifecycle_blocker = niuone_lifecycle_entry_blocker(
+                strategy_name,
+                payload,
+            )
+            if lifecycle_blocker:
+                blockers.append(lifecycle_blocker)
         if is_niuone and strategy_name != "niu_reversal_probe" and (
-            payload.get("stock_leader_tier") is not True or payload.get("stock_strong") is not True
+            payload.get("stock_leader_tier") is not True
+            or payload.get("stock_strong") is not True
         ):
             blockers.append("个股未进入强势行业龙头梯队")
         if not payload.get("risk_ok"):
@@ -185,97 +244,116 @@ def strategy_hard_blockers(strategy_name: str, payload: dict[str, Any]) -> list[
         regime = str(payload.get("market_regime") or "")
         rank = safe_float(payload.get("stock_sector_rank")) or 0.0
         acceleration = safe_float(payload.get("sector_rank_acceleration")) or 0.0
-        extension = safe_float(payload.get("extension_atr"))
+        extension = safe_float(payload.get("entry_extension_atr"))
+        if extension is None:
+            extension = safe_float(payload.get("extension_atr"))
+        extension_source = str(payload.get("entry_extension_source") or "ema20")
         change = safe_float(payload.get("change_pct"))
         if strategy_name == "niu_reversal_probe":
-            max_change = safe_float(payload.get("max_entry_change_pct")) or 5.0
-            max_extension = safe_float(payload.get("max_entry_extension_atr")) or 1.0
-            breadth = safe_float(payload.get("today_breadth_pct")) or 0.0
-            rebound = safe_float(payload.get("rebound_from_low_pct")) or 0.0
-            if regime not in {"offensive", "rotation", "recovery"}:
-                blockers.append("市场状态不允许反转试仓")
-            if payload.get("mainline_confirmed"):
-                blockers.append("主题已确认主线，应使用领航或回踩路径")
-            if not payload.get("reversal_quote_coverage_ok"):
-                blockers.append("题材日内报价覆盖不足")
-            if not payload.get("reversal_origin_weak"):
-                blockers.append("题材不具备弱势区反转起点")
-            if not payload.get("reversal_candidate"):
-                blockers.append("题材未形成广度型V型反转")
-            elif not payload.get("reversal_confirmed"):
-                blockers.append("V型反转未完成两次分时间隔确认")
-            if breadth < 60:
-                blockers.append("V型反转上涨广度<60%")
-            if int(safe_float(payload.get("today_1_5pct_count")) or 0) < 2:
-                blockers.append("V型反转少于两只核心股同步转强")
-            if payload.get("reversal_flow_available") and not payload.get("reversal_flow_positive"):
-                blockers.append("V型反转主力资金尚未转正")
-            if (
-                payload.get("stock_reversal_leader_tier") is not True
-                or payload.get("stock_reversal_strong") is not True
+            if status == "candidate" and payload.get("stock_strong") is True:
+                blockers.append("候选题材中的强势股需等待牛牛启动确认")
+            min_extension = safe_float(
+                payload.get("min_entry_extension_atr")
+            ) or 0.0
+            max_extension = safe_float(payload.get("max_entry_extension_atr")) or 1.5
+            decline = safe_float(payload.get("daily_v_decline_pct")) or 0.0
+            rebound = safe_float(payload.get("daily_v_rebound_pct")) or 0.0
+            left_days = int(safe_float(payload.get("daily_v_left_days")) or 0)
+            right_days = int(safe_float(payload.get("daily_v_right_days")) or 0)
+            if regime not in NIUONE_ENTRY_REGIMES:
+                blockers.append("市场状态不允许日线V型反转开仓")
+            if left_days < 5:
+                blockers.append("V型左侧回落不足5个交易日")
+            if right_days < 3:
+                blockers.append("V型右侧修复不足3个交易日")
+            if decline < 8:
+                blockers.append("V型左侧回落幅度<8%")
+            if rebound < 6:
+                blockers.append("V型低点后反弹幅度<6%")
+            recovery_blocker = niu_reversal_recovery_blocker(payload)
+            if recovery_blocker:
+                blockers.append(recovery_blocker)
+            continuation_blocker = niu_reversal_continuation_blocker(payload)
+            if continuation_blocker:
+                blockers.append(continuation_blocker)
+            if not payload.get("daily_v_right_trend_confirmed"):
+                blockers.append("V型右侧日线修复趋势未确认")
+            if not payload.get("daily_v_reversal") and not any(
+                blocker.startswith("V型") for blocker in blockers
             ):
-                blockers.append("个股未进入反转领涨前三")
-            if not payload.get("reclaim_previous_close"):
-                blockers.append("反转个股尚未收复昨收")
-            if rebound < 1.5:
-                blockers.append("个股从日内低点回升<1.5%")
-            if _above_limit(change, max_change):
-                blockers.append(f"反转试仓单日涨幅>{_limit_label(max_change)}%")
+                blockers.append("未形成日线区间V型反转")
+            if (
+                min_extension > 0
+                and (extension is None or extension < min_extension - 1e-9)
+            ):
+                blockers.append(
+                    "日线V型反转距EMA20不足"
+                    f"{_limit_label(min_extension)}ATR，右侧确认不足"
+                )
             if _above_limit(extension, max_extension):
-                blockers.append(f"反转试仓距EMA20超过{_limit_label(max_extension)}ATR")
+                blockers.append(f"日线V型反转距EMA20超过{_limit_label(max_extension)}ATR")
         elif strategy_name == "niu_leader":
-            max_change = safe_float(payload.get("max_entry_change_pct")) or 4.0
             max_extension = safe_float(payload.get("max_entry_extension_atr")) or 1.0
-            if regime not in {"offensive", "rotation"}:
-                blockers.append("牛牛领航仅用于进攻/轮动行情")
-            if status != "mainline":
-                blockers.append("主题尚未确认为市场主线")
-            if not payload.get("mainline_cross_day_confirmed"):
+            if regime not in NIUONE_ENTRY_REGIMES:
+                blockers.append("市场状态不允许牛牛领涨")
+            if status not in {"mainline", "diverging"}:
+                blockers.append("主题不处于已确认主线或有效分歧")
+            if not (
+                payload.get("mainline_confirmed")
+                or payload.get("mainline_cross_day_confirmed")
+            ):
                 blockers.append("主线未完成跨交易日核心股延续确认")
-            if not payload.get("mainline_selected"):
-                blockers.append("主题未进入当前主线/双主线")
             if payload.get("single_stock_dominated"):
                 blockers.append("单只强股不足以确认主线")
+            leader_breadth_blocker = niu_leader_entry_breadth_blocker(payload)
+            if leader_breadth_blocker:
+                blockers.append(leader_breadth_blocker)
             if not (payload.get("breakout") or payload.get("pullback")):
                 blockers.append("未形成突破/首次缩量回踩")
-            if _above_limit(change, max_change):
-                blockers.append(f"领航战法单日涨幅>{_limit_label(max_change)}%")
             if _above_limit(extension, max_extension):
-                blockers.append(f"领航战法距EMA20超过{_limit_label(max_extension)}ATR")
+                anchor = "突破价超过前高" if extension_source == "breakout_level" else "距EMA20超过"
+                blockers.append(f"领涨动作{anchor}{_limit_label(max_extension)}ATR")
         elif strategy_name == "niu_pullback":
-            max_change = safe_float(payload.get("max_entry_change_pct")) or 4.0
             max_extension = safe_float(payload.get("max_entry_extension_atr")) or 1.0
-            if regime not in {"offensive", "rotation", "recovery"}:
-                blockers.append("市场状态不允许主线回踩")
+            if regime not in NIUONE_ENTRY_REGIMES:
+                blockers.append("市场状态不允许主线转强")
             if status not in {"mainline", "diverging"} or (safe_float(payload.get("mainline_score")) or 0) < 70:
                 blockers.append("主线强度不足")
             if not payload.get("mainline_confirmed"):
                 blockers.append("主题没有有效的跨交易日主线确认记录")
-            if status == "mainline" and not payload.get("mainline_selected"):
-                blockers.append("主题未进入当前主线/双主线")
             if not (payload.get("pullback") or payload.get("reclaim")):
-                blockers.append("未出现EMA20承接/收复")
-            if _above_limit(change, max_change):
-                blockers.append(f"回踩战法单日涨幅>{_limit_label(max_change)}%")
+                blockers.append("未出现EMA20企稳转强/收复")
             if _above_limit(extension, max_extension):
-                blockers.append(f"回踩战法距EMA20超过{_limit_label(max_extension)}ATR")
+                blockers.append(f"转强动作距EMA20超过{_limit_label(max_extension)}ATR")
         elif strategy_name == "niu_emerging":
-            if regime not in {"offensive", "rotation", "recovery"}:
+            markup_momentum_probe = (
+                str(payload.get("niuone_entry_subroute") or "")
+                == NIUONE_MARKUP_MOMENTUM_PROBE_SUBROUTE
+            )
+            if regime not in NIUONE_ENTRY_REGIMES:
                 blockers.append("市场状态不允许启动观察仓")
-            if status != "emerging":
-                blockers.append("主题不是待确认新主线")
-            if not payload.get("mainline_cross_day_persistent"):
-                blockers.append("启动主题尚未跨交易日延续")
+            startup_blocker = niu_startup_theme_blocker(payload)
+            if startup_blocker:
+                blockers.append(startup_blocker)
             if int(safe_float(payload.get("strong_stock_count")) or 0) < 2:
                 blockers.append("少于两只强势股共同确认")
             if payload.get("single_stock_dominated"):
                 blockers.append("单只强股主导，启动证据不足")
-            if not (payload.get("breakout") or payload.get("reclaim")):
+            if (
+                markup_momentum_probe
+                and not niuone_markup_momentum_probe_eligible(payload)
+            ):
+                blockers.append("主升动量试仓身份条件不完整")
+            if (
+                not markup_momentum_probe
+                and not (payload.get("breakout") or payload.get("reclaim"))
+            ):
                 blockers.append("启动买点未确认")
-            if change is not None and change > 7:
-                blockers.append("启动战法单日涨幅>7%")
-            if extension is not None and extension > 1.5:
-                blockers.append("启动战法距EMA20超过1.5ATR")
+            max_extension = safe_float(payload.get("max_entry_extension_atr")) or 1.5
+            if _above_limit(extension, max_extension):
+                anchor = "突破价超过前高" if extension_source == "breakout_level" else "距EMA20超过"
+                route_label = "主升动量试仓" if markup_momentum_probe else "启动战法"
+                blockers.append(f"{route_label}{anchor}{_limit_label(max_extension)}ATR")
         elif strategy_name == "tide_leader":
             if regime not in {"offensive", "rotation"}:
                 blockers.append("主线领航仅用于进攻/轮动行情")

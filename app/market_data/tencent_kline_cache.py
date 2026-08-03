@@ -313,6 +313,26 @@ def load_kline_series_map(
     return result
 
 
+def load_cached_kline_symbols(
+    *,
+    path: Path | None = None,
+    min_rows: int = 1,
+) -> tuple[str, ...]:
+    """Return cached symbols without loading their JSON histories."""
+    cache_path = Path(path or kline_cache_path())
+    if not cache_path.exists():
+        return ()
+    connection = _open_database(cache_path)
+    try:
+        rows = connection.execute(
+            "SELECT symbol FROM kline_series WHERE row_count >= ? ORDER BY symbol",
+            (max(1, int(min_rows or 1)),),
+        )
+        return tuple(str(row["symbol"] or "") for row in rows if row["symbol"])
+    finally:
+        connection.close()
+
+
 def quote_trade_date(quote: Mapping[str, Any] | None) -> str:
     matched = re.search(
         r"(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})",
@@ -492,6 +512,7 @@ __all__ = [
     "DEFAULT_PREWARM_WORKERS",
     "fetch_tencent_daily_klines",
     "kline_cache_path",
+    "load_cached_kline_symbols",
     "load_kline_series_map",
     "merge_live_quote",
     "normalize_kline_rows",

@@ -68,6 +68,17 @@ class TencentKlineCacheTests(unittest.TestCase):
         self.assertEqual(len(loaded["sh600001"]), 60)
         self.assertEqual(loaded["sh600001"][-1]["close"], original[-1]["close"])
 
+    def test_lists_cached_symbols_without_loading_history_payloads(self):
+        cache.store_kline_series(
+            {"sh600001": sample_rows(), "sz000001": sample_rows(count=20)},
+            path=self.path,
+        )
+
+        self.assertEqual(
+            cache.load_cached_kline_symbols(path=self.path, min_rows=30),
+            ("sh600001",),
+        )
+
     def test_merge_live_quote_appends_or_replaces_without_mutating_cache(self):
         historical = sample_rows()
         original_close = historical[-1]["close"]

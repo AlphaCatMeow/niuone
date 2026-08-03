@@ -2,8 +2,12 @@
 import os
 from typing import Any
 
-from .registry import DISPLAY_STRATEGY_ORDER
-from .scoring import COMMON_MAX_BBI_DISTANCE_PCT, safe_float
+from .registry import DISPLAY_STRATEGY_ORDER, STRATEGY_DEFINITIONS
+from .scoring import (
+    COMMON_MAX_BBI_DISTANCE_PCT,
+    niu_reversal_entry_stage_blocker,
+    safe_float,
+)
 
 
 DISPLAY_CANDIDATE_LIMIT_ENV = "DASHBOARD_DISPLAY_CANDIDATE_LIMIT"
@@ -37,6 +41,17 @@ def sort_candidates_by_score(results: list[dict[str, Any]]) -> list[dict[str, An
     return sorted(results, key=candidate_score_sort_key)
 
 
+def strategy_daily_candidate_limit(strategy_id: str) -> int | None:
+    """Return an optional per-session trade-candidate concentration limit."""
+    definition = STRATEGY_DEFINITIONS.get(str(strategy_id or "")) or {}
+    profile = definition.get("profile") if isinstance(definition.get("profile"), dict) else {}
+    try:
+        value = int(profile.get("daily_candidate_limit") or 0)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
 def candidate_is_trade_ready(item: dict[str, Any]) -> bool:
     raw_score = item.get("best_score")
     if raw_score is None:
@@ -62,8 +77,8 @@ def candidate_is_trade_ready(item: dict[str, Any]) -> bool:
             not niuone_strategy
             or (
                 reversal_probe
-                and item.get("stock_reversal_leader_tier") is True
-                and item.get("stock_reversal_strong") is True
+                and item.get("daily_v_reversal") is True
+                and niu_reversal_entry_stage_blocker(item) is None
             )
             or (
                 not reversal_probe
@@ -81,14 +96,74 @@ def select_trade_candidates(results: list[dict[str, Any]], limit: int | None = N
         limit = configured_candidate_limit(TRADE_CANDIDATE_LIMIT_ENV, DEFAULT_TRADE_CANDIDATE_LIMIT)
     selected: list[dict[str, Any]] = []
     seen: set[str] = set()
+    selected_by_strategy: dict[str, int] = {}
     for item in sort_candidates_by_score(results):
         if len(selected) >= limit:
             break
         code = str(item.get("code") or "")
         if not code or code in seen or not candidate_is_trade_ready(item):
             continue
+        strategy_id = str(item.get("best_strategy") or item.get("strategy_id") or "")
+        strategy_limit = strategy_daily_candidate_limit(strategy_id)
+        if (
+            strategy_limit is not None
+            and selected_by_strategy.get(strategy_id, 0) >= strategy_limit
+        ):
+            continue
         selected.append(item)
         seen.add(code)
+        selected_by_strategy[strategy_id] = selected_by_strategy.get(strategy_id, 0) + 1
+    trade_ready = [
+        item
+        for item in sort_candidates_by_score(results)
+        if candidate_is_trade_ready(item)
+    ]
+    for item in selected:
+        strategy_id = str(
+            item.get("best_strategy") or item.get("strategy_id") or ""
+        )
+        peers = [
+            peer
+            for peer in trade_ready
+            if str(
+                peer.get("best_strategy") or peer.get("strategy_id") or ""
+            ) == strategy_id
+        ]
+        candidate_code = str(item.get("code") or "")
+        rank = next(
+            (
+                index
+                for index, peer in enumerate(peers, start=1)
+                if peer is item
+                or str(peer.get("code") or "") == candidate_code
+            ),
+            None,
+        )
+        scores = [
+            safe_float(
+                peer.get("best_score")
+                if peer.get("best_score") is not None
+                else peer.get("score")
+            )
+            for peer in peers
+        ]
+        item["selection_signal_score"] = (
+            safe_float(
+                item.get("best_score")
+                if item.get("best_score") is not None
+                else item.get("score")
+            )
+        )
+        item["selection_candidate_pool_size"] = len(trade_ready)
+        item["selection_same_stage_candidate_count"] = len(peers)
+        item["selection_same_stage_candidate_rank"] = rank
+        item["selection_same_stage_top_score_gap"] = (
+            round(float(scores[0]) - float(scores[1]), 4)
+            if len(scores) > 1
+            and scores[0] is not None
+            and scores[1] is not None
+            else None
+        )
     return selected
 
 

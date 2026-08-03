@@ -19,7 +19,36 @@ _TEST_HOME = tempfile.TemporaryDirectory(prefix="niuone-strategy-")
 os.environ["DASHBOARD_HOME"] = _TEST_HOME.name
 
 import niuniu_practice_trader as trader  # noqa: E402
+import backtesting.niuone_exits as backtest_niuone_exits  # noqa: E402
+from backtesting.selection import SelectionCostModel  # noqa: E402
+from strategies.exits import (  # noqa: E402
+    NIUONE_BREAK_EVEN_AFTER_PARTIAL,
+    NIUONE_CLIMAX_RUNNER_ENABLED,
+    NIUONE_CLIMAX_RUNNER_LEADER_LOSS_CONFIRMATIONS,
+    NIUONE_CLIMAX_RUNNER_TRAILING_ATR,
+    NIUONE_LIFECYCLE_CLIMAX_PARTIAL_RATIO,
+    NIUONE_PARTIAL_TAKE_PROFIT_R,
+    NIUONE_LEADER_LOSS_CONFIRMATIONS,
+    NIUONE_MAINLINE_WEAK_CONFIRMATIONS,
+    NIUONE_MAX_HOLD_CALENDAR_DAYS,
+    NIUONE_PARTIAL_TAKE_PROFIT_RATIO,
+    NIUONE_REVERSAL_EARLY_PARTIAL_TAKE_PROFIT_R,
+    NIUONE_REVERSAL_EARLY_PARTIAL_TAKE_PROFIT_RATIO,
+    NIUONE_REVERSAL_EARLY_PROTECTION_REGIMES,
+    NIUONE_REVERSAL_MAINLINE_WEAK_CONFIRMATIONS,
+)
 from strategies.niuone_risk import (  # noqa: E402
+    NIUONE_ABSOLUTE_POSITION_CAP_PCT,
+    NIUONE_MARKUP_MOMENTUM_PROBE_MAX_EXECUTION_GAP_PCT,
+    NIUONE_MARKUP_MOMENTUM_PROBE_ORDINARY_MIN_SCORE,
+    NIUONE_MARKUP_MOMENTUM_PROBE_POSITION_CAP_PCT,
+    NIUONE_MARKUP_MOMENTUM_PROBE_SUBROUTE,
+    NIUONE_MARKUP_EARLY_UPGRADE_POSITION_CAP_PCT,
+    NIUONE_MARKUP_REBALANCE_TRIM_RATIO,
+    NIUONE_MARKUP_UPGRADE_MAX_PNL_PCT,
+    NIUONE_MARKUP_UPGRADE_MIN_PNL_PCT,
+    NIUONE_MARKUP_UPGRADE_POSITION_CAP_PCT,
+    NIUONE_MAX_NEW_POSITIONS_PER_TRADING_DAY,
     niuone_chase_limits,
     niuone_risk_budget,
     niuone_structural_stop_limits,
@@ -34,7 +63,20 @@ from strategies.scoring import (  # noqa: E402
     score_niu_reversal_probe,
 )
 from strategies.scoring.common import with_strategy_profile  # noqa: E402
+from strategies.scoring.common import (  # noqa: E402
+    niu_reversal_entry_stage_blocker,
+)
+from strategies.scoring.niuone import (  # noqa: E402
+    _apply_markup_momentum_probe,
+    _daily_v_reversal_metrics,
+)
 from strategies.selection import candidate_is_trade_ready, select_trade_candidates  # noqa: E402
+from trading.fees import (  # noqa: E402
+    A_SHARE_COMMISSION_RATE,
+    A_SHARE_MINIMUM_COMMISSION,
+    A_SHARE_SELL_STAMP_DUTY_RATE,
+    A_SHARE_TRANSFER_FEE_RATE,
+)
 
 
 def make_rows(code: str, industry: str, daily_step: float = 0.04) -> list[dict]:
@@ -48,6 +90,30 @@ def make_rows(code: str, industry: str, daily_step: float = 0.04) -> list[dict]:
             "high": close * 1.008,
             "low": close * 0.992,
             "volume": 1000.0,
+        })
+    enrich_rows(rows)
+    rows[-1].update({
+        "symbol_code": code,
+        "stock_name": f"测试{code}",
+        "industry": industry,
+        "quote_amount": 1.5e9,
+    })
+    return rows
+
+
+def make_daily_v_rows(code: str, industry: str) -> list[dict]:
+    rows = make_rows(code, industry, 0.0)
+    closes = (
+        11.8, 11.6, 11.2, 10.8, 10.4, 10.0, 9.6, 9.2,
+        9.4, 9.6, 9.9, 10.3, 10.5, 10.8,
+    )
+    for row, close in zip(rows[-len(closes):], closes):
+        row.update({
+            "open": close * 0.995,
+            "close": close,
+            "high": close * 1.012,
+            "low": close * 0.988,
+            "volume": 1200.0,
         })
     enrich_rows(rows)
     rows[-1].update({
@@ -88,6 +154,7 @@ def niu_candidate(**updates) -> dict:
         "stock_leader_tier": True,
         "stock_strong_score": 92.0,
         "stock_sector_rank": 95.0,
+        "today_strength_score": 80.0,
         "distance_pct": 1.0,
         "stop_price": 9.5,
         "stop_source": "niu_structure_low",
@@ -112,8 +179,13 @@ def reversal_candidate(**updates) -> dict:
         mainline_state="candidate",
         sector_status="candidate",
         mainline_score=45.0,
+        mainline_state_streak=1,
         mainline_cross_day_persistent=False,
         mainline_confirmed=False,
+        niuone_lifecycle_stage="brewing",
+        niuone_lifecycle_label="主线酝酿",
+        niuone_lifecycle_order=10,
+        niuone_lifecycle_entry_policy="probe_only",
         stock_strong=False,
         stock_role="follower",
         stock_leader_rank=4,
@@ -121,12 +193,22 @@ def reversal_candidate(**updates) -> dict:
         reversal_candidate=True,
         reversal_confirmed=True,
         reversal_confirmation_count=2,
+        reversal_basis="daily_v",
+        daily_v_reversal=True,
+        daily_v_left_days=7,
+        daily_v_right_days=5,
+        daily_v_decline_pct=12.0,
+        daily_v_rebound_pct=9.0,
+        daily_v_recovery_ratio=0.7,
+        daily_v_right_trend_confirmed=True,
         stock_reversal_strong=True,
         stock_reversal_leader_rank=1,
         stock_reversal_leader_tier=True,
+        strong_stock_count=6,
+        effective_strong_count=5.6,
         today_breadth_pct=75.0,
         stop_price=9.7,
-        stop_source="niu_reversal_low",
+        stop_source="niu_reversal_right_low",
         stop_distance_pct=3.0,
         atr=0.3,
         atr20=0.3,
@@ -134,13 +216,90 @@ def reversal_candidate(**updates) -> dict:
         execution_buffer_pct=0.2,
         effective_loss_distance_pct=4.2,
         per_trade_risk_budget_pct=0.35,
-        max_position_pct_by_risk=5.0,
+        max_position_pct_by_risk=6.25,
     )
     candidate.update(updates)
     return candidate
 
 
 class NiuOneStrategyTests(unittest.TestCase):
+    def test_candidate_evidence_distinguishes_same_code_observations(self):
+        first = {
+            "code": "600000",
+            "best_strategy": "other_strategy",
+            "best_score": 9.0,
+        }
+        filtered_duplicate = {
+            "code": "600000",
+            "best_strategy": "other_strategy",
+            "best_score": 3.0,
+        }
+        originals = {
+            "candidate_in_stock_universe": trader.candidate_in_stock_universe,
+            "candidate_matches_active_strategy": trader.candidate_matches_active_strategy,
+            "candidate_buy_blockers": trader.candidate_buy_blockers,
+        }
+        try:
+            trader.candidate_in_stock_universe = lambda _row: True
+            trader.candidate_matches_active_strategy = lambda _row: True
+            trader.candidate_buy_blockers = lambda _row: []
+            evidence = trader.build_practice_candidate_evidence(
+                [first, filtered_duplicate],
+                [dict(first)],
+            )
+        finally:
+            for name, value in originals.items():
+                setattr(trader, name, value)
+
+        self.assertTrue(evidence[0]["eligible_for_decision"])
+        self.assertFalse(evidence[1]["eligible_for_decision"])
+        self.assertIn(
+            "not_selected_for_decision",
+            evidence[1]["eligibility_blockers"],
+        )
+        self.assertEqual([row["observed_rank"] for row in evidence], [1, 2])
+    def test_live_and_backtest_share_niuone_exit_parameters(self):
+        expected = {
+            "NIUONE_LEADER_LOSS_CONFIRMATIONS": NIUONE_LEADER_LOSS_CONFIRMATIONS,
+            "NIUONE_MAINLINE_WEAK_CONFIRMATIONS": NIUONE_MAINLINE_WEAK_CONFIRMATIONS,
+            "NIUONE_MAX_HOLD_CALENDAR_DAYS": NIUONE_MAX_HOLD_CALENDAR_DAYS,
+            "NIUONE_PARTIAL_TAKE_PROFIT_R": NIUONE_PARTIAL_TAKE_PROFIT_R,
+            "NIUONE_PARTIAL_TAKE_PROFIT_RATIO": NIUONE_PARTIAL_TAKE_PROFIT_RATIO,
+            "NIUONE_REVERSAL_EARLY_PROTECTION_REGIMES": (
+                NIUONE_REVERSAL_EARLY_PROTECTION_REGIMES
+            ),
+            "NIUONE_REVERSAL_EARLY_PARTIAL_TAKE_PROFIT_R": (
+                NIUONE_REVERSAL_EARLY_PARTIAL_TAKE_PROFIT_R
+            ),
+            "NIUONE_REVERSAL_EARLY_PARTIAL_TAKE_PROFIT_RATIO": (
+                NIUONE_REVERSAL_EARLY_PARTIAL_TAKE_PROFIT_RATIO
+            ),
+            "NIUONE_BREAK_EVEN_AFTER_PARTIAL": NIUONE_BREAK_EVEN_AFTER_PARTIAL,
+            "NIUONE_REVERSAL_MAINLINE_WEAK_CONFIRMATIONS": (
+                NIUONE_REVERSAL_MAINLINE_WEAK_CONFIRMATIONS
+            ),
+        }
+        for name, value in expected.items():
+            self.assertEqual(getattr(trader, name), value)
+            self.assertEqual(getattr(backtest_niuone_exits, name), value)
+
+    def test_live_and_backtest_share_paper_account_fees(self):
+        cost_model = SelectionCostModel()
+        self.assertEqual(trader.COMMISSION_RATE, A_SHARE_COMMISSION_RATE)
+        self.assertEqual(trader.COMMISSION_MIN, A_SHARE_MINIMUM_COMMISSION)
+        self.assertEqual(
+            trader.STAMP_DUTY_SELL_RATE,
+            A_SHARE_SELL_STAMP_DUTY_RATE,
+        )
+        self.assertEqual(trader.TRANSFER_FEE_RATE, A_SHARE_TRANSFER_FEE_RATE)
+        self.assertEqual(cost_model.commission_rate, trader.COMMISSION_RATE)
+        self.assertEqual(cost_model.minimum_commission, trader.COMMISSION_MIN)
+        self.assertEqual(
+            cost_model.sell_stamp_duty_rate,
+            trader.STAMP_DUTY_SELL_RATE,
+        )
+        self.assertEqual(cost_model.transfer_fee_rate, trader.TRANSFER_FEE_RATE)
+
     def _prepared_market(self) -> list[dict]:
         prepared = []
         for theme_index, industry in enumerate(("半导体", "银行", "汽车", "医药")):
@@ -211,7 +370,7 @@ class NiuOneStrategyTests(unittest.TestCase):
                 })
         return prepared
 
-    def test_reversal_probe_requires_two_time_spaced_broad_confirmations(self):
+    def test_intraday_v_observation_remains_research_only(self):
         prepared = self._prepared_reversal_market()
         context_args = {
             "market_snapshot": {
@@ -277,12 +436,346 @@ class NiuOneStrategyTests(unittest.TestCase):
         result = score_niu_reversal_probe(rows, confirmed)
 
         self.assertIsNotNone(result)
-        self.assertTrue(result["actionable"])
-        self.assertEqual(result["stop_source"], "niu_reversal_low")
+        self.assertFalse(result["actionable"])
+        self.assertFalse(result["daily_v_reversal"])
+        self.assertTrue(any("V型" in item for item in result["hard_blockers"]))
+
+    def test_reversal_probe_uses_multi_session_daily_v(self):
+        rows = make_daily_v_rows("600000", "半导体")
+        context = {
+            "market": {
+                "state": "offensive",
+                "score": 78,
+                "hard_stop": False,
+                "allow_new_buys": True,
+            },
+            "mainline": {"mode": "none", "primary": "", "secondary": ""},
+            "dragon_tiger": {"available": False},
+            "news": {"configured": False},
+            "themes": {
+                "半导体": {
+                    "state": "candidate",
+                    "raw_state": "candidate",
+                    "score": 72,
+                    "member_count": 8,
+                    "eligible_data": True,
+                    "strong_stock_count": 6,
+                    "effective_strong_count": 6.0,
+                    "leader_concentration": 0.4,
+                    "single_stock_dominated": False,
+                    "state_streak": 1,
+                },
+            },
+            "stocks": {
+                "600000": {
+                    "theme_rank": 78,
+                    "market_rank": 75,
+                    "strong_score": 78,
+                    "strong": False,
+                    "role": "follower",
+                    "leader_rank": 4,
+                    "leader_tier": False,
+                    "news_precheck": {},
+                },
+            },
+        }
+
+        result = score_niu_reversal_probe(rows, context)
+
+        self.assertIsNotNone(result)
+        self.assertTrue(result["daily_v_reversal"])
+        self.assertEqual(result["reversal_basis"], "daily_v")
+        self.assertGreaterEqual(result["daily_v_left_days"], 5)
+        self.assertGreaterEqual(result["daily_v_right_days"], 3)
+        self.assertGreaterEqual(result["daily_v_decline_pct"], 8)
+        self.assertGreaterEqual(result["daily_v_rebound_pct"], 6)
+        self.assertGreaterEqual(result["daily_v_recovery_ratio"], 0.60)
+        self.assertGreaterEqual(result["entry_extension_atr"], 1.0)
+        self.assertEqual(result["min_entry_extension_atr"], 1.0)
+        self.assertEqual(result["stop_source"], "niu_reversal_right_low")
         self.assertEqual(result["per_trade_risk_budget_pct"], 0.35)
-        self.assertLessEqual(result["absolute_position_cap_pct"], 5)
+        self.assertEqual(result["absolute_position_cap_pct"], 6.25)
         self.assertEqual(result["hard_blockers"], [])
+        self.assertTrue(result["actionable"])
         self.assertTrue(candidate_is_trade_ready(result))
+
+    def test_reversal_probe_requires_controlled_right_side_extension(self):
+        payload = with_strategy_profile("niu_reversal_probe", {
+            "score": 9.0,
+            "entry_extension_atr": 0.99,
+            "min_entry_extension_atr": 1.0,
+            "max_entry_extension_atr": 1.5,
+            "max_entry_change_pct": 5.0,
+            "change_pct": 2.0,
+            "market_allows_buys": True,
+            "market_hard_stop": False,
+            "market_regime": "rotation",
+            "sector_data_eligible": True,
+            "sector_status": "candidate",
+            "daily_v_reversal": True,
+            "daily_v_left_days": 8,
+            "daily_v_right_days": 7,
+            "daily_v_decline_pct": 12.0,
+            "daily_v_rebound_pct": 9.0,
+            "daily_v_recovery_ratio": 0.75,
+            "daily_v_right_trend_confirmed": True,
+            "strong_stock_count": 6,
+            "mainline_state_streak": 1,
+            "risk_ok": True,
+            "effective_loss_distance_pct": 5.0,
+            "max_position_pct_by_risk": 5.0,
+            "risk_flags": [],
+        })
+
+        self.assertFalse(payload["actionable"])
+        self.assertIn(
+            "日线V型反转距EMA20不足1ATR，右侧确认不足",
+            payload["hard_blockers"],
+        )
+
+        weak_recovery = with_strategy_profile("niu_reversal_probe", {
+            **payload,
+            "entry_extension_atr": 1.0,
+            "daily_v_recovery_ratio": 0.5999,
+        })
+        self.assertIn(
+            "V型右侧尚未收复左侧跌幅的60%",
+            weak_recovery["hard_blockers"],
+        )
+        self.assertIn(
+            "V型右侧尚未收复左侧跌幅的60%",
+            trader.candidate_buy_blockers(weak_recovery),
+        )
+        confirmed_recovery = with_strategy_profile("niu_reversal_probe", {
+            **payload,
+            "entry_extension_atr": 1.0,
+            "daily_v_recovery_ratio": 0.60,
+        })
+        self.assertNotIn(
+            "V型右侧尚未收复左侧跌幅的60%",
+            confirmed_recovery["hard_blockers"],
+        )
+        bounded_recovery = with_strategy_profile("niu_reversal_probe", {
+            **payload,
+            "entry_extension_atr": 1.0,
+            "daily_v_recovery_ratio": 1.9999,
+        })
+        self.assertNotIn(
+            "V型右侧修复已达到左侧跌幅的200%，不再按早期试仓",
+            bounded_recovery["hard_blockers"],
+        )
+        over_recovered = with_strategy_profile("niu_reversal_probe", {
+            **payload,
+            "entry_extension_atr": 1.0,
+            "daily_v_recovery_ratio": 2.0,
+        })
+        recovery_cap_blocker = (
+            "V型右侧修复已达到左侧跌幅的200%，不再按早期试仓"
+        )
+        self.assertIn(recovery_cap_blocker, over_recovered["hard_blockers"])
+        self.assertIn(
+            recovery_cap_blocker,
+            trader.candidate_buy_blockers(over_recovered),
+        )
+        self.assertFalse(over_recovered["actionable"])
+
+    def test_defensive_reversal_probe_remains_actionable_without_hard_stop(self):
+        base = {
+            "score": 9.0,
+            "entry_extension_atr": 1.2,
+            "min_entry_extension_atr": 1.0,
+            "max_entry_extension_atr": 1.5,
+            "change_pct": 2.0,
+            "market_allows_buys": True,
+            "market_hard_stop": False,
+            "market_regime": "defensive",
+            "sector_data_eligible": True,
+            "sector_status": "candidate",
+            "mainline_state": "candidate",
+            "niuone_lifecycle_stage": "brewing",
+            "daily_v_reversal": True,
+            "daily_v_left_days": 8,
+            "daily_v_right_days": 7,
+            "daily_v_decline_pct": 12.0,
+            "daily_v_rebound_pct": 9.0,
+            "daily_v_recovery_ratio": 0.75,
+            "daily_v_right_trend_confirmed": True,
+            "strong_stock_count": 6,
+            "mainline_state_streak": 1,
+            "risk_ok": True,
+            "effective_loss_distance_pct": 5.0,
+            "max_position_pct_by_risk": 3.0,
+            "risk_flags": [],
+        }
+
+        candidate = with_strategy_profile("niu_reversal_probe", dict(base))
+
+        self.assertTrue(candidate["actionable"])
+        self.assertEqual(candidate["hard_blockers"], [])
+
+        hard_stopped = with_strategy_profile(
+            "niu_reversal_probe",
+            {**base, "market_hard_stop": True},
+        )
+        self.assertFalse(hard_stopped["actionable"])
+        self.assertIn("市场风控禁止新开仓", hard_stopped["hard_blockers"])
+
+    def test_reversal_probe_requires_breadth_or_sustained_brewing(self):
+        base = {
+            "score": 9.0,
+            "entry_extension_atr": 1.2,
+            "min_entry_extension_atr": 1.0,
+            "max_entry_extension_atr": 1.5,
+            "max_entry_change_pct": 5.0,
+            "change_pct": 2.0,
+            "market_allows_buys": True,
+            "market_hard_stop": False,
+            "market_regime": "rotation",
+            "sector_data_eligible": True,
+            "sector_status": "candidate",
+            "daily_v_reversal": True,
+            "daily_v_left_days": 8,
+            "daily_v_right_days": 7,
+            "daily_v_decline_pct": 12.0,
+            "daily_v_rebound_pct": 9.0,
+            "daily_v_recovery_ratio": 0.75,
+            "daily_v_right_trend_confirmed": True,
+            "risk_ok": True,
+            "effective_loss_distance_pct": 5.0,
+            "max_position_pct_by_risk": 6.0,
+            "risk_flags": [],
+        }
+        weak = with_strategy_profile("niu_reversal_probe", {
+            **base,
+            "strong_stock_count": 5,
+            "mainline_state_streak": 2,
+        })
+        blocker = (
+            "牛牛试仓需题材至少6只强势股，或酝酿状态连续至少3个交易日"
+        )
+        self.assertIn(blocker, weak["hard_blockers"])
+        self.assertIn(blocker, trader.candidate_buy_blockers(weak))
+
+        broad = with_strategy_profile("niu_reversal_probe", {
+            **base,
+            "strong_stock_count": 6,
+            "mainline_state_streak": 1,
+        })
+        sustained = with_strategy_profile("niu_reversal_probe", {
+            **base,
+            "strong_stock_count": 3,
+            "mainline_state_streak": 3,
+        })
+        self.assertNotIn(blocker, broad["hard_blockers"])
+        self.assertNotIn(blocker, sustained["hard_blockers"])
+
+    def test_reversal_probe_routes_mature_and_early_strong_names_to_later_stages(self):
+        early = reversal_candidate()
+        self.assertIsNone(niu_reversal_entry_stage_blocker(early))
+        self.assertTrue(candidate_is_trade_ready(early))
+
+        candidate_strong = {
+            **early,
+            "stock_strong": True,
+            "stock_strong_score": 72.0,
+        }
+        self.assertEqual(
+            niu_reversal_entry_stage_blocker(candidate_strong),
+            "候选题材中的强势股需等待牛牛启动确认",
+        )
+        self.assertFalse(candidate_is_trade_ready(candidate_strong))
+
+        emerging_strong = {
+            **candidate_strong,
+            "mainline_state": "emerging",
+            "sector_status": "emerging",
+        }
+        self.assertIsNone(niu_reversal_entry_stage_blocker(emerging_strong))
+        self.assertTrue(candidate_is_trade_ready(emerging_strong))
+
+        mature = {
+            **early,
+            "mainline_state": "mainline",
+            "sector_status": "mainline",
+            "mainline_confirmed": True,
+            "niuone_lifecycle_stage": "markup",
+        }
+        self.assertEqual(
+            niu_reversal_entry_stage_blocker(mature),
+            "主线主升阶段不允许牛牛试仓开新仓",
+        )
+        self.assertFalse(candidate_is_trade_ready(mature))
+
+        profiled = with_strategy_profile(
+            "niu_reversal_probe",
+            {
+                **mature,
+                "score": 9.0,
+                "strategy_id": "niu_reversal_probe",
+                "market_allows_buys": True,
+                "market_hard_stop": False,
+                "sector_data_eligible": True,
+                "risk_ok": True,
+                "entry_extension_atr": 1.2,
+                "min_entry_extension_atr": 1.0,
+                "max_entry_extension_atr": 1.5,
+                "max_entry_change_pct": 5.0,
+                "change_pct": 2.0,
+                "risk_flags": [],
+            },
+        )
+        self.assertFalse(profiled["actionable"])
+        self.assertIn(
+            "主线主升阶段不允许牛牛试仓开新仓",
+            profiled["hard_blockers"],
+        )
+
+    def test_daily_v_requires_at_least_two_thirds_rising_sessions(self):
+        def rows_for(closes):
+            return [
+                {
+                    "date": f"2026-05-{index + 1:02d}",
+                    "open": close,
+                    "high": close * 1.01,
+                    "low": close * 0.99,
+                    "close": close,
+                    "volume": 1000.0,
+                }
+                for index, close in enumerate(closes)
+            ]
+
+        sixty_percent = _daily_v_reversal_metrics(rows_for((
+            12.0, 11.5, 11.0, 10.5, 10.0, 9.5, 9.2,
+            9.8, 9.6, 10.2, 10.0, 10.9,
+        )))
+        two_thirds = _daily_v_reversal_metrics(rows_for((
+            12.0, 11.5, 11.0, 10.5, 10.0, 9.5, 9.2,
+            9.8, 9.6, 10.2, 10.0, 10.4, 10.9,
+        )))
+
+        self.assertEqual(sixty_percent["daily_v_rising_ratio"], 0.6)
+        self.assertFalse(sixty_percent["daily_v_reversal"])
+        self.assertAlmostEqual(two_thirds["daily_v_rising_ratio"], 2 / 3, places=4)
+        self.assertTrue(two_thirds["daily_v_reversal"])
+
+    def test_trade_candidates_keep_two_best_daily_reversals(self):
+        candidates = [
+            reversal_candidate(code="600001", best_score=8.9, score=8.9),
+            reversal_candidate(code="600002", best_score=8.7, score=8.7),
+            niu_candidate(code="600003", best_score=8.6, score=8.6),
+        ]
+
+        selected = select_trade_candidates(candidates, limit=3)
+
+        self.assertEqual(
+            [item["code"] for item in selected],
+            ["600001", "600002", "600003"],
+        )
+        self.assertEqual(selected[0]["selection_candidate_pool_size"], 3)
+        self.assertEqual(selected[0]["selection_same_stage_candidate_count"], 2)
+        self.assertEqual(selected[0]["selection_same_stage_candidate_rank"], 1)
+        self.assertEqual(selected[0]["selection_same_stage_top_score_gap"], 0.2)
+        self.assertEqual(selected[1]["selection_same_stage_candidate_rank"], 2)
 
     def test_reversal_probe_accepts_seventy_five_percent_quotes_but_requires_weak_origin(self):
         prepared = self._prepared_reversal_market()
@@ -399,6 +892,170 @@ class NiuOneStrategyTests(unittest.TestCase):
         self.assertEqual(theme["confirmation_count"], 2)
         self.assertEqual(confirmed["mainline"]["mode"], "single")
         self.assertEqual(confirmed["mainline"]["primary"], "半导体")
+
+    def test_eastmoney_concepts_group_one_stock_into_multiple_themes(self):
+        prepared = self._prepared_market()
+        semiconductor_codes = {
+            item["code"] for item in prepared if item["industry"] == "半导体"
+        }
+        for item in prepared:
+            if item["code"] in semiconductor_codes:
+                item["themes"] = ["存储芯片", "先进封装概念"]
+
+        context = build_niuone_context(
+            prepared,
+            theme_basis="eastmoney_concept",
+        )
+
+        self.assertEqual(context["theme_basis"], "eastmoney_concept")
+        self.assertEqual(context["themes"]["存储芯片"]["member_count"], 4)
+        self.assertEqual(context["themes"]["先进封装"]["member_count"], 4)
+        memberships = context["stocks"]["600000"]["theme_memberships"]
+        self.assertCountEqual(memberships, ["存储芯片", "先进封装"])
+        self.assertIn(context["stocks"]["600000"]["industry"], memberships)
+        self.assertCountEqual(
+            [
+                item["industry"]
+                for item in context["stocks"]["600000"]["theme_profiles"]
+            ],
+            ["存储芯片", "先进封装"],
+        )
+
+    def test_multi_concept_stock_routes_each_action_to_a_compatible_branch(self):
+        rows = make_rows("600000", "成熟分支", 0.02)
+        context = {
+            "market": {
+                "state": "offensive", "score": 78, "hard_stop": False,
+                "allow_new_buys": True,
+            },
+            "mainline": {"mode": "single", "primary": "成熟分支"},
+            "dragon_tiger": {"available": False},
+            "news": {"configured": False},
+            "themes": {
+                "成熟分支": {
+                    "state": "mainline", "score": 76.0,
+                    "niuone_lifecycle_stage": "markup",
+                    "member_count": 8, "eligible_data": True,
+                    "strong_stock_count": 4, "effective_strong_count": 3.5,
+                    "single_stock_dominated": False,
+                    "cross_day_persistent": True,
+                    "cross_day_confirmed": True,
+                    "mainline_confirmed": True,
+                    "today_strength_score": 75.0,
+                },
+                "启动分支": {
+                    "state": "emerging", "score": 69.0,
+                    "niuone_lifecycle_stage": "markup",
+                    "member_count": 7, "eligible_data": True,
+                    "strong_stock_count": 3, "effective_strong_count": 2.5,
+                    "single_stock_dominated": False,
+                    "cross_day_persistent": True,
+                    "cross_day_confirmed": False,
+                    "mainline_confirmed": False,
+                    "today_strength_score": 68.0,
+                },
+            },
+            "stocks": {
+                "600000": {
+                    "industry": "成熟分支", "theme_rank": 100.0,
+                    "market_rank": 92.0, "strong_score": 92.0,
+                    "strong": True, "role": "leader", "leader_rank": 1,
+                    "leader_tier": True, "news_precheck": {},
+                    "theme_profiles": [
+                        {
+                            "industry": "成熟分支", "role": "leader",
+                            "leader_rank": 1, "leader_tier": True,
+                            "theme_rank": 100.0,
+                        },
+                        {
+                            "industry": "启动分支", "role": "leader",
+                            "leader_rank": 1, "leader_tier": True,
+                            "theme_rank": 100.0,
+                        },
+                    ],
+                },
+            },
+        }
+
+        startup = score_niu_emerging(rows, context)
+        leader = score_niu_leader(rows, context)
+
+        self.assertIsNotNone(startup)
+        self.assertEqual(startup["industry"], "启动分支")
+        self.assertEqual(startup["mainline_state"], "emerging")
+        self.assertEqual(startup["stock_leader_rank"], 1)
+        self.assertTrue(startup["stock_leader_tier"])
+        self.assertNotIn(
+            "主题不处于跨日延续的待确认启动阶段",
+            startup["hard_blockers"],
+        )
+        self.assertNotIn(
+            "个股未进入强势行业龙头梯队",
+            startup["hard_blockers"],
+        )
+        self.assertIsNotNone(leader)
+        self.assertEqual(leader["industry"], "成熟分支")
+        self.assertEqual(leader["mainline_state"], "mainline")
+        self.assertTrue(leader["stock_leader_tier"])
+
+    def test_divergence_leader_is_not_blocked_by_markup_only_gates(self):
+        rows = make_rows("600000", "分歧分支", 0.02)
+        context = {
+            "market": {
+                "state": "rotation", "score": 62, "hard_stop": False,
+                "allow_new_buys": True,
+            },
+            # The branch is intentionally not the primary/secondary display
+            # mainline. That label is a rank hint, not an eligibility gate.
+            "mainline": {"mode": "single", "primary": "另一主线"},
+            "dragon_tiger": {"available": False},
+            "news": {"configured": False},
+            "themes": {
+                "分歧分支": {
+                    "state": "diverging", "score": 73.0,
+                    "niuone_lifecycle_stage": "divergence",
+                    "member_count": 8, "eligible_data": True,
+                    "strong_stock_count": 4, "effective_strong_count": 3.2,
+                    "single_stock_dominated": False,
+                    "cross_day_persistent": False,
+                    "cross_day_confirmed": False,
+                    "mainline_confirmed": True,
+                    "today_strength_score": 35.0,
+                },
+            },
+            "stocks": {
+                "600000": {
+                    "industry": "分歧分支", "theme_rank": 95.0,
+                    "market_rank": 92.0, "strong_score": 92.0,
+                    "strong": True, "role": "leader", "leader_rank": 1,
+                    "leader_tier": True, "news_precheck": {},
+                    "theme_profiles": [{
+                        "industry": "分歧分支", "role": "leader",
+                        "leader_rank": 1, "leader_tier": True,
+                        "theme_rank": 95.0,
+                    }],
+                },
+            },
+        }
+
+        result = score_niu_leader(rows, context)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["industry"], "分歧分支")
+        self.assertEqual(result["niuone_lifecycle_stage"], "divergence")
+        self.assertNotIn(
+            "主题不处于已确认主线或有效分歧", result["hard_blockers"]
+        )
+        self.assertNotIn(
+            "主线未完成跨交易日核心股延续确认",
+            result["hard_blockers"],
+        )
+        self.assertNotIn(
+            "主题未进入当前主线/双主线", result["hard_blockers"]
+        )
+        self.assertNotIn(
+            "牛牛领涨需题材当日强度≥60", result["hard_blockers"]
+        )
 
     def test_single_strong_stock_does_not_force_a_mainline(self):
         prepared = self._prepared_market()
@@ -534,7 +1191,7 @@ class NiuOneStrategyTests(unittest.TestCase):
         self.assertTrue(math.isfinite(context["market"]["score"]))
         json.dumps(context, ensure_ascii=False, allow_nan=False)
 
-    def test_raw_defensive_market_immediately_zeroes_new_buy_budget(self):
+    def test_raw_defensive_market_uses_reduced_new_buy_budget(self):
         context = build_niuone_context(
             self._prepared_market(),
             market_snapshot={
@@ -560,9 +1217,30 @@ class NiuOneStrategyTests(unittest.TestCase):
         market = context["market"]
         self.assertEqual(market["raw_state"], "defensive")
         self.assertEqual(market["risk_state"], "defensive")
+        self.assertTrue(market["allow_new_buys"])
+        self.assertEqual(market["per_trade_risk_pct"], 0.30)
+        self.assertEqual(market["max_open_risk_pct"], 0.90)
+        self.assertEqual(market["max_total_position_pct"], 20.0)
+
+    def test_niuone_market_hard_stop_still_blocks_new_buys(self):
+        context = build_niuone_context(
+            self._prepared_market(),
+            market_snapshot={
+                "up": 100,
+                "down": 300,
+                "median_change_pct": -1.5,
+                "limit_up": 1,
+                "limit_down": 20,
+                "core_index_count": 3,
+                "index_below_ma20_count": 2,
+            },
+        )
+
+        market = context["market"]
+        self.assertEqual(market["risk_state"], "defensive")
+        self.assertTrue(market["hard_stop"])
         self.assertFalse(market["allow_new_buys"])
-        self.assertEqual(market["per_trade_risk_pct"], 0.0)
-        self.assertEqual(market["max_total_position_pct"], 0.0)
+        self.assertGreater(market["per_trade_risk_pct"], 0.0)
 
     def test_same_day_repeated_scans_remain_intraday_observation(self):
         prepared = self._prepared_market()
@@ -613,6 +1291,43 @@ class NiuOneStrategyTests(unittest.TestCase):
         self.assertFalse(theme["core_continuity_met"])
         self.assertFalse(theme["cross_day_confirmed"])
 
+    def test_context_lifecycle_uses_previous_causal_stage(self):
+        first = build_niuone_context(
+            self._prepared_market(),
+            as_of_date="2026-07-27",
+            previous_trading_day="2026-07-24",
+        )
+        previous_theme = first["themes"]["半导体"]
+        previous_theme.update({
+            "state": "emerging",
+            "raw_state": "mainline",
+            "mainline_confirmed": False,
+            "cross_day_confirmed": False,
+            "cross_day_persistent": True,
+            "niuone_lifecycle_stage": "markup",
+            "niuone_lifecycle_label": "主线主升",
+            "niuone_lifecycle_order": 20,
+            "niuone_lifecycle_entry_policy": "participate",
+            "core_stock_codes": ["601001", "601002", "601003"],
+        })
+
+        current = build_niuone_context(
+            self._prepared_market(),
+            previous_context=first,
+            as_of_date="2026-07-28",
+            previous_trading_day="2026-07-27",
+        )
+
+        theme = current["themes"]["半导体"]
+        self.assertEqual(theme["state"], "emerging")
+        self.assertFalse(theme["cross_day_persistent"])
+        self.assertEqual(theme["niuone_lifecycle_stage"], "divergence")
+        self.assertEqual(theme["niuone_lifecycle_label"], "主线分歧")
+        self.assertEqual(
+            theme["niuone_lifecycle_entry_policy"],
+            "selective_repair_reclaim_or_reduce",
+        )
+
     def test_legacy_same_day_mainline_cache_is_not_trusted_as_cross_day_confirmation(self):
         prepared = self._prepared_market()
         legacy = build_niuone_context(
@@ -645,12 +1360,13 @@ class NiuOneStrategyTests(unittest.TestCase):
             "news": {"configured": False},
             "themes": {
                 "半导体": {
-                    "state": "mainline", "raw_state": "mainline", "score": 88,
+                    "state": "mainline", "raw_state": "mainline", "score": 77.9,
                     "member_count": 8, "eligible_data": True, "strong_stock_count": 4,
                     "effective_strong_count": 3.5, "leader_concentration": 0.3,
                     "single_stock_dominated": False, "confirmation_count": 2, "state_streak": 2,
                     "cross_day_persistent": True, "cross_day_confirmed": True,
                     "mainline_confirmed": True, "core_overlap_count": 3,
+                    "today_strength_score": 80.0,
                 }
             },
             "stocks": {
@@ -684,18 +1400,65 @@ class NiuOneStrategyTests(unittest.TestCase):
         self.assertEqual(second_rank["stock_leader_rank"], 2)
         self.assertTrue(second_rank["stock_leader_tier"])
         self.assertNotIn("个股未进入强势行业龙头梯队", second_rank["hard_blockers"])
+        self.assertNotIn(
+            "牛牛领涨需题材当日强度≥60",
+            second_rank["hard_blockers"],
+        )
+
+        edge_leader = with_strategy_profile("niu_leader", {
+            "score": 9.0,
+            "stock_leader_rank": 3,
+            "stock_leader_tier": True,
+            "stock_strong": True,
+            "stock_sector_rank": 90.0,
+            "today_strength_score": 59.99,
+            "risk_flags": [],
+        })
+        self.assertIn(
+            "牛牛领涨需题材当日强度≥60",
+            edge_leader["hard_blockers"],
+        )
+        confirmed_edge_leader = with_strategy_profile("niu_leader", {
+            **edge_leader,
+            "today_strength_score": 60.0,
+        })
+        self.assertNotIn(
+            "牛牛领涨需题材当日强度≥60",
+            confirmed_edge_leader["hard_blockers"],
+        )
+        outside_top_twenty = with_strategy_profile("niu_leader", {
+            **confirmed_edge_leader,
+            "stock_sector_rank": 79.99,
+            "today_strength_score": 80.0,
+        })
+        self.assertIn(
+            "牛牛领涨个股需处于主线前20%",
+            outside_top_twenty["hard_blockers"],
+        )
+        self.assertIn(
+            "牛牛领涨需题材当日强度≥60",
+            trader.candidate_buy_blockers(niu_candidate(
+                stock_role="core",
+                stock_leader_rank=1,
+                stock_leader_tier=True,
+                today_strength_score=59.99,
+            )),
+        )
 
         rows[-1]["quote_change_pct"] = 5.1
         expanded = score_niu_leader(rows, context)
         self.assertIsNotNone(expanded)
-        self.assertNotIn("领航战法单日涨幅>4%", expanded["hard_blockers"])
-        self.assertIn("领航买点偏扩张，已按行情弹性上限复核", expanded["risk_flags"])
+        self.assertNotIn("领涨动作单日涨幅>4%", expanded["hard_blockers"])
+        self.assertFalse(any(
+            "单日涨幅" in blocker for blocker in expanded["hard_blockers"]
+        ))
 
         rows[-1]["quote_change_pct"] = 7.1
         chased = score_niu_leader(rows, context)
         self.assertIsNotNone(chased)
-        self.assertFalse(chased["actionable"])
-        self.assertIn("领航战法单日涨幅>7%", chased["hard_blockers"])
+        self.assertFalse(any(
+            "单日涨幅" in blocker for blocker in chased["hard_blockers"]
+        ))
 
         payload = with_strategy_profile("niu_leader", {
             "score": 9.0,
@@ -706,7 +1469,7 @@ class NiuOneStrategyTests(unittest.TestCase):
             "market_regime": "offensive",
             "sector_data_eligible": True,
             "sector_status": "mainline",
-            "mainline_score": 85,
+            "mainline_score": 77.9,
             "mainline_selected": True,
             "mainline_cross_day_confirmed": True,
             "mainline_confirmed": True,
@@ -716,6 +1479,7 @@ class NiuOneStrategyTests(unittest.TestCase):
             "stock_leader_rank": 1,
             "stock_leader_tier": True,
             "stock_sector_rank": 90,
+            "today_strength_score": 80.0,
             "breakout": True,
             "pullback": False,
             "risk_ok": True,
@@ -746,11 +1510,11 @@ class NiuOneStrategyTests(unittest.TestCase):
     def test_niuone_entry_limits_expand_only_in_stronger_market_states(self):
         self.assertEqual(
             niuone_chase_limits("niu_leader", "offensive"),
-            {"max_entry_change_pct": 7.0, "max_entry_extension_atr": 1.5},
+            {"max_entry_extension_atr": 1.5},
         )
         self.assertEqual(
             niuone_chase_limits("niu_leader", "rotation"),
-            {"max_entry_change_pct": 5.0, "max_entry_extension_atr": 1.25},
+            {"max_entry_extension_atr": 1.25},
         )
         self.assertTrue(niuone_structure_risk_ok(9.5, 2.4, "offensive"))
         self.assertTrue(niuone_structure_risk_ok(7.5, 1.9, "rotation"))
@@ -773,6 +1537,8 @@ class NiuOneStrategyTests(unittest.TestCase):
             "single_stock_dominated": False,
             "stock_strong": True,
             "stock_leader_tier": True,
+            "stock_sector_rank": 90.0,
+            "today_strength_score": 80.0,
             "breakout": True,
             "pullback": False,
             "risk_ok": True,
@@ -781,11 +1547,359 @@ class NiuOneStrategyTests(unittest.TestCase):
             "risk_flags": [],
         })
         self.assertTrue(payload["actionable"])
-        self.assertNotIn("领航战法单日涨幅>5%", payload["hard_blockers"])
+        self.assertNotIn("领涨动作单日涨幅>5%", payload["hard_blockers"])
 
-        above_limit = with_strategy_profile("niu_leader", {**payload, "change_pct": 5.01})
-        self.assertFalse(above_limit["actionable"])
-        self.assertIn("领航战法单日涨幅>5%", above_limit["hard_blockers"])
+        non_limit_breakout = with_strategy_profile(
+            "niu_leader",
+            {**payload, "change_pct": 8.84},
+        )
+        self.assertTrue(non_limit_breakout["actionable"])
+        self.assertFalse(any(
+            "单日涨幅" in blocker
+            for blocker in non_limit_breakout["hard_blockers"]
+        ))
+
+    def test_breakout_uses_prior_high_instead_of_ema20_as_entry_anchor(self):
+        rows = make_rows("600000", "半导体", 0.08)
+        breakout_level = max(float(row["high"]) for row in rows[-21:-1])
+        rows[-1].update({
+            "open": float(rows[-2]["close"]) * 1.002,
+            "close": breakout_level * 1.004,
+            "high": breakout_level * 1.007,
+            "low": float(rows[-2]["close"]) * 0.998,
+            "volume": 1500.0,
+        })
+        enrich_rows(rows)
+        rows[-1].update({
+            "symbol_code": "600000",
+            "stock_name": "突破测试",
+            "industry": "半导体",
+            "quote_amount": 2.5e9,
+        })
+        context = {
+            "market": {
+                "state": "offensive", "risk_state": "offensive", "score": 78,
+                "hard_stop": False, "allow_new_buys": True,
+            },
+            "mainline": {"mode": "single", "primary": "半导体"},
+            "dragon_tiger": {"available": False},
+            "news": {"configured": False},
+            "themes": {
+                "半导体": {
+                    "state": "mainline", "raw_state": "mainline", "score": 77.9,
+                    "member_count": 8, "eligible_data": True, "strong_stock_count": 4,
+                    "effective_strong_count": 3.5, "leader_concentration": 0.3,
+                    "single_stock_dominated": False, "confirmation_count": 2,
+                    "state_streak": 2, "cross_day_persistent": True,
+                    "cross_day_confirmed": True, "mainline_confirmed": True,
+                    "core_overlap_count": 3, "today_strength_score": 80.0,
+                }
+            },
+            "stocks": {
+                "600000": {
+                    "theme_rank": 95, "market_rank": 92, "strong_score": 92,
+                    "strong": True, "role": "leader", "leader_rank": 1,
+                    "leader_tier": True, "news_precheck": {},
+                }
+            },
+        }
+
+        result = score_niu_leader(rows, context)
+
+        self.assertIsNotNone(result)
+        self.assertTrue(result["breakout"])
+        self.assertGreater(result["extension_atr"], 1.5)
+        self.assertLess(result["entry_extension_atr"], 1.5)
+        self.assertEqual(result["entry_extension_source"], "breakout_level")
+        self.assertEqual(result["entry_setup"], "breakout")
+        self.assertEqual(result["stop_source"], "niu_breakout_pivot")
+        self.assertTrue(result["risk_ok"])
+        self.assertTrue(result["actionable"])
+        self.assertFalse(any("距EMA20" in item for item in result["hard_blockers"]))
+
+        overrun = with_strategy_profile("niu_leader", {
+            **result,
+            "score": 9.0,
+            "entry_extension_atr": 1.51,
+            "max_entry_extension_atr": 1.5,
+        })
+        self.assertFalse(overrun["actionable"])
+        self.assertIn("领涨动作突破价超过前高1.5ATR", overrun["hard_blockers"])
+
+    def test_pullback_keeps_ema20_as_entry_anchor(self):
+        payload = with_strategy_profile("niu_pullback", {
+            "score": 9.0,
+            "extension_atr": 1.26,
+            "entry_extension_atr": 1.26,
+            "entry_extension_source": "ema20",
+            "max_entry_change_pct": 5.0,
+            "max_entry_extension_atr": 1.25,
+            "change_pct": 1.0,
+            "market_allows_buys": True,
+            "market_hard_stop": False,
+            "market_regime": "offensive",
+            "sector_data_eligible": True,
+            "sector_status": "diverging",
+            "niuone_lifecycle_stage": "divergence",
+            "mainline_score": 75,
+            "mainline_confirmed": True,
+            "mainline_selected": True,
+            "stock_strong": True,
+            "stock_leader_tier": True,
+            "pullback": True,
+            "reclaim": False,
+            "risk_ok": True,
+            "effective_loss_distance_pct": 4.0,
+            "max_position_pct_by_risk": 10.0,
+            "risk_flags": [],
+        })
+
+        self.assertFalse(payload["actionable"])
+        self.assertIn("转强动作距EMA20超过1.25ATR", payload["hard_blockers"])
+
+    def test_emerging_accepts_only_cross_day_emerging_theme_without_relaxing_chase_risk(self):
+        payload = {
+            "score": 8.399999999,
+            "entry_extension_atr": 1.4,
+            "entry_extension_source": "breakout_level",
+            "max_entry_change_pct": 7.0,
+            "max_entry_extension_atr": 1.5,
+            "change_pct": 6.8,
+            "market_allows_buys": True,
+            "market_hard_stop": False,
+            "market_regime": "rotation",
+            "sector_data_eligible": True,
+            "sector_status": "emerging",
+            "mainline_score": 72.0,
+            "mainline_cross_day_persistent": True,
+            "mainline_confirmed": False,
+            "strong_stock_count": 3,
+            "single_stock_dominated": False,
+            "stock_strong": True,
+            "stock_leader_tier": True,
+            "breakout": True,
+            "reclaim": False,
+            "risk_ok": True,
+            "effective_loss_distance_pct": 5.0,
+            "max_position_pct_by_risk": 8.0,
+            "risk_flags": [],
+        }
+
+        emerging = with_strategy_profile("niu_emerging", payload)
+        self.assertEqual(emerging["score"], 8.4)
+        self.assertTrue(emerging["actionable"])
+        self.assertNotIn(
+            "主题不处于跨日延续的待确认启动阶段",
+            emerging["hard_blockers"],
+        )
+
+        confirmed_mainline = with_strategy_profile(
+            "niu_emerging",
+            {
+                **payload,
+                "sector_status": "mainline",
+                "mainline_score": 77.9,
+                "mainline_confirmed": True,
+            },
+        )
+        self.assertFalse(confirmed_mainline["actionable"])
+        self.assertIn(
+            "主题不处于跨日延续的待确认启动阶段",
+            confirmed_mainline["hard_blockers"],
+        )
+        self.assertIn(
+            "主题不处于跨日延续的待确认启动阶段",
+            trader.candidate_buy_blockers(niu_candidate(
+                best_strategy="niu_emerging",
+                entry_threshold=8.4,
+                mainline_state="mainline",
+                sector_status="mainline",
+            )),
+        )
+        self.assertIn(
+            "启动主题尚未跨交易日延续",
+            trader.candidate_buy_blockers(niu_candidate(
+                best_strategy="niu_emerging",
+                entry_threshold=8.4,
+                mainline_state="emerging",
+                sector_status="emerging",
+                mainline_cross_day_persistent=False,
+            )),
+        )
+
+        chased = with_strategy_profile(
+            "niu_emerging",
+            {**payload, "change_pct": 7.01},
+        )
+        self.assertTrue(chased["actionable"])
+        self.assertFalse(any(
+            "单日涨幅" in blocker for blocker in chased["hard_blockers"]
+        ))
+
+        unsafe_stop = with_strategy_profile(
+            "niu_emerging",
+            {**payload, "risk_ok": False},
+        )
+        self.assertFalse(unsafe_stop["actionable"])
+        self.assertTrue(
+            any(item.startswith("结构止损超过") for item in unsafe_stop["hard_blockers"])
+        )
+
+    def test_markup_momentum_probe_is_conditional_and_sizes_wide_stop_to_micro_position(self):
+        payload = {
+            "score": 8.0,
+            "market_allows_buys": True,
+            "market_hard_stop": False,
+            "market_regime": "recovery",
+            "sector_data_eligible": True,
+            "sector_status": "emerging",
+            "mainline_state": "emerging",
+            "niuone_lifecycle_stage": "markup",
+            "mainline_cross_day_persistent": True,
+            "mainline_confirmed": False,
+            "strong_stock_count": 3,
+            "single_stock_dominated": False,
+            "stock_strong": True,
+            "stock_leader_tier": True,
+            "stock_leader_rank": 1,
+            "stock_strong_score": 92.92,
+            "breakout": False,
+            "reclaim": False,
+            "entry_extension_atr": 3.02,
+            "entry_extension_source": "ema20",
+            "change_pct": 10.01,
+            "volume_ratio": 1.0,
+            "stop_distance_pct": 17.87,
+            "stop_atr": 2.8,
+            "effective_loss_distance_pct": 20.5,
+            "risk_ok": False,
+            "max_stop_distance_pct": 6.0,
+            "max_stop_atr": 1.5,
+            "max_position_pct_by_risk": 0.0,
+            "risk_flags": [
+                "结构止损超过当前行情上限(6%或1.5ATR)",
+                "启动买点尚未确认",
+                "启动战法拒绝追高",
+            ],
+        }
+
+        probe = with_strategy_profile(
+            "niu_emerging",
+            _apply_markup_momentum_probe(dict(payload)),
+        )
+
+        self.assertEqual(
+            probe["niuone_entry_subroute"],
+            NIUONE_MARKUP_MOMENTUM_PROBE_SUBROUTE,
+        )
+        self.assertEqual(probe["entry_threshold"], 8.0)
+        self.assertTrue(probe["niuone_markup_momentum_acceleration"])
+        self.assertTrue(probe["actionable"])
+        self.assertTrue(probe["risk_ok"])
+        self.assertEqual(
+            probe["absolute_position_cap_pct"],
+            NIUONE_MARKUP_MOMENTUM_PROBE_POSITION_CAP_PCT,
+        )
+        self.assertGreater(probe["max_position_pct_by_risk"], 0)
+        self.assertLessEqual(
+            probe["max_position_pct_by_risk"],
+            NIUONE_MARKUP_MOMENTUM_PROBE_POSITION_CAP_PCT,
+        )
+        self.assertNotIn("启动买点未确认", probe["hard_blockers"])
+
+        rank_two = with_strategy_profile(
+            "niu_emerging",
+            _apply_markup_momentum_probe({**payload, "stock_leader_rank": 2}),
+        )
+        self.assertNotIn("niuone_entry_subroute", rank_two)
+        self.assertEqual(rank_two["entry_threshold"], 8.4)
+        self.assertFalse(rank_two["actionable"])
+        self.assertIn("启动买点未确认", rank_two["hard_blockers"])
+
+        ordinary = with_strategy_profile(
+            "niu_emerging",
+            _apply_markup_momentum_probe({
+                **payload,
+                "score": NIUONE_MARKUP_MOMENTUM_PROBE_ORDINARY_MIN_SCORE,
+                "mainline_score": 70.0,
+                "entry_extension_atr": 1.0,
+                "change_pct": 5.0,
+                "volume_ratio": 1.5,
+                "stop_distance_pct": 8.0,
+                "stop_atr": 1.2,
+            }),
+        )
+        self.assertTrue(ordinary["actionable"])
+        self.assertEqual(
+            ordinary["entry_threshold"],
+            NIUONE_MARKUP_MOMENTUM_PROBE_ORDINARY_MIN_SCORE,
+        )
+        self.assertFalse(ordinary["niuone_markup_momentum_acceleration"])
+
+        middle_extension = _apply_markup_momentum_probe({
+            **payload,
+            "score": 8.2,
+            "mainline_score": 72.0,
+            "entry_extension_atr": 1.2,
+            "change_pct": 9.8,
+            "volume_ratio": 1.1,
+        })
+        self.assertNotIn("niuone_entry_subroute", middle_extension)
+
+        low_ordinary_score = _apply_markup_momentum_probe({
+            **payload,
+            "entry_extension_atr": 0.8,
+            "mainline_score": 72.0,
+            "change_pct": 5.0,
+            "volume_ratio": 1.5,
+        })
+        self.assertNotIn("niuone_entry_subroute", low_ordinary_score)
+
+        weak_ordinary_theme = _apply_markup_momentum_probe({
+            **payload,
+            "score": 8.2,
+            "entry_extension_atr": 0.8,
+            "mainline_score": 69.99,
+            "change_pct": 5.0,
+            "volume_ratio": 1.5,
+        })
+        self.assertNotIn("niuone_entry_subroute", weak_ordinary_theme)
+
+        explosive_acceleration_volume = _apply_markup_momentum_probe({
+            **payload,
+            "entry_extension_atr": 3.0,
+            "change_pct": 10.0,
+            "volume_ratio": 1.21,
+        })
+        self.assertNotIn(
+            "niuone_entry_subroute",
+            explosive_acceleration_volume,
+        )
+
+        execution_recheck = trader.candidate_buy_blockers({
+            **probe,
+            "best_strategy": "niu_emerging",
+            "best_score": probe["score"],
+            "stock_leader_rank": 2,
+            "hard_blockers": [],
+        })
+        self.assertIn(
+            "主升动量试仓身份条件不完整",
+            execution_recheck,
+        )
+
+        unsafe = with_strategy_profile(
+            "niu_emerging",
+            _apply_markup_momentum_probe({
+                **payload,
+                "stop_distance_pct": 18.01,
+            }),
+        )
+        self.assertFalse(unsafe["actionable"])
+        self.assertTrue(any(
+            item.startswith("结构止损超过当前行情上限")
+            for item in unsafe["hard_blockers"]
+        ))
 
     def test_all_niuone_profiles_require_the_strong_industry_leader(self):
         for strategy_id in ("niu_leader", "niu_pullback", "niu_emerging"):
@@ -839,6 +1953,17 @@ class NiuOneStrategyTests(unittest.TestCase):
             executed = trader.execute_actions(state, decision, [niu_candidate()], True, "连续竞价交易时段", market)
 
             self.assertEqual(len(executed), 1)
+            action = decision["actions"][0]
+            self.assertEqual(action["model_requested_shares"], 2400)
+            self.assertEqual(action["maximum_permitted_shares"], 2400)
+            self.assertEqual(action["risk_ceiling_utilization_pct"], 100.0)
+            self.assertFalse(action["risk_ceiling_auto_reduced"])
+            self.assertIn(
+                "single_name_risk",
+                action["risk_ceiling_binding_constraints"],
+            )
+            self.assertEqual(executed[0]["maximum_permitted_shares"], 2400)
+            self.assertFalse(executed[0]["risk_ceiling_auto_reduced"])
             pos = state["positions"]["600000"]
             self.assertEqual(pos["entry_stop_source"], "niu_structure_low")
             self.assertEqual(pos["entry_atr"], 0.3)
@@ -847,14 +1972,398 @@ class NiuOneStrategyTests(unittest.TestCase):
             self.assertEqual(pos["mainline_state"], "mainline")
             self.assertEqual(pos["stock_role"], "leader")
             self.assertEqual(pos["risk_budget_regime"], "offensive")
+            self.assertEqual(pos["entry_market_regime"], "offensive")
             self.assertGreater(pos["position_open_risk_pct"], 1.4)
             self.assertLessEqual(pos["position_open_risk_pct"], 1.5)
 
-            blocked_state = {"cash": 100000.0, "positions": {}, "trade_log": []}
-            blocked_decision = {"actions": [{"action": "BUY", "code": "600000", "shares": 2500, "reason": "牛牛领航确认"}]}
-            blocked = trader.execute_actions(blocked_state, blocked_decision, [niu_candidate()], True, "连续竞价交易时段", market)
+            reduced_state = {"cash": 100000.0, "positions": {}, "trade_log": []}
+            reduced_decision = {"actions": [{"action": "BUY", "code": "600000", "shares": 2500, "reason": "牛牛领航确认"}]}
+            reduced = trader.execute_actions(reduced_state, reduced_decision, [niu_candidate()], True, "连续竞价交易时段", market)
+            self.assertEqual(len(reduced), 1)
+            reduced_action = reduced_decision["actions"][0]
+            self.assertEqual(reduced_action["shares"], 2400)
+            self.assertEqual(reduced_action["model_requested_shares"], 2500)
+            self.assertEqual(reduced_action["maximum_permitted_shares"], 2400)
+            self.assertEqual(
+                reduced_action["risk_ceiling_utilization_pct"],
+                100.0,
+            )
+            self.assertTrue(reduced_action["risk_ceiling_auto_reduced"])
+            self.assertEqual(reduced_state["positions"]["600000"]["qty"], 2400)
+            self.assertEqual(
+                reduced_state["positions"]["600000"][
+                    "entry_model_requested_shares"
+                ],
+                2500,
+            )
+            self.assertEqual(
+                reduced_state["positions"]["600000"][
+                    "entry_executed_shares"
+                ],
+                2400,
+            )
+            self.assertTrue(
+                reduced_state["positions"]["600000"][
+                    "entry_risk_ceiling_auto_reduced"
+                ]
+            )
+            self.assertEqual(reduced[0]["shares"], 2400)
+            self.assertEqual(reduced[0]["model_requested_shares"], 2500)
+            self.assertTrue(reduced[0]["risk_ceiling_auto_reduced"])
+            self.assertEqual(reduced_decision["execution_blocks"], [])
+        finally:
+            trader.is_a_share_execution_time = original_time
+            trader.execution_quote = original_quote
+
+    def test_execution_allows_defensive_niuone_opening_with_reduced_budget(self):
+        original_time = trader.is_a_share_execution_time
+        original_quote = trader.execution_quote
+        try:
+            trader.is_a_share_execution_time = lambda dt=None: (
+                True,
+                "连续竞价交易时段",
+            )
+            trader.execution_quote = lambda code: {
+                "price": 10.0,
+                "name": "防守开仓测试",
+                "source": "test",
+            }
+            budget = niuone_risk_budget("defensive", "niu_leader")
+            candidate = niu_candidate(
+                market_regime="defensive",
+                stop_price=9.6,
+                stop_distance_pct=4.0,
+                effective_loss_distance_pct=5.2,
+                per_trade_risk_budget_pct=budget["per_trade_risk_pct"],
+                max_open_risk_pct=budget["max_open_risk_pct"],
+                max_sector_risk_pct=budget["max_sector_risk_pct"],
+                max_total_position_pct=budget["max_total_position_pct"],
+                max_sector_position_pct=budget["max_sector_position_pct"],
+                max_position_pct_by_risk=5.76,
+            )
+            state = {"cash": 100000.0, "positions": {}, "trade_log": []}
+            decision = {"actions": [{
+                "action": "BUY",
+                "code": "600000",
+                "shares": 100,
+                "reason": "牛牛领涨防守轻仓",
+            }]}
+            market = {
+                "allow_new_buys": True,
+                "max_open_positions": 2,
+                "max_new_buys_per_decision": 1,
+                "max_total_position_pct": 35,
+                "min_cash_reserve_pct": 60,
+            }
+
+            executed = trader.execute_actions(
+                state,
+                decision,
+                [candidate],
+                True,
+                "连续竞价交易时段",
+                market,
+            )
+
+            self.assertEqual(len(executed), 1)
+            self.assertEqual(
+                state["positions"]["600000"]["entry_market_regime"],
+                "defensive",
+            )
+            self.assertLessEqual(
+                state["positions"]["600000"]["position_open_risk_pct"],
+                0.30,
+            )
+        finally:
+            trader.is_a_share_execution_time = original_time
+            trader.execution_quote = original_quote
+
+    def test_markup_momentum_probe_execution_accepts_wide_stop_but_caps_position(self):
+        original_time = trader.is_a_share_execution_time
+        original_quote = trader.execution_quote
+        try:
+            trader.is_a_share_execution_time = lambda dt=None: (
+                True,
+                "连续竞价交易时段",
+            )
+            trader.execution_quote = lambda code: {
+                "price": 38.81,
+                "prev_close": 38.0,
+                "name": "主升动量测试",
+                "source": "test",
+            }
+            market = {
+                "allow_new_buys": True,
+                "max_open_positions": 6,
+                "max_new_buys_per_decision": 2,
+                "max_total_position_pct": 80,
+                "min_cash_reserve_pct": 20,
+            }
+            candidate = niu_candidate(
+                best_strategy="niu_emerging",
+                best_score=8.0,
+                entry_threshold=8.0,
+                mainline_state="emerging",
+                sector_status="emerging",
+                mainline_cross_day_persistent=True,
+                mainline_confirmed=False,
+                niuone_lifecycle_stage="markup",
+                niuone_entry_subroute=(
+                    NIUONE_MARKUP_MOMENTUM_PROBE_SUBROUTE
+                ),
+                recent_close=38.0,
+                stop_price=32.08,
+                stop_distance_pct=17.35,
+                atr=2.5,
+                atr20=2.5,
+                entry_extension_atr=3.02,
+                change_pct=10.01,
+                volume_ratio=1.0,
+                gap_buffer_pct=1.0,
+                effective_loss_distance_pct=18.55,
+                risk_ok=True,
+            )
+            state = {
+                "cash": 1_000_000.0,
+                "positions": {},
+                "trade_log": [],
+            }
+            decision = {"actions": [{
+                "action": "BUY",
+                "code": "600000",
+                "shares": 2000,
+                "reason": "主升动量试仓",
+            }]}
+
+            executed = trader.execute_actions(
+                state,
+                decision,
+                [candidate],
+                True,
+                "连续竞价交易时段",
+                market,
+            )
+
+            self.assertEqual(len(executed), 1)
+            action = decision["actions"][0]
+            self.assertLess(action["shares"], 2000)
+            self.assertTrue(action["risk_ceiling_auto_reduced"])
+            self.assertLessEqual(action["position_after_trade_pct"], 4.0)
+            self.assertEqual(
+                action["niuone_entry_subroute"],
+                NIUONE_MARKUP_MOMENTUM_PROBE_SUBROUTE,
+            )
+            self.assertEqual(
+                state["positions"]["600000"]["absolute_position_cap_pct"],
+                4.0,
+            )
+            self.assertEqual(
+                state["positions"]["600000"]["niuone_entry_subroute"],
+                NIUONE_MARKUP_MOMENTUM_PROBE_SUBROUTE,
+            )
+
+            trader.execution_quote = lambda code: {
+                "price": 41.0,
+                "prev_close": 38.0,
+                "name": "主升动量测试",
+                "source": "test",
+            }
+            blocked_state = {
+                "cash": 1_000_000.0,
+                "positions": {},
+                "trade_log": [],
+            }
+            blocked_decision = {"actions": [{
+                "action": "BUY",
+                "code": "600000",
+                "shares": 100,
+                "reason": "主升动量试仓",
+            }]}
+            blocked = trader.execute_actions(
+                blocked_state,
+                blocked_decision,
+                [candidate],
+                True,
+                "连续竞价交易时段",
+                market,
+            )
             self.assertEqual(blocked, [])
-            self.assertIn("风险预算动态上限", blocked_decision["execution_blocked_reason"])
+            self.assertTrue(any(
+                f"超过{NIUONE_MARKUP_MOMENTUM_PROBE_MAX_EXECUTION_GAP_PCT:g}%"
+                in item["reason"]
+                for item in blocked_decision["execution_blocks"]
+            ))
+        finally:
+            trader.is_a_share_execution_time = original_time
+            trader.execution_quote = original_quote
+
+    def test_dynamic_risk_order_ceiling_accounts_for_fee_reserve_and_lots(self):
+        ceiling = trader.dynamic_risk_order_ceiling(
+            price=10.0,
+            total_equity=100000.0,
+            cash=100000.0,
+            current_position_value=0.0,
+            current_market_value=0.0,
+            other_industry_value=0.0,
+            dynamic_position_cap_pct=100.0,
+            total_position_cap_pct=100.0,
+            sector_position_cap_pct=100.0,
+            effective_loss_distance_pct_value=5.0,
+            max_open_risk_pct=5.0,
+            existing_open_risk_pct=0.0,
+            max_sector_risk_pct=5.0,
+            existing_sector_risk_pct=0.0,
+            required_cash_pct=20.0,
+        )
+
+        self.assertEqual(ceiling["maximum_permitted_shares"], 7900)
+        self.assertEqual(ceiling["maximum_permitted_gross"], 79000.0)
+        self.assertIn(
+            "cash_reserve_after_fees",
+            ceiling["binding_constraints"],
+        )
+
+    def test_execution_records_niuone_entry_gap_without_blocking_the_trade(self):
+        original_time = trader.is_a_share_execution_time
+        original_quote = trader.execution_quote
+        try:
+            trader.is_a_share_execution_time = lambda dt=None: (
+                True,
+                "连续竞价交易时段",
+            )
+            trader.execution_quote = lambda code: {
+                "price": 10.1,
+                "prev_close": 10.0,
+                "name": "牛牛反转测试",
+                "source": "test",
+            }
+            market = {
+                "allow_new_buys": True,
+                "max_open_positions": 6,
+                "max_new_buys_per_decision": 2,
+                "max_total_position_pct": 80,
+                "min_cash_reserve_pct": 20,
+            }
+            state = {"cash": 100000.0, "positions": {}, "trade_log": []}
+            decision = {"actions": [{
+                "action": "BUY",
+                "code": "600000",
+                "shares": 400,
+                "reason": "牛牛反转确认",
+            }]}
+            decision["_niuone_execution_context"] = {
+                "entry_signal_generated_at": "2026-08-03 09:25:10",
+                "entry_schedule_slot": "2026-08-03 09:25",
+                "entry_schedule_run_kind": "scheduled",
+                "entry_schedule_triggered_at": "2026-08-03 09:25:00",
+                "entry_execution_mode": "deferred",
+            }
+
+            executed = trader.execute_actions(
+                state,
+                decision,
+                [reversal_candidate(
+                    recent_close=10.0,
+                    mainline_score_change=2.5,
+                    mainline_state_streak=3,
+                    today_strength_score=42.0,
+                    selection_signal_score=9.0,
+                    selection_candidate_pool_size=5,
+                    selection_same_stage_candidate_count=4,
+                    selection_same_stage_candidate_rank=1,
+                    selection_same_stage_top_score_gap=0.2,
+                )],
+                True,
+                "连续竞价交易时段",
+                market,
+            )
+
+            self.assertEqual(len(executed), 1)
+            position = state["positions"]["600000"]
+            self.assertEqual(position["entry_execution_reference_price"], 10.0)
+            self.assertEqual(position["entry_execution_gap_pct"], 1.0)
+            self.assertEqual(position["entry_mainline_score_change"], 2.5)
+            self.assertEqual(position["entry_mainline_state_streak"], 3)
+            self.assertEqual(position["entry_today_strength_score"], 42.0)
+            self.assertEqual(position["niuone_lifecycle_stage"], "brewing")
+            self.assertEqual(position["niuone_lifecycle_label"], "主线酝酿")
+            self.assertEqual(position["mainline_peak_score"], 45.0)
+            self.assertEqual(position["mainline_peak_drawdown_points"], 0.0)
+            self.assertEqual(executed[0]["execution_gap_pct"], 1.0)
+            self.assertEqual(executed[0]["position_before_qty"], 0)
+            self.assertEqual(executed[0]["position_after_qty"], 400)
+            self.assertTrue(executed[0]["position_opened"])
+            self.assertEqual(decision["actions"][0]["execution_gap_pct"], 1.0)
+            expected_context = {
+                "entry_niuone_lifecycle_stage": "brewing",
+                "entry_niuone_lifecycle_label": "主线酝酿",
+                "entry_niuone_lifecycle_order": 10,
+                "entry_niuone_lifecycle_entry_policy": "probe_only",
+                "entry_mainline_state": "candidate",
+                "entry_mainline_score": 45.0,
+                "entry_mainline_score_change": 2.5,
+                "entry_mainline_state_streak": 3,
+                "entry_mainline_cross_day_persistent": False,
+                "entry_mainline_confirmed": False,
+                "entry_today_strength_score": 42.0,
+                "entry_strong_stock_count": 6,
+                "entry_effective_strong_count": 5.6,
+                "entry_stock_sector_rank": 95.0,
+                "entry_stock_strong": False,
+                "entry_stock_leader_tier": False,
+                "entry_daily_v_recovery_ratio": 0.7,
+                "entry_signal_score": 9.0,
+                "entry_candidate_pool_size": 5,
+                "entry_same_stage_candidate_count": 4,
+                "entry_same_stage_candidate_rank": 1,
+                "entry_same_stage_top_score_gap": 0.2,
+                "entry_execution_reference_price": 10.0,
+                "entry_execution_gap_pct": 1.0,
+                "entry_signal_generated_at": "2026-08-03 09:25:10",
+                "entry_schedule_slot": "2026-08-03 09:25",
+                "entry_schedule_run_kind": "scheduled",
+                "entry_schedule_triggered_at": "2026-08-03 09:25:00",
+                "entry_execution_mode": "deferred",
+                "entry_industry": "半导体",
+                "entry_model_requested_shares": 400,
+                "entry_executed_shares": 400,
+                "entry_maximum_permitted_shares": 600,
+                "entry_risk_ceiling_utilization_pct": 66.6667,
+                "entry_risk_ceiling_binding_constraints": [
+                    "single_name_risk"
+                ],
+                "entry_risk_ceiling_auto_reduced": False,
+            }
+            self.assertEqual(
+                executed[0]["niuone_entry_context"],
+                expected_context,
+            )
+            self.assertEqual(
+                decision["actions"][0]["niuone_entry_context"],
+                expected_context,
+            )
+
+            position["buy_date_lots"] = {"2026-07-31": 400}
+            sell_decision = {"actions": [{
+                "action": "SELL",
+                "code": "600000",
+                "shares": 400,
+                "reason": "牛牛主线衰落退出",
+            }]}
+            sold = trader.execute_actions(
+                state,
+                sell_decision,
+                [],
+                True,
+                "连续竞价交易时段",
+                market,
+            )
+
+            self.assertEqual(len(sold), 1)
+            self.assertTrue(sold[0]["position_fully_closed"])
+            self.assertEqual(sold[0]["position_before_qty"], 400)
+            self.assertEqual(sold[0]["position_after_qty"], 0)
+            self.assertEqual(sold[0]["niuone_entry_context"], expected_context)
         finally:
             trader.is_a_share_execution_time = original_time
             trader.execution_quote = original_quote
@@ -1023,12 +2532,12 @@ class NiuOneStrategyTests(unittest.TestCase):
             trader.is_a_share_execution_time = original_time
             trader.execution_quote = original_quote
 
-    def test_niuone_emerging_position_adds_only_after_confirmed_upgrade(self):
+    def test_niuone_emerging_position_adds_in_two_markup_tiers(self):
         original_time = trader.is_a_share_execution_time
         original_quote = trader.execution_quote
         try:
             trader.is_a_share_execution_time = lambda dt=None: (True, "连续竞价交易时段")
-            trader.execution_quote = lambda code: {"price": 10.0, "name": "牛牛启动", "source": "test"}
+            trader.execution_quote = lambda code: {"price": 10.2, "name": "牛牛启动", "source": "test"}
             market = {
                 "allow_new_buys": True,
                 "max_open_positions": 6,
@@ -1052,29 +2561,68 @@ class NiuOneStrategyTests(unittest.TestCase):
                 "buy_date_lots": {"2000-01-01": 100},
             }
 
-            blocked_state = {"cash": 99000.0, "positions": {"600000": dict(original_position)}, "trade_log": []}
-            blocked_decision = {
+            early_state = {"cash": 99000.0, "positions": {"600000": dict(original_position)}, "trade_log": []}
+            early_decision = {
                 "actions": [{"action": "BUY", "code": "600000", "shares": 100, "reason": "启动主题延续"}]
             }
-            blocked_candidate = niu_candidate(
+            early_candidate = niu_candidate(
                 best_strategy="niu_emerging",
                 mainline_state="emerging",
                 sector_status="emerging",
+                mainline_cross_day_persistent=True,
                 mainline_confirmed=False,
+                niuone_lifecycle_stage="markup",
             )
 
-            blocked = trader.execute_actions(
-                blocked_state,
-                blocked_decision,
-                [blocked_candidate],
+            early_added = trader.execute_actions(
+                early_state,
+                early_decision,
+                [early_candidate],
                 True,
                 "连续竞价交易时段",
                 market,
             )
 
-            self.assertEqual(blocked, [])
-            self.assertEqual(blocked_state["positions"]["600000"]["qty"], 100)
-            self.assertIn("升级为确认主线前禁止加仓", blocked_decision["execution_blocked_reason"])
+            self.assertEqual(len(early_added), 1)
+            early_position = early_state["positions"]["600000"]
+            self.assertEqual(early_position["qty"], 200)
+            self.assertEqual(
+                early_position["absolute_position_cap_pct"],
+                NIUONE_MARKUP_EARLY_UPGRADE_POSITION_CAP_PCT,
+            )
+            self.assertIs(
+                early_position["niuone_markup_early_scale_in_done"],
+                True,
+            )
+            self.assertEqual(
+                early_position["niuone_markup_scale_in_tier"],
+                "early",
+            )
+            self.assertEqual(
+                early_position["niuone_markup_scale_in_max_pnl_pct"],
+                NIUONE_MARKUP_UPGRADE_MAX_PNL_PCT,
+            )
+
+            repeated_early_decision = {
+                "actions": [{
+                    "action": "BUY",
+                    "code": "600000",
+                    "shares": 100,
+                    "reason": "启动主题重复加仓",
+                }],
+            }
+            self.assertEqual(trader.execute_actions(
+                early_state,
+                repeated_early_decision,
+                [early_candidate],
+                True,
+                "连续竞价交易时段",
+                market,
+            ), [])
+            self.assertEqual(
+                early_state["positions"]["600000"]["qty"],
+                200,
+            )
 
             upgraded_state = {"cash": 99000.0, "positions": {"600000": dict(original_position)}, "trade_log": []}
             upgraded_decision = {
@@ -1084,7 +2632,12 @@ class NiuOneStrategyTests(unittest.TestCase):
                 best_strategy="niu_leader",
                 mainline_state="mainline",
                 sector_status="mainline",
+                mainline_score=77.9,
                 mainline_confirmed=True,
+                niuone_lifecycle_stage="markup",
+                stop_price=9.6,
+                atr=0.5,
+                atr20=0.5,
             )
 
             upgraded = trader.execute_actions(
@@ -1103,6 +2656,142 @@ class NiuOneStrategyTests(unittest.TestCase):
             self.assertEqual(position["buy_strategy"], "niu_leader")
             self.assertEqual(position["strategy_mark"]["strategy_id"], "niu_leader")
             self.assertEqual(position["strategy_mark"]["source"], "BUY_UPGRADE")
+            self.assertEqual(
+                position["absolute_position_cap_pct"],
+                NIUONE_MARKUP_UPGRADE_POSITION_CAP_PCT,
+            )
+            self.assertEqual(position["niuone_markup_scale_in_count"], 1)
+            self.assertGreaterEqual(
+                position["niuone_markup_scale_in_signal_pnl_pct"],
+                NIUONE_MARKUP_UPGRADE_MIN_PNL_PCT,
+            )
+
+            divergence_decision = {
+                "actions": [{
+                    "action": "BUY",
+                    "code": "600000",
+                    "shares": 100,
+                    "reason": "分歧阶段继续加仓",
+                }],
+            }
+            divergence_candidate = niu_candidate(
+                best_strategy="niu_leader",
+                mainline_state="mainline",
+                sector_status="mainline",
+                mainline_score=77.9,
+                mainline_confirmed=True,
+                niuone_lifecycle_stage="divergence",
+            )
+            self.assertEqual(trader.execute_actions(
+                upgraded_state,
+                divergence_decision,
+                [divergence_candidate],
+                True,
+                "连续竞价交易时段",
+                market,
+            ), [])
+            self.assertIn(
+                "只在主升阶段加仓",
+                divergence_decision["execution_blocked_reason"],
+            )
+        finally:
+            trader.is_a_share_execution_time = original_time
+            trader.execution_quote = original_quote
+
+    def test_niuone_markup_rebalance_can_readd_after_each_new_wave(self):
+        original_time = trader.is_a_share_execution_time
+        original_quote = trader.execution_quote
+        try:
+            trader.is_a_share_execution_time = lambda dt=None: (
+                True,
+                "连续竞价交易时段",
+            )
+            trader.execution_quote = lambda code: {
+                "price": 10.6,
+                "name": "牛牛领涨",
+                "source": "test",
+            }
+            market = {
+                "allow_new_buys": True,
+                "max_open_positions": 6,
+                "max_new_buys_per_decision": 2,
+                "max_total_position_pct": 80,
+                "min_cash_reserve_pct": 20,
+            }
+            position = {
+                "code": "600000",
+                "name": "牛牛领涨",
+                "qty": 100,
+                "avg_cost": 10.0,
+                "last_price": 10.6,
+                "buy_strategy": "niu_leader",
+                "strategy_mark": {"strategy_id": "niu_leader"},
+                "industry": "半导体",
+                "entry_reason": "确认主线领涨",
+                "entry_stop_price": 9.5,
+                "entry_market_regime": "offensive",
+                "gap_buffer_pct": 1.0,
+                "execution_buffer_pct": 0.2,
+                "buy_date_lots": {"2000-01-01": 100},
+                "niuone_markup_confirmed_scale_in_done": True,
+                "niuone_markup_rebalance_armed": True,
+                "niuone_markup_rebalance_reduced": True,
+                "niuone_markup_rebalance_reentry_price": 10.5,
+            }
+            state = {
+                "cash": 99000.0,
+                "positions": {"600000": position},
+                "trade_log": [],
+            }
+            candidate = niu_candidate(
+                best_strategy="niu_leader",
+                mainline_state="mainline",
+                sector_status="mainline",
+                mainline_score=77.9,
+                mainline_confirmed=True,
+                niuone_lifecycle_stage="markup",
+                stop_price=9.6,
+                atr=0.5,
+                atr20=0.5,
+            )
+
+            for expected_count in (1, 2):
+                decision = {
+                    "actions": [{
+                        "action": "BUY",
+                        "code": "600000",
+                        "shares": 100,
+                        "reason": "波段回落后重新转强",
+                    }],
+                }
+                executed = trader.execute_actions(
+                    state,
+                    decision,
+                    [candidate],
+                    True,
+                    "连续竞价交易时段",
+                    market,
+                )
+                self.assertEqual(
+                    len(executed),
+                    1,
+                    decision.get("execution_blocked_reason"),
+                )
+                position = state["positions"]["600000"]
+                self.assertEqual(
+                    position["niuone_markup_rebalance_reentry_count"],
+                    expected_count,
+                )
+                self.assertIs(
+                    position["niuone_markup_rebalance_armed"],
+                    False,
+                )
+                if expected_count == 1:
+                    position.update({
+                        "niuone_markup_rebalance_armed": True,
+                        "niuone_markup_rebalance_reduced": True,
+                        "niuone_markup_rebalance_reentry_price": 10.5,
+                    })
         finally:
             trader.is_a_share_execution_time = original_time
             trader.execution_quote = original_quote
@@ -1137,8 +2826,9 @@ class NiuOneStrategyTests(unittest.TestCase):
             self.assertEqual(len(first), 1)
             position = state["positions"]["600000"]
             self.assertEqual(position["buy_strategy"], "niu_reversal_probe")
-            self.assertEqual(position["entry_stop_source"], "niu_reversal_low")
-            self.assertEqual(position["absolute_position_cap_pct"], 5.0)
+            self.assertEqual(position["reversal_basis"], "daily_v")
+            self.assertEqual(position["entry_stop_source"], "niu_reversal_right_low")
+            self.assertEqual(position["absolute_position_cap_pct"], 6.25)
             self.assertEqual(position["per_trade_risk_budget_pct"], 0.35)
 
             add_decision = {
@@ -1155,17 +2845,17 @@ class NiuOneStrategyTests(unittest.TestCase):
 
             self.assertEqual(added, [])
             self.assertEqual(state["positions"]["600000"]["qty"], 100)
-            self.assertIn("当日禁止加仓", add_decision["execution_blocked_reason"])
+            self.assertIn("当日只建立一次轻仓", add_decision["execution_blocked_reason"])
         finally:
             trader.is_a_share_execution_time = original_time
             trader.execution_quote = original_quote
 
-    def test_reversal_probe_can_upgrade_to_cross_day_emerging(self):
+    def test_reversal_probe_does_not_chase_above_markup_profit_window(self):
         original_time = trader.is_a_share_execution_time
         original_quote = trader.execution_quote
         try:
             trader.is_a_share_execution_time = lambda dt=None: (True, "连续竞价交易时段")
-            trader.execution_quote = lambda code: {"price": 10.0, "name": "牛牛反转", "source": "test"}
+            trader.execution_quote = lambda code: {"price": 11.3, "name": "牛牛反转", "source": "test"}
             market = {
                 "allow_new_buys": True,
                 "max_open_positions": 6,
@@ -1185,6 +2875,8 @@ class NiuOneStrategyTests(unittest.TestCase):
                 "entry_reason": "V形反转双确认",
                 "entry_stop_price": 9.7,
                 "entry_stop_source": "niu_reversal_low",
+                "entry_market_regime": "offensive",
+                "risk_budget_regime": "offensive",
                 "gap_buffer_pct": 1.0,
                 "execution_buffer_pct": 0.2,
                 "buy_date_lots": {"2000-01-01": 100},
@@ -1195,10 +2887,12 @@ class NiuOneStrategyTests(unittest.TestCase):
             }
             candidate = niu_candidate(
                 best_strategy="niu_emerging",
+                market_regime="rotation",
                 mainline_state="emerging",
                 sector_status="emerging",
                 mainline_cross_day_persistent=True,
                 mainline_confirmed=False,
+                niuone_lifecycle_stage="markup",
             )
 
             upgraded = trader.execute_actions(
@@ -1210,12 +2904,17 @@ class NiuOneStrategyTests(unittest.TestCase):
                 market,
             )
 
-            self.assertEqual(len(upgraded), 1)
+            self.assertEqual(upgraded, [])
             position = state["positions"]["600000"]
-            self.assertEqual(position["qty"], 200)
-            self.assertEqual(position["initial_buy_strategy"], "niu_reversal_probe")
-            self.assertEqual(position["buy_strategy"], "niu_emerging")
-            self.assertEqual(position["strategy_mark"]["source"], "BUY_UPGRADE")
+            self.assertEqual(position["qty"], 100)
+            self.assertNotIn("initial_buy_strategy", position)
+            self.assertEqual(position["buy_strategy"], "niu_reversal_probe")
+            self.assertIn(
+                f"≤{NIUONE_MARKUP_UPGRADE_MAX_PNL_PCT:g}%",
+                decision["execution_blocked_reason"],
+            )
+            self.assertEqual(position["entry_market_regime"], "offensive")
+            self.assertEqual(position["risk_budget_regime"], "offensive")
         finally:
             trader.is_a_share_execution_time = original_time
             trader.execution_quote = original_quote
@@ -1240,6 +2939,21 @@ class NiuOneStrategyTests(unittest.TestCase):
             "600001",
             "ST测试",
             {"price": 10.5, "prev_close": 10.0, "change_pct": 5.0},
+        ))
+        self.assertFalse(trader.quote_is_at_limit_up(
+            "600000",
+            "主板接近涨停",
+            {"price": 10.99, "prev_close": 10.0, "change_pct": 9.9},
+        ))
+        self.assertFalse(trader.quote_is_at_limit_up(
+            "600000",
+            "主板四舍五入前一档",
+            {"price": 11.02, "prev_close": 10.03, "change_pct": 9.87},
+        ))
+        self.assertTrue(trader.quote_is_at_limit_up(
+            "600000",
+            "主板四舍五入涨停",
+            {"price": 11.03, "prev_close": 10.03, "change_pct": 9.97},
         ))
 
     def test_niuone_execution_blocks_chinext_when_configured_universe_is_main_board(self):
@@ -1315,6 +3029,121 @@ class NiuOneStrategyTests(unittest.TestCase):
         signal = trader.evaluate_sell_signal("600000", state["positions"]["600000"], "2026-07-16", time_exit_allowed=False)
         self.assertEqual(signal["signal"], "niu_mainline_faded")
 
+    def test_mainline_context_records_peak_and_current_drawdown(self):
+        state = {
+            "positions": {
+                "600000": {
+                    "code": "600000",
+                    "name": "牛牛测试",
+                    "qty": 400,
+                    "avg_cost": 10.0,
+                    "buy_strategy": "niu_reversal_probe",
+                    "industry": "半导体",
+                    "mainline_peak_score": 80.0,
+                }
+            }
+        }
+
+        def payload(day: str, score: float) -> dict:
+            return {
+                "generated_at": f"{day} 14:30:00",
+                "niuone_context": {
+                    "market": {
+                        "state": "rotation",
+                        "score": 70,
+                        "hard_stop": False,
+                        "allow_new_buys": True,
+                    },
+                    "themes": {
+                        "半导体": {
+                            "score": score,
+                            "state": "emerging",
+                            "raw_state": "emerging",
+                            "niuone_lifecycle_stage": "divergence",
+                            "niuone_lifecycle_label": "主线分歧",
+                            "niuone_lifecycle_order": 40,
+                            "niuone_lifecycle_entry_policy": (
+                                "selective_repair_reclaim_or_reduce"
+                            ),
+                        }
+                    },
+                    "stocks": {
+                        "600000": {
+                            "industry": "半导体",
+                            "theme_rank": 80,
+                        }
+                    },
+                },
+            }
+
+        trader.sync_niuone_position_context(
+            state,
+            payload("2026-07-15", 74.0),
+        )
+        position = state["positions"]["600000"]
+        self.assertEqual(position["mainline_peak_score"], 80.0)
+        self.assertEqual(position["mainline_peak_drawdown_points"], 6.0)
+        self.assertEqual(position["niuone_lifecycle_stage"], "divergence")
+        self.assertEqual(position["niuone_lifecycle_label"], "主线分歧")
+
+        trader.sync_niuone_position_context(
+            state,
+            payload("2026-07-16", 82.0),
+        )
+        self.assertEqual(position["mainline_peak_score"], 82.0)
+        self.assertEqual(position["mainline_peak_drawdown_points"], 0.0)
+
+    def test_holding_lifecycle_path_records_transitions_and_exit_stage(self):
+        position = {
+            "buy_strategy": "niu_reversal_probe",
+            "mainline_state": "candidate",
+            "mainline_score": 64.0,
+            "niuone_lifecycle_stage": "brewing",
+        }
+        self.assertTrue(trader.record_niuone_lifecycle_observation(
+            position,
+            observed_at="2026-07-14 09:25:01",
+            source="entry_signal",
+            complete_from_entry=True,
+        ))
+        position.update({
+            "mainline_state": "emerging",
+            "mainline_score": 72.0,
+            "niuone_lifecycle_stage": "markup",
+        })
+        self.assertTrue(trader.record_niuone_lifecycle_observation(
+            position,
+            observed_at="2026-07-15 10:00:00",
+            source="mainline_scan",
+        ))
+        position.update({
+            "mainline_state": "diverging",
+            "mainline_score": 68.0,
+            "niuone_lifecycle_stage": "divergence",
+        })
+        evidence = trader.niuone_lifecycle_exit_evidence_from_position(
+            position,
+            observed_at="2026-07-16 14:45:00",
+        )
+
+        self.assertTrue(evidence["path_complete_from_entry"])
+        self.assertEqual(
+            evidence["stage_sequence"],
+            ["brewing", "markup", "divergence"],
+        )
+        self.assertEqual(evidence["transition_count"], 2)
+        self.assertEqual(
+            evidence["exit_niuone_lifecycle_stage"],
+            "divergence",
+        )
+        self.assertTrue(evidence["reached_markup"])
+        self.assertTrue(evidence["reached_divergence"])
+        self.assertFalse(evidence["reached_climax"])
+        self.assertEqual(
+            evidence["path"][1]["label"],
+            "主线主升",
+        )
+
     def test_lost_leader_status_requires_two_observed_trading_days_before_exit(self):
         state = {
             "positions": {
@@ -1378,7 +3207,76 @@ class NiuOneStrategyTests(unittest.TestCase):
         self.assertEqual(signal["signal"], "niu_leader_lost")
         self.assertIn("连续2个交易日跌出强势行业龙头梯队", signal["reason"])
 
-    def test_niuone_uses_two_r_and_independent_risk_budget(self):
+    def test_climax_runner_delays_relative_rank_exit_and_uses_wider_trail(self):
+        pos = {
+            "qty": 600,
+            "avg_cost": 10.0,
+            "last_price": 10.6,
+            "close": 10.6,
+            "highest_price": 12.0,
+            "buy_strategy": "niu_leader",
+            "industry": "被动元件",
+            "entry_stop_price": 9.0,
+            "entry_stop_source": "niu_structure_low",
+            "mainline_score": 70.0,
+            "mainline_state": "diverging",
+            "mainline_weak_count": 0,
+            "stock_leader_rank": 12,
+            "stock_leader_tier": False,
+            "stock_strong": True,
+            "niu_leader_lost_count": 2,
+            "niuone_lifecycle_stage": "divergence",
+            "niuone_lifecycle_climax_partial_done": True,
+            "partial_tp_done": True,
+            "atr20": 0.5,
+            "buy_date_lots": {"2026-07-10": 600},
+        }
+
+        self.assertTrue(NIUONE_CLIMAX_RUNNER_ENABLED)
+        self.assertEqual(
+            NIUONE_CLIMAX_RUNNER_LEADER_LOSS_CONFIRMATIONS,
+            3,
+        )
+        self.assertEqual(NIUONE_CLIMAX_RUNNER_TRAILING_ATR, 3.0)
+        self.assertIsNone(trader.evaluate_sell_signal(
+            "600000",
+            pos,
+            "2026-07-16",
+            time_exit_allowed=False,
+        ))
+        self.assertEqual(pos["niu_trailing_stop"], 10.5)
+
+        missing_theme_context = {
+            **pos,
+            "mainline_state": "",
+            "niu_leader_lost_count": 2,
+        }
+        fail_closed = trader.evaluate_sell_signal(
+            "600000",
+            missing_theme_context,
+            "2026-07-16",
+            time_exit_allowed=False,
+        )
+        self.assertEqual(fail_closed["signal"], "niu_leader_lost")
+        self.assertIn("连续2个交易日", fail_closed["reason"])
+
+        pos["niu_leader_lost_count"] = 3
+        signal = trader.evaluate_sell_signal(
+            "600000",
+            pos,
+            "2026-07-17",
+            time_exit_allowed=False,
+        )
+
+        self.assertEqual(signal["signal"], "niu_leader_lost")
+        self.assertIn("连续3个交易日", signal["reason"])
+        self.assertIn("高潮减仓后余仓", signal["reason"])
+
+    def test_niuone_uses_one_r_partial_and_independent_risk_budget(self):
+        self.assertEqual(
+            NIUONE_ABSOLUTE_POSITION_CAP_PCT["niu_reversal_probe"],
+            6.25,
+        )
         self.assertEqual(niuone_risk_budget("offensive")["per_trade_risk_pct"], 1.5)
         self.assertEqual(
             niuone_risk_budget("offensive", "niu_reversal_probe")["per_trade_risk_pct"],
@@ -1390,16 +3288,21 @@ class NiuOneStrategyTests(unittest.TestCase):
         )
         self.assertEqual(
             niuone_structural_stop_limits("offensive", "niu_reversal_probe"),
-            {"max_stop_distance_pct": 4.0, "max_stop_atr": 1.2},
+            {"max_stop_distance_pct": 6.0, "max_stop_atr": 2.0},
         )
         self.assertEqual(niuone_risk_budget("offensive")["max_total_position_pct"], 70.0)
         self.assertEqual(niuone_risk_budget("rotation")["max_total_position_pct"], 55.0)
-        self.assertEqual(niuone_risk_budget("defensive")["max_open_risk_pct"], 0.0)
+        self.assertEqual(niuone_risk_budget("defensive")["per_trade_risk_pct"], 0.30)
+        self.assertEqual(niuone_risk_budget("defensive")["max_open_risk_pct"], 0.90)
+        self.assertEqual(
+            niuone_risk_budget("defensive", "niu_reversal_probe")["per_trade_risk_pct"],
+            0.15,
+        )
         pos = {
             "qty": 400,
             "avg_cost": 10.0,
-            "last_price": 12.0,
-            "close": 12.0,
+            "last_price": 11.0,
+            "close": 11.0,
             "buy_strategy": "niu_leader",
             "entry_stop_price": 9.0,
             "entry_stop_source": "niu_structure_low",
@@ -1411,8 +3314,286 @@ class NiuOneStrategyTests(unittest.TestCase):
 
         signal = trader.evaluate_sell_signal("600000", pos, "2026-07-16", time_exit_allowed=False)
 
-        self.assertEqual(signal["signal"], "niu_2r_partial")
-        self.assertEqual(signal["sell_ratio"], 0.5)
+        self.assertEqual(NIUONE_PARTIAL_TAKE_PROFIT_R, 1.0)
+        self.assertEqual(signal["signal"], "niu_r_partial")
+        self.assertEqual(signal["sell_ratio"], 0.45)
+
+    def test_niuone_climax_reduces_one_third_only_once(self):
+        pos = {
+            "qty": 600,
+            "avg_cost": 10.0,
+            "last_price": 10.5,
+            "close": 10.5,
+            "buy_strategy": "niu_leader",
+            "entry_stop_price": 9.0,
+            "entry_stop_source": "niu_structure_low",
+            "mainline_score": 82,
+            "mainline_state": "mainline",
+            "mainline_weak_count": 0,
+            "niuone_lifecycle_stage": "climax",
+            "buy_date_lots": {"2026-07-15": 600},
+        }
+
+        signal = trader.evaluate_sell_signal(
+            "600000",
+            pos,
+            "2026-07-16",
+            time_exit_allowed=False,
+        )
+
+        self.assertEqual(signal["signal"], "niu_lifecycle_climax_partial")
+        self.assertEqual(
+            signal["sell_ratio"],
+            NIUONE_LIFECYCLE_CLIMAX_PARTIAL_RATIO,
+        )
+        pos["niuone_lifecycle_climax_partial_done"] = True
+        self.assertIsNone(trader.evaluate_sell_signal(
+            "600000",
+            pos,
+            "2026-07-16",
+            time_exit_allowed=False,
+        ))
+
+    def test_niuone_markup_pullback_reduces_before_waiting_to_readd(self):
+        pos = {
+            "qty": 600,
+            "avg_cost": 10.0,
+            "last_price": 11.0,
+            "close": 11.0,
+            "buy_strategy": "niu_leader",
+            "entry_stop_price": 9.0,
+            "entry_stop_source": "niu_structure_low",
+            "mainline_score": 70,
+            "mainline_state": "diverging",
+            "mainline_weak_count": 0,
+            "niu_leader_lost_count": 0,
+            "niuone_lifecycle_stage": "divergence",
+            "stock_leader_tier": True,
+            "stock_strong": True,
+            "atr20": 0.5,
+            "niuone_markup_rebalance_cycle_peak_price": 12.0,
+            "niuone_markup_rebalance_observation_count": 2,
+            "niuone_markup_rebalance_last_observation": "2026-07-15",
+            "buy_date_lots": {"2026-07-10": 600},
+        }
+
+        signal = trader.evaluate_sell_signal(
+            "600000",
+            pos,
+            "2026-07-16",
+            time_exit_allowed=True,
+        )
+
+        self.assertEqual(signal["signal"], "niu_markup_rebalance_partial")
+        self.assertEqual(
+            signal["sell_ratio"],
+            NIUONE_MARKUP_REBALANCE_TRIM_RATIO,
+        )
+        self.assertIn("释放波段仓位", signal["reason"])
+
+    def test_niuone_reversal_uses_regime_aware_early_profit_protection(self):
+        offensive = {
+            "qty": 400,
+            "avg_cost": 10.0,
+            "last_price": 10.75,
+            "close": 10.75,
+            "buy_strategy": "niu_reversal_probe",
+            "entry_stop_price": 9.0,
+            "entry_stop_source": "niu_reversal_right_low",
+            "entry_market_regime": "offensive",
+            "market_regime": "rotation",
+            "mainline_score": 70,
+            "mainline_state": "candidate",
+            "buy_date_lots": {"2026-07-15": 400},
+        }
+
+        early = trader.evaluate_sell_signal(
+            "600000", offensive, "2026-07-16", time_exit_allowed=False,
+        )
+
+        self.assertEqual(
+            NIUONE_REVERSAL_EARLY_PROTECTION_REGIMES,
+            frozenset({"offensive", "recovery", "defensive"}),
+        )
+        self.assertEqual(NIUONE_REVERSAL_EARLY_PARTIAL_TAKE_PROFIT_R, 0.75)
+        self.assertEqual(
+            NIUONE_REVERSAL_EARLY_PARTIAL_TAKE_PROFIT_RATIO, 0.5,
+        )
+        self.assertEqual(early["signal"], "niu_r_partial")
+        self.assertEqual(early["sell_ratio"], 0.5)
+        self.assertIn("0.75R", early["reason"])
+
+        rotation = {
+            **offensive,
+            "entry_market_regime": "rotation",
+            "market_regime": "offensive",
+            "partial_tp_done": False,
+        }
+        self.assertIsNone(trader.evaluate_sell_signal(
+            "600000", rotation, "2026-07-16", time_exit_allowed=False,
+        ))
+        rotation["last_price"] = 11.0
+        rotation["close"] = 11.0
+        normal = trader.evaluate_sell_signal(
+            "600000", rotation, "2026-07-16", time_exit_allowed=False,
+        )
+        self.assertEqual(normal["sell_ratio"], 0.45)
+        self.assertIn("1R", normal["reason"])
+
+    def test_niuone_intraday_exits_use_realtime_price_not_stale_daily_close(self):
+        position = {
+            "qty": 400,
+            "avg_cost": 10.0,
+            "last_price": 10.75,
+            "close": 10.2,
+            "buy_strategy": "niu_reversal_probe",
+            "entry_stop_price": 9.0,
+            "entry_stop_source": "niu_reversal_right_low",
+            "entry_market_regime": "offensive",
+            "mainline_score": 70,
+            "mainline_state": "candidate",
+            "buy_date_lots": {"2026-07-15": 400},
+        }
+
+        partial = trader.evaluate_sell_signal(
+            "600000", position, "2026-07-16", time_exit_allowed=False,
+        )
+
+        self.assertEqual(partial["signal"], "niu_r_partial")
+        self.assertIn("现价10.75", partial["reason"])
+        self.assertEqual(position["highest_price"], 10.75)
+
+        position.update({
+            "last_price": 10.9,
+            "close": 11.5,
+            "partial_tp_done": True,
+            "highest_price": 12.0,
+            "atr20": 0.5,
+        })
+        trailing = trader.evaluate_sell_signal(
+            "600000", position, "2026-07-16", time_exit_allowed=False,
+        )
+
+        self.assertEqual(trailing["signal"], "niu_atr_trail")
+        self.assertIn("现价10.90", trailing["reason"])
+
+    def test_niuone_context_sync_backfills_entry_regime_only_once(self):
+        state = {
+            "positions": {
+                "600000": {
+                    "code": "600000",
+                    "qty": 100,
+                    "avg_cost": 10.0,
+                    "last_price": 10.0,
+                    "buy_strategy": "niu_reversal_probe",
+                    "industry": "半导体",
+                    "risk_budget_regime": "offensive",
+                },
+            },
+        }
+
+        def payload(regime: str, day: str) -> dict:
+            return {
+                "generated_at": f"{day} 14:30:00",
+                "niuone_context": {
+                    "market": {
+                        "state": regime,
+                        "score": 70,
+                        "hard_stop": False,
+                        "allow_new_buys": True,
+                    },
+                    "themes": {
+                        "半导体": {
+                            "score": 70,
+                            "state": "candidate",
+                            "raw_state": "candidate",
+                        },
+                    },
+                    "stocks": {
+                        "600000": {
+                            "industry": "半导体",
+                            "theme_rank": 50,
+                        },
+                    },
+                },
+            }
+
+        trader.sync_niuone_position_context(
+            state, payload("rotation", "2026-07-16"),
+        )
+        position = state["positions"]["600000"]
+        self.assertEqual(position["entry_market_regime"], "offensive")
+        self.assertEqual(position["market_regime"], "rotation")
+
+        trader.sync_niuone_position_context(
+            state, payload("recovery", "2026-07-17"),
+        )
+        self.assertEqual(position["entry_market_regime"], "offensive")
+        self.assertEqual(position["market_regime"], "recovery")
+
+    def test_niuone_reversal_exits_after_one_observed_theme_failure(self):
+        state = {
+            "positions": {
+                "600000": {
+                    "code": "600000", "name": "牛牛反转", "qty": 400,
+                    "avg_cost": 10.0, "last_price": 10.1, "close": 10.1,
+                    "buy_strategy": "niu_reversal_probe", "industry": "半导体",
+                    "entry_stop_price": 9.5,
+                    "entry_stop_source": "niu_reversal_right_low",
+                    "buy_date_lots": {"2026-07-14": 400},
+                }
+            }
+        }
+        payload = {
+            "generated_at": "2026-07-16 14:30:00",
+            "niuone_context": {
+                "previous_trading_day": "2026-07-15",
+                "market": {
+                    "state": "rotation", "score": 55,
+                    "hard_stop": False, "allow_new_buys": True,
+                },
+                "themes": {
+                    "半导体": {"score": 50, "state": "fading", "raw_state": "fading"},
+                },
+                "stocks": {
+                    "600000": {"industry": "半导体", "theme_rank": 20},
+                },
+            },
+        }
+
+        trader.sync_niuone_position_context(state, payload)
+        signal = trader.evaluate_sell_signal(
+            "600000",
+            state["positions"]["600000"],
+            "2026-07-16",
+            time_exit_allowed=False,
+        )
+
+        self.assertEqual(signal["signal"], "niu_reversal_theme_failed")
+
+    def test_niuone_partial_profit_protects_runner_at_cost(self):
+        pos = {
+            "qty": 200,
+            "avg_cost": 10.0,
+            "last_price": 9.99,
+            "close": 9.99,
+            "buy_strategy": "niu_reversal_probe",
+            "entry_stop_price": 9.0,
+            "entry_stop_source": "niu_reversal_right_low",
+            "partial_tp_done": True,
+            "mainline_score": 80,
+            "mainline_state": "mainline",
+            "mainline_weak_count": 0,
+            "buy_date_lots": {"2026-07-15": 200},
+        }
+
+        signal = trader.evaluate_sell_signal(
+            "600000", pos, "2026-07-16", time_exit_allowed=False,
+        )
+
+        self.assertEqual(signal["signal"], "niu_structure_stop")
+        self.assertEqual(pos["entry_stop_price"], 10.0)
+        self.assertEqual(pos["entry_stop_source"], "niu_breakeven")
 
     def test_niuone_time_exit_counts_trading_days_across_a_weekend(self):
         pos = {
@@ -1484,6 +3665,44 @@ class NiuOneStrategyTests(unittest.TestCase):
         )
         self.assertEqual(tuesday["signal"], "niu_reversal_not_upgraded")
 
+    def test_daily_v_reversal_uses_three_day_no_progress_exit(self):
+        pos = {
+            "qty": 100,
+            "avg_cost": 10.0,
+            "last_price": 10.1,
+            "close": 10.1,
+            "buy_strategy": "niu_reversal_probe",
+            "reversal_basis": "daily_v",
+            "entry_stop_price": 9.5,
+            "entry_stop_source": "niu_reversal_right_low",
+            "mainline_score": 55,
+            "mainline_state": "candidate",
+            "buy_date_lots": {"2026-07-24": 100},
+        }
+
+        monday = trader.evaluate_sell_signal(
+            "600000",
+            pos,
+            "2026-07-27",
+            time_exit_allowed=True,
+        )
+        tuesday = trader.evaluate_sell_signal(
+            "600000",
+            pos,
+            "2026-07-28",
+            time_exit_allowed=True,
+        )
+        wednesday = trader.evaluate_sell_signal(
+            "600000",
+            pos,
+            "2026-07-29",
+            time_exit_allowed=True,
+        )
+
+        self.assertIsNone(monday)
+        self.assertIsNone(tuesday)
+        self.assertEqual(wednesday["signal"], "niu_reversal_no_progress")
+
     def test_niuone_hard_caps_total_open_positions_at_five(self):
         original_time = trader.is_a_share_execution_time
         original_quote = trader.execution_quote
@@ -1526,8 +3745,167 @@ class NiuOneStrategyTests(unittest.TestCase):
             trader.is_a_share_execution_time = original_time
             trader.execution_quote = original_quote
 
+    def test_niuone_daily_new_position_cap_persists_across_decision_cycles(self):
+        original_time = trader.is_a_share_execution_time
+        original_quote = trader.execution_quote
+        original_today_key = trader.today_key
+        original_now_ts = trader.now_ts
+        try:
+            trader.is_a_share_execution_time = lambda dt=None: (
+                True,
+                "连续竞价交易时段",
+            )
+            trader.execution_quote = lambda code: {
+                "price": 10.0,
+                "prev_close": 10.0,
+                "name": f"牛牛{code}",
+                "source": "test",
+            }
+            trader.today_key = lambda: "2026-07-24"
+            trader.now_ts = lambda: "2026-07-24 10:00:00"
+            market = {
+                "allow_new_buys": True,
+                "max_open_positions": 6,
+                "max_new_buys_per_decision": 2,
+                "max_total_position_pct": 80,
+                "min_cash_reserve_pct": 20,
+            }
+            state = {"cash": 100000.0, "positions": {}, "trade_log": []}
+
+            for index, code in enumerate(("600001", "600002"), start=1):
+                candidate = niu_candidate(
+                    code=code,
+                    industry=f"行业{index}",
+                    sector=f"行业{index}",
+                )
+                decision = {
+                    "actions": [{
+                        "action": "BUY",
+                        "code": code,
+                        "shares": 100,
+                        "reason": "牛牛领航确认",
+                    }]
+                }
+                executed = trader.execute_actions(
+                    state,
+                    decision,
+                    [candidate],
+                    True,
+                    "连续竞价交易时段",
+                    market,
+                )
+                self.assertEqual(len(executed), 1)
+                self.assertEqual(
+                    decision["actions"][0]
+                    ["niuone_daily_new_position_count_before"],
+                    index - 1,
+                )
+
+            third_candidate = niu_candidate(
+                code="600003",
+                industry="行业3",
+                sector="行业3",
+            )
+            third_decision = {
+                "actions": [{
+                    "action": "BUY",
+                    "code": "600003",
+                    "shares": 100,
+                    "reason": "牛牛领航确认",
+                }]
+            }
+            blocked = trader.execute_actions(
+                state,
+                third_decision,
+                [third_candidate],
+                True,
+                "连续竞价交易时段",
+                market,
+            )
+
+            self.assertEqual(blocked, [])
+            self.assertNotIn("600003", state["positions"])
+            self.assertEqual(len(state["trade_log"]), 2)
+            self.assertEqual(
+                third_decision["actions"][0]
+                ["niuone_daily_new_position_count_before"],
+                2,
+            )
+            self.assertEqual(
+                third_decision["actions"][0]
+                ["niuone_daily_new_position_limit"],
+                2,
+            )
+            self.assertIn(
+                "跨决策轮次累计",
+                third_decision["execution_blocked_reason"],
+            )
+            self.assertEqual(
+                third_decision["execution_blocks"][0]["category"],
+                "position_capacity",
+            )
+            self.assertEqual(
+                backtest_niuone_exits.NIUONE_MAX_NEW_POSITIONS_PER_SESSION,
+                NIUONE_MAX_NEW_POSITIONS_PER_TRADING_DAY,
+            )
+        finally:
+            trader.is_a_share_execution_time = original_time
+            trader.execution_quote = original_quote
+            trader.today_key = original_today_key
+            trader.now_ts = original_now_ts
+
+    def test_niuone_daily_opening_count_is_idempotent_and_excludes_adds(self):
+        opening = {
+            "time": "2026-07-24 10:00:00",
+            "action": "BUY",
+            "code": "600001",
+            "position_before_qty": 0,
+            "position_opened": True,
+            "buy_strategy": "niu_leader",
+        }
+        state = {
+            "trade_log": [
+                opening,
+                dict(opening),
+                {
+                    **opening,
+                    "time": "2026-07-24 10:30:00",
+                    "position_before_qty": 100,
+                    "position_opened": False,
+                },
+                {
+                    **opening,
+                    "code": "600002",
+                    "buy_strategy": "shaofu_b1",
+                },
+                {
+                    **opening,
+                    "time": "2026-07-23 10:00:00",
+                    "code": "600003",
+                },
+                {
+                    **opening,
+                    "code": "600004",
+                    "buy_strategy": "",
+                    "strategy_mark": {"strategy_id": "niu_pullback"},
+                },
+            ]
+        }
+
+        self.assertEqual(
+            trader.niuone_opened_position_codes_on_date(
+                state,
+                "2026-07-24",
+            ),
+            {"600001", "600004"},
+        )
+
     def test_mainline_detection_to_selection_buy_and_automatic_sell_runs_end_to_end(self):
         prepared = self._prepared_market()
+        for index, item in enumerate(
+            row for row in prepared if row["industry"] == "半导体"
+        ):
+            item["quote"]["change_pct"] = 4.0 - index * 0.5
         market_snapshot = {
             "up": 120,
             "down": 30,

@@ -42,6 +42,27 @@ LOG_PATH = LOG_DIR / "niuone_cron_scheduler.log"
 STATE_PATH = DASHBOARD_HOME / "cron" / "state" / "niuone_cron_scheduler.json"
 CN_TZ = ZoneInfo("Asia/Shanghai")
 STOP = False
+JOB_HISTORY_RETENTION_DAYS = 400
+JOB_HISTORY_RUNS_PER_JOB = 10
+
+
+NIUONE_FORWARD_PROTOCOL_PREFLIGHT_JOB = Job(
+    "DASHBOARD_NIUONE_FORWARD_PREFLIGHT_CRON",
+    "5 9 * * 1-5",
+    "b3e6f88f3c62",
+    "牛牛严格前向协议预检",
+    ("evaluate_niuone_forward.py", "--runtime", "--protocol-only"),
+    30,
+)
+
+NIUONE_EQUITY_SNAPSHOT_JOB = Job(
+    "DASHBOARD_NIUONE_EQUITY_SNAPSHOT_CRON",
+    "15 15 * * 1-5",
+    "701d0b5e4179",
+    "牛牛盘后账户净值快照",
+    ("niuniu_practice_trader.py", "--snapshot-equity"),
+    120,
+)
 
 
 JOBS = (
@@ -50,8 +71,11 @@ JOBS = (
     Job("DASHBOARD_MARKET_AUCTION_CRON", "25 9 * * 1-5", "8453b3f28cd3", "A股竞价盘前总结", ("a_share_auction_summary.py",), 180),
     Job("DASHBOARD_MARKET_MIDDAY_CRON", "40 11 * * 1-5", "192abba7eeb5", "A股午盘总结", ("a_share_midday_summary.py",), 180),
     Job("DASHBOARD_MARKET_CLOSE_CRON", "10 15 * * 1-5", "67ac98149ead", "A股盘后总结", ("a_share_close_summary.py",), 180),
+    NIUONE_FORWARD_PROTOCOL_PREFLIGHT_JOB,
     Job("DASHBOARD_B3_EXIT_TIME", "37 9 * * 1-5", "f4b8c0ad1a35", "牛牛B3开盘离场检查", ("niuniu_practice_trader.py", "--auto-exits"), 120),
     Job("DASHBOARD_TIME_EXIT_TIME", "45 14 * * 1-5", "fc4f23b79591", "牛牛尾盘离场检查", ("niuniu_practice_trader.py", "--auto-exits"), 120),
+    NIUONE_EQUITY_SNAPSHOT_JOB,
+    Job("DASHBOARD_NIUONE_FORWARD_CRON", "20 15 * * 1-5", "d419bc090808", "牛牛严格前向证据评估", ("evaluate_niuone_forward.py", "--runtime"), 30),
     Job("DASHBOARD_US_RATING_CRON", "0 11 * * *", "fd0b807138f4", "每日美股机构买入评级汇报", ("us_rating_report.py", "--store-only"), 300),
 )
 IWENCAI_STARTUP_CATCH_UP_JOB = Job(
@@ -116,6 +140,8 @@ def job_enabled(job: Job, env_values: dict[str, str]) -> bool:
 
 
 def retry_settings(job: Job, env_values: dict[str, str] | None = None) -> tuple[int, int]:
+    if job.env_name == "DASHBOARD_NIUONE_FORWARD_PREFLIGHT_CRON":
+        return 1, 0
     values = env_values if env_values is not None else parse_env_file()
     max_attempts = read_int_setting(values, "DASHBOARD_CRON_MAX_ATTEMPTS", 2, min_value=1, max_value=5)
     retry_delay = read_int_setting(values, "DASHBOARD_CRON_RETRY_DELAY_SECONDS", 300, min_value=0, max_value=3600)
@@ -147,14 +173,38 @@ def job_expr_value(job: Job, env_values: dict[str, str]) -> str:
 
 def load_state() -> dict[str, object]:
     try:
-        return json.loads(STATE_PATH.read_text(encoding="utf-8"))
-    except Exception:
+        payload = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
         return {"run_keys": []}
+    except (OSError, TypeError, ValueError) as exc:
+        log(
+            "scheduler state unavailable; starting fail-closed history "
+            f"error={type(exc).__name__}"
+        )
+        return {"run_keys": []}
+    if not isinstance(payload, dict):
+        log("scheduler state invalid type; starting fail-closed history")
+        return {"run_keys": []}
+    return payload
 
 
 def save_state(state: dict[str, object]) -> None:
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary = STATE_PATH.with_name(
+        f".{STATE_PATH.name}.{os.getpid()}.{time.monotonic_ns()}.tmp"
+    )
+    try:
+        with temporary.open("x", encoding="utf-8") as stream:
+            json.dump(state, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.replace(STATE_PATH)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def run_job_once(job: Job, run_time: datetime, *, attempt: int = 1, max_attempts: int = 1) -> JobRunResult:
@@ -164,6 +214,8 @@ def run_job_once(job: Job, run_time: datetime, *, attempt: int = 1, max_attempts
     env.setdefault("DASHBOARD_CONFIG", str(DASHBOARD_HOME / "config.yaml"))
     env.setdefault("DASHBOARD_PUSH_HISTORY_DB", str(DASHBOARD_HOME / "push_history.db"))
     env["NIUONE_CRON_RUN_KEY"] = f"{job.job_id}:{run_time.strftime('%Y%m%d%H%M')}"
+    env["NIUONE_CRON_JOB_ENV"] = job.env_name
+    env["NIUONE_CRON_SCHEDULED_AT"] = run_time.astimezone(CN_TZ).isoformat()
     command = [sys.executable, str(SCRIPT_DIR / "entrypoints" / job.command[0]), *job.command[1:]]
     start = time.monotonic()
     log(f"start job={job.job_id} title={job.title} attempt={attempt}/{max_attempts} command={command}")
@@ -230,6 +282,44 @@ def run_startup_catch_up(now: datetime, env_values: dict[str, str]) -> JobRunRes
     return run_job(IWENCAI_STARTUP_CATCH_UP_JOB, now)
 
 
+def run_startup_protocol_preflight(now: datetime) -> JobRunResult:
+    """Freeze or verify the strict-forward protocol before any scheduled BUY."""
+    return run_job(NIUONE_FORWARD_PROTOCOL_PREFLIGHT_JOB, now)
+
+
+def record_job_result(
+    state: dict[str, object],
+    job: Job,
+    scheduled_at: datetime,
+    result: JobRunResult,
+    *,
+    completed_at: datetime | None = None,
+) -> None:
+    """Retain bounded per-day outcomes for strict-forward operations QA."""
+    scheduled = scheduled_at.astimezone(CN_TZ)
+    completed = (completed_at or datetime.now(CN_TZ)).astimezone(CN_TZ)
+    raw_history = state.get("job_history")
+    history = raw_history if isinstance(raw_history, dict) else {}
+    day_key = scheduled.strftime("%Y-%m-%d")
+    raw_day = history.get(day_key)
+    day = raw_day if isinstance(raw_day, dict) else {}
+    raw_runs = day.get(job.env_name)
+    runs = raw_runs if isinstance(raw_runs, list) else []
+    runs.append({
+        "scheduled_at": scheduled.isoformat(),
+        "completed_at": completed.isoformat(),
+        "success": bool(result.success),
+        "status": str(result.status or ""),
+        "exit_code": result.exit_code,
+    })
+    day[job.env_name] = runs[-JOB_HISTORY_RUNS_PER_JOB:]
+    history[day_key] = day
+    state["job_history"] = {
+        key: history[key]
+        for key in sorted(history)[-JOB_HISTORY_RETENTION_DAYS:]
+    }
+
+
 def main() -> None:
     signal.signal(signal.SIGTERM, handle_stop)
     signal.signal(signal.SIGINT, handle_stop)
@@ -237,6 +327,17 @@ def main() -> None:
     state = load_state()
     run_keys = list(state.get("run_keys") or [])[-500:]
     startup_values = parse_env_file()
+    startup_preflight_at = datetime.now(CN_TZ).replace(second=0, microsecond=0)
+    startup_preflight_result = run_startup_protocol_preflight(
+        startup_preflight_at
+    )
+    record_job_result(
+        state,
+        NIUONE_FORWARD_PROTOCOL_PREFLIGHT_JOB,
+        startup_preflight_at,
+        startup_preflight_result,
+    )
+    save_state(state)
     run_startup_catch_up(datetime.now(CN_TZ).replace(second=0, microsecond=0), startup_values)
     try:
         while not STOP:
@@ -256,7 +357,9 @@ def main() -> None:
                     run_keys.append(run_key)
                     state["run_keys"] = run_keys[-500:]
                     save_state(state)
-                    run_job(job, now)
+                    result = run_job(job, now)
+                    record_job_result(state, job, now, result)
+                    save_state(state)
             time.sleep(10)
     finally:
         state["run_keys"] = run_keys[-500:]

@@ -2,8 +2,9 @@
 import importlib.util
 import os
 import sys
+import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -26,6 +27,35 @@ def load_scheduler_module():
 
 
 class NiuoneCronSchedulerTests(unittest.TestCase):
+    def test_scheduler_state_is_atomic_and_corruption_fails_closed(self):
+        scheduler = load_scheduler_module()
+        original_path = scheduler.STATE_PATH
+        original_log = scheduler.log
+        logs = []
+        try:
+            with tempfile.TemporaryDirectory(
+                prefix="niuone-scheduler-state-"
+            ) as directory:
+                scheduler.STATE_PATH = Path(directory) / "scheduler.json"
+                scheduler.log = logs.append
+                expected = {
+                    "run_keys": ["test:202608030905"],
+                    "job_history": {"2026-08-03": {}},
+                }
+                scheduler.save_state(expected)
+                loaded = scheduler.load_state()
+                temporary_files = list(Path(directory).glob(".*.tmp"))
+                scheduler.STATE_PATH.write_text("{invalid", encoding="utf-8")
+                corrupted = scheduler.load_state()
+        finally:
+            scheduler.STATE_PATH = original_path
+            scheduler.log = original_log
+
+        self.assertEqual(loaded, expected)
+        self.assertEqual(temporary_files, [])
+        self.assertEqual(corrupted, {"run_keys": []})
+        self.assertTrue(any("fail-closed history" in item for item in logs))
+
     def test_database_only_job_retries_until_process_succeeds(self):
         scheduler = load_scheduler_module()
         job = scheduler.Job(
@@ -52,7 +82,11 @@ class NiuoneCronSchedulerTests(unittest.TestCase):
             scheduler.time.sleep = lambda _seconds: None
 
             def fake_run(*_args, **kwargs):
-                calls.append(kwargs['env'].get('NIUONE_CRON_RUN_KEY'))
+                calls.append({
+                    'run_key': kwargs['env'].get('NIUONE_CRON_RUN_KEY'),
+                    'job_env': kwargs['env'].get('NIUONE_CRON_JOB_ENV'),
+                    'scheduled_at': kwargs['env'].get('NIUONE_CRON_SCHEDULED_AT'),
+                })
                 if len(calls) == 1:
                     return SimpleNamespace(returncode=1, stdout="", stderr="upstream timeout")
                 return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -68,7 +102,15 @@ class NiuoneCronSchedulerTests(unittest.TestCase):
 
         self.assertTrue(result.success)
         self.assertEqual(len(calls), 2)
-        self.assertEqual(calls, ['test-job:202606251100', 'test-job:202606251100'])
+        self.assertEqual(
+            [item['run_key'] for item in calls],
+            ['test-job:202606251100', 'test-job:202606251100'],
+        )
+        self.assertEqual({item['job_env'] for item in calls}, {'TEST_CRON'})
+        self.assertEqual(
+            {item['scheduled_at'] for item in calls},
+            {'2026-06-25T11:00:00+08:00'},
+        )
         self.assertFalse(hasattr(scheduler, 'archive_job_output'))
         self.assertTrue(any("retry scheduled job=test-job" in item for item in logs))
 
@@ -164,6 +206,102 @@ class NiuoneCronSchedulerTests(unittest.TestCase):
                     os.environ.pop(name, None)
                 else:
                     os.environ[name] = value
+
+    def test_niuone_forward_evaluation_runs_after_market_close(self):
+        scheduler = load_scheduler_module()
+        snapshot_job = scheduler.NIUONE_EQUITY_SNAPSHOT_JOB
+        job = next(
+            job
+            for job in scheduler.JOBS
+            if job.env_name == "DASHBOARD_NIUONE_FORWARD_CRON"
+        )
+
+        self.assertIn(snapshot_job, scheduler.JOBS)
+        self.assertEqual(snapshot_job.default_expr, "15 15 * * 1-5")
+        self.assertEqual(
+            snapshot_job.command,
+            ("niuniu_practice_trader.py", "--snapshot-equity"),
+        )
+        self.assertEqual(job.default_expr, "20 15 * * 1-5")
+        self.assertEqual(
+            job.command,
+            ("evaluate_niuone_forward.py", "--runtime"),
+        )
+        self.assertEqual(
+            scheduler.normalize_job_expr(job, "15:25"),
+            "25 15 * * 1-5",
+        )
+        self.assertTrue(scheduler.job_enabled(job, {}))
+
+    def test_niuone_protocol_preflight_runs_before_open_and_at_startup(self):
+        scheduler = load_scheduler_module()
+        job = scheduler.NIUONE_FORWARD_PROTOCOL_PREFLIGHT_JOB
+        calls = []
+        original_run_job = scheduler.run_job
+        try:
+            scheduler.run_job = lambda selected, run_time: calls.append(
+                (selected, run_time)
+            ) or "done"
+            now = datetime(2026, 8, 3, 8, 42, tzinfo=scheduler.CN_TZ)
+            result = scheduler.run_startup_protocol_preflight(now)
+        finally:
+            scheduler.run_job = original_run_job
+
+        self.assertEqual(job.default_expr, "5 9 * * 1-5")
+        self.assertEqual(
+            job.command,
+            (
+                "evaluate_niuone_forward.py",
+                "--runtime",
+                "--protocol-only",
+            ),
+        )
+        self.assertEqual(result, "done")
+        self.assertEqual(calls, [(job, now)])
+        self.assertIn(job, scheduler.JOBS)
+        self.assertTrue(scheduler.job_enabled(job, {}))
+        self.assertEqual(scheduler.retry_settings(job, {}), (1, 0))
+
+    def test_scheduler_retains_bounded_daily_job_outcomes(self):
+        scheduler = load_scheduler_module()
+        job = scheduler.NIUONE_FORWARD_PROTOCOL_PREFLIGHT_JOB
+        state = {"job_history": {}}
+        result = scheduler.JobRunResult(
+            success=True,
+            status="ok",
+            exit_code=0,
+            elapsed=0.25,
+        )
+        scheduled = datetime(2026, 8, 3, 9, 5, tzinfo=scheduler.CN_TZ)
+        completed = datetime(2026, 8, 3, 9, 5, 1, tzinfo=scheduler.CN_TZ)
+
+        first_day = datetime(2025, 1, 1, 9, 5, tzinfo=scheduler.CN_TZ)
+        for offset in range(scheduler.JOB_HISTORY_RETENTION_DAYS + 5):
+            run_at = first_day + timedelta(days=offset)
+            scheduler.record_job_result(
+                state,
+                job,
+                run_at,
+                result,
+                completed_at=run_at + timedelta(seconds=1),
+            )
+        for _index in range(12):
+            scheduler.record_job_result(
+                state,
+                job,
+                scheduled,
+                result,
+                completed_at=completed,
+            )
+
+        history = state["job_history"]
+        self.assertEqual(len(history), scheduler.JOB_HISTORY_RETENTION_DAYS)
+        self.assertNotIn("2025-01-01", history)
+        runs = history["2026-08-03"][job.env_name]
+        self.assertEqual(len(runs), scheduler.JOB_HISTORY_RUNS_PER_JOB)
+        self.assertTrue(runs[-1]["success"])
+        self.assertEqual(runs[-1]["exit_code"], 0)
+        self.assertEqual(runs[-1]["completed_at"], completed.isoformat())
 
 
 if __name__ == "__main__":

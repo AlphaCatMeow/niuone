@@ -907,6 +907,134 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertIn("模型卖出仓位1200股超过可卖1000股", decision["execution_blocked_reason"])
         self.assertIn("不自动缩小", decision["execution_blocked_reason"])
 
+    def test_execute_actions_reduces_niuone_sell_to_positive_t1_available_lot(self):
+        original_execution_time = trader.is_a_share_execution_time
+        original_quote = trader.execution_quote
+        try:
+            trader.is_a_share_execution_time = lambda dt=None: (
+                True,
+                "连续竞价交易时段",
+            )
+            trader.execution_quote = lambda code: {
+                "price": 10.0,
+                "name": "牛牛测试股",
+                "source": "test",
+            }
+            state = {
+                "cash": 0.0,
+                "positions": {
+                    "600000": {
+                        "code": "600000",
+                        "name": "牛牛测试股",
+                        "qty": 1000,
+                        "avg_cost": 9.0,
+                        "last_price": 10.0,
+                        "buy_strategy": "niu_leader",
+                        "buy_date_lots": {
+                            "2026-06-23": 800,
+                            trader.today_key(): 200,
+                        },
+                    }
+                },
+                "trade_log": [],
+            }
+            decision = {
+                "actions": [{
+                    "action": "SELL",
+                    "code": "600000",
+                    "name": "牛牛测试股",
+                    "shares": 1000,
+                }],
+            }
+
+            executed = trader.execute_actions(
+                state,
+                decision,
+                [],
+                True,
+                "连续竞价交易时段",
+                permissive_market_context(),
+            )
+        finally:
+            trader.is_a_share_execution_time = original_execution_time
+            trader.execution_quote = original_quote
+
+        self.assertEqual(len(executed), 1)
+        self.assertEqual(decision["actions"][0]["shares"], 800)
+        self.assertEqual(state["positions"]["600000"]["qty"], 200)
+        self.assertEqual(
+            state["positions"]["600000"]["buy_date_lots"],
+            {trader.today_key(): 200},
+        )
+        fill = executed[0]
+        self.assertEqual(fill["shares"], 800)
+        self.assertEqual(fill["model_requested_sell_shares"], 1000)
+        self.assertEqual(fill["available_sell_shares"], 800)
+        self.assertTrue(fill["sell_quantity_auto_reduced"])
+        self.assertEqual(fill["sell_execution_source"], "model_action")
+        self.assertEqual(fill["sell_execution_evidence_schema_version"], 1)
+        self.assertFalse(fill["position_fully_closed"])
+
+    def test_execute_actions_keeps_niuone_sell_fail_closed_when_nothing_is_available(self):
+        original_execution_time = trader.is_a_share_execution_time
+        original_quote = trader.execution_quote
+        try:
+            trader.is_a_share_execution_time = lambda dt=None: (
+                True,
+                "连续竞价交易时段",
+            )
+            trader.execution_quote = lambda code: {
+                "price": 10.0,
+                "name": "牛牛测试股",
+                "source": "test",
+            }
+            state = {
+                "cash": 0.0,
+                "positions": {
+                    "600000": {
+                        "code": "600000",
+                        "name": "牛牛测试股",
+                        "qty": 200,
+                        "avg_cost": 9.0,
+                        "last_price": 10.0,
+                        "buy_strategy": "niu_leader",
+                        "buy_date_lots": {trader.today_key(): 200},
+                    }
+                },
+                "trade_log": [],
+            }
+            decision = {
+                "actions": [{
+                    "action": "SELL",
+                    "code": "600000",
+                    "name": "牛牛测试股",
+                    "shares": 200,
+                }],
+            }
+
+            executed = trader.execute_actions(
+                state,
+                decision,
+                [],
+                True,
+                "连续竞价交易时段",
+                permissive_market_context(),
+            )
+        finally:
+            trader.is_a_share_execution_time = original_execution_time
+            trader.execution_quote = original_quote
+
+        self.assertEqual(executed, [])
+        self.assertEqual(state["positions"]["600000"]["qty"], 200)
+        self.assertEqual(decision["actions"][0]["available_sell_shares"], 0)
+        self.assertFalse(
+            decision["actions"][0]["sell_quantity_auto_reduced"]
+        )
+        self.assertIn(
+            "模型卖出仓位200股超过可卖0股",
+            decision["execution_blocked_reason"],
+        )
+
     def test_market_guidance_derives_morning_position_pace(self):
         reports = [{
             "title": "A股竞价盘前总结",
@@ -1673,6 +1801,13 @@ class SellStrategyRuleTests(unittest.TestCase):
 
         self.assertEqual(candidates, [])
         self.assertEqual(legacy_candidates, [display_candidate])
+        self.assertEqual(
+            trader.observed_candidate_rows({
+                "items": [display_candidate],
+                "trade_items": [],
+            }),
+            [display_candidate],
+        )
 
     def test_morning_schedule_completed_during_lunch_defers_to_13(self):
         due_at = trader.deferred_execution_due_at(
@@ -1717,6 +1852,16 @@ class SellStrategyRuleTests(unittest.TestCase):
                             "summary": "午休前策略",
                             "actions": [{"action": "BUY", "code": "600000", "name": "测试股", "shares": 1000}],
                         },
+                        "candidate_evidence_schema_version": 1,
+                        "candidate_evidence": [{
+                            "code": "600000",
+                            "strategy_id": "niu_leader",
+                            "best_score": 10.0,
+                            "observed_rank": 1,
+                            "eligible_for_decision": True,
+                            "eligibility_blockers": [],
+                            "niuone_lifecycle_stage": "markup",
+                        }],
                         "candidates": [{
                             "code": "600000",
                             "name": "测试股",
@@ -1746,6 +1891,10 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertEqual(state["pending_decisions"][0]["status"], "executed")
         self.assertEqual(len(state["trade_log"]), 1)
         self.assertIn("延迟成交触发", state["decision_log"][-1]["trade_reason"])
+        self.assertEqual(
+            state["decision_log"][-1]["candidate_evidence"][0]["code"],
+            "600000",
+        )
 
     def test_save_state_preserves_positions_when_disk_has_unseen_trades(self):
         original_state_file = trader.STATE_FILE
@@ -2541,6 +2690,139 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertEqual(at_tail[0]["exit_signal"], "b2_no_follow_through")
         self.assertIn("14:45", at_tail[0]["reason"])
 
+    def test_auto_exit_reports_durable_ledger_failure(self):
+        state = {
+            "cash": 0.0,
+            "positions": {
+                "600000": {
+                    "code": "600000",
+                    "name": "测试股",
+                    "qty": 1000,
+                    "avg_cost": 10.0,
+                    "last_price": 9.98,
+                    "buy_strategy": "b3_accelerate",
+                    "buy_date_lots": {"2026-06-23": 1000},
+                }
+            },
+            "trade_log": [],
+            "decision_log": [],
+        }
+        originals = {
+            "_sync_trades_to_db": trader._sync_trades_to_db,
+            "_sync_decision_to_db": trader._sync_decision_to_db,
+        }
+        try:
+            trader._sync_trades_to_db = lambda _rows: False
+            trader._sync_decision_to_db = lambda _row: True
+            executed = trader.check_auto_exits(
+                state,
+                datetime(2026, 6, 24, 9, 37),
+            )
+            persistence = trader._pop_auto_exit_persistence_status(state)
+        finally:
+            for name, value in originals.items():
+                setattr(trader, name, value)
+
+        self.assertEqual(len(executed), 1)
+        self.assertFalse(persistence["trades_persisted"])
+        self.assertTrue(persistence["decision_persisted"])
+        self.assertFalse(persistence["durable_evidence_persisted"])
+
+    def test_niuone_auto_exit_persists_holding_stage_path(self):
+        position = {
+            "code": "600000",
+            "name": "牛牛阶段测试",
+            "qty": 100,
+            "avg_cost": 10.0,
+            "last_price": 10.1,
+            "buy_strategy": "niu_reversal_probe",
+            "industry": "半导体",
+            "entry_stop_price": 9.5,
+            "entry_stop_source": "niu_reversal_right_low",
+            "buy_date_lots": {"2026-07-14": 100},
+            "entry_signal_generated_at": "2026-07-14 09:25:01",
+            "entry_niuone_lifecycle_stage": "brewing",
+            "entry_niuone_lifecycle_label": "主线酝酿",
+            "entry_niuone_lifecycle_order": 10,
+            "entry_niuone_lifecycle_entry_policy": "probe_only",
+            "mainline_state": "candidate",
+            "mainline_score": 64.0,
+            "niuone_lifecycle_stage": "brewing",
+        }
+        trader.record_niuone_lifecycle_observation(
+            position,
+            observed_at="2026-07-14 09:25:01",
+            source="entry_signal",
+            complete_from_entry=True,
+        )
+        position.update({
+            "mainline_state": "inactive",
+            "mainline_score": 45.0,
+            "mainline_weak_count": 1,
+            "niuone_lifecycle_stage": "fade",
+        })
+        state = {
+            "cash": 1000.0,
+            "positions": {"600000": position},
+            "trade_log": [],
+            "decision_log": [],
+        }
+        originals = {
+            "now_ts": trader.now_ts,
+            "_sync_trades_to_db": trader._sync_trades_to_db,
+            "_sync_positions_to_db": trader._sync_positions_to_db,
+            "_sync_decision_to_db": trader._sync_decision_to_db,
+        }
+        try:
+            trader.now_ts = lambda: "2026-07-16 14:45:00"
+            trader._sync_trades_to_db = lambda _rows: True
+            trader._sync_positions_to_db = lambda _state: None
+            trader._sync_decision_to_db = lambda _row: True
+            executed = trader.check_auto_exits(
+                state,
+                datetime(2026, 7, 16, 14, 45),
+            )
+        finally:
+            for name, value in originals.items():
+                setattr(trader, name, value)
+
+        self.assertEqual(len(executed), 1)
+        self.assertEqual(executed[0]["exit_signal"], "niu_reversal_theme_failed")
+        self.assertEqual(
+            executed[0]["niuone_lifecycle_evidence"]["stage_sequence"],
+            ["brewing", "fade"],
+        )
+        self.assertEqual(
+            executed[0]["niuone_lifecycle_evidence"]
+            ["exit_niuone_lifecycle_stage"],
+            "fade",
+        )
+        self.assertEqual(
+            executed[0]["niuone_entry_context"]
+            ["entry_niuone_lifecycle_stage"],
+            "brewing",
+        )
+
+    def test_trade_ledger_sync_attempts_every_executed_fill(self):
+        module = sys.modules["niuniu_db"]
+        original = module.record_trade
+        attempted = []
+        try:
+            def fake_record(row):
+                attempted.append(row["code"])
+                return row["code"] != "first"
+
+            module.record_trade = fake_record
+            persisted = trader._sync_trades_to_db([
+                {"code": "first"},
+                {"code": "second"},
+            ])
+        finally:
+            module.record_trade = original
+
+        self.assertFalse(persisted)
+        self.assertEqual(attempted, ["first", "second"])
+
     def test_predecision_exit_uses_strategy_mark_when_active_suite_and_legacy_field_differ(self):
         state = {
             "cash": 0.0,
@@ -2856,6 +3138,75 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertEqual(
             [point["time"] for point in state["equity_history"]],
             ["2026-07-17 14:59:00", "2026-07-17 15:00:00"],
+        )
+
+    def test_post_close_snapshot_persists_account_mark_without_trading(self):
+        class ClosingSnapshotDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 8, 3, 15, 15, 2)
+
+        state = {
+            "initial_cash": 100000.0,
+            "cash": 100000.0,
+            "positions": {},
+            "trade_log": [],
+            "decision_log": [],
+            "pending_decisions": [],
+            "equity_history": [],
+            "daily_equity_history": [],
+        }
+        originals = {
+            "datetime": trader.datetime,
+            "is_a_share_trading_day": trader.is_a_share_trading_day,
+            "load_state": trader.load_state,
+            "save_state": trader.save_state,
+            "load_latest_sector_tide_payload": (
+                trader.load_latest_sector_tide_payload
+            ),
+            "sync_sector_tide_position_context": (
+                trader.sync_sector_tide_position_context
+            ),
+            "sync_niuone_position_context": trader.sync_niuone_position_context,
+            "sync_zettaranc_position_context": (
+                trader.sync_zettaranc_position_context
+            ),
+            "refresh_realtime_prices": trader.refresh_realtime_prices,
+            "refresh_position_intraday": trader.refresh_position_intraday,
+            "_refresh_position_bbi": trader._refresh_position_bbi,
+            "rebuild_intraday_equity_curve": (
+                trader.rebuild_intraday_equity_curve
+            ),
+            "_sync_positions_to_db": trader._sync_positions_to_db,
+        }
+        try:
+            trader.datetime = ClosingSnapshotDateTime
+            trader.is_a_share_trading_day = lambda dt=None: True
+            trader.load_state = lambda: state
+            trader.save_state = lambda _state: None
+            trader.load_latest_sector_tide_payload = lambda: {}
+            trader.sync_sector_tide_position_context = lambda *_args: None
+            trader.sync_niuone_position_context = lambda *_args: None
+            trader.sync_zettaranc_position_context = lambda *_args: None
+            trader.refresh_realtime_prices = lambda _state: {}
+            trader.refresh_position_intraday = lambda _state: {}
+            trader._refresh_position_bbi = lambda _state: None
+            trader.rebuild_intraday_equity_curve = lambda *_args, **_kwargs: False
+            trader._sync_positions_to_db = lambda _state: None
+
+            result = trader.snapshot_closing_equity_once()
+        finally:
+            for name, value in originals.items():
+                setattr(trader, name, value)
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["skipped"])
+        self.assertEqual(result["time"], "2026-08-03 15:15:00")
+        self.assertEqual(result["position_count"], 0)
+        self.assertEqual(state["trade_log"], [])
+        self.assertEqual(
+            state["daily_equity_history"][-1]["equity"],
+            100000.0,
         )
 
     def test_session_equity_heartbeat_preserves_concurrent_trade_point(self):

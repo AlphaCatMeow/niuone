@@ -26,6 +26,7 @@ import urllib.error
 import urllib.request
 from contextlib import contextmanager
 from datetime import datetime, time as dtime, timedelta
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any
 
@@ -77,10 +78,40 @@ from strategies.attribution import (
     compact_position_strategy_mark,
 )
 from strategies.exits import (
+    NIUONE_BREAK_EVEN_AFTER_PARTIAL,
+    NIUONE_CLIMAX_RUNNER_ENABLED,
+    NIUONE_CLIMAX_RUNNER_LEADER_LOSS_CONFIRMATIONS,
+    NIUONE_CLIMAX_RUNNER_TRAILING_ATR,
+    NIUONE_LEADER_LOSS_CONFIRMATIONS,
+    NIUONE_LIFECYCLE_CLIMAX_MIN_PNL_PCT,
+    NIUONE_LIFECYCLE_CLIMAX_PARTIAL_RATIO,
+    NIUONE_MAINLINE_WEAK_CONFIRMATIONS,
+    NIUONE_MAX_HOLD_CALENDAR_DAYS,
+    NIUONE_PARTIAL_TAKE_PROFIT_R,
+    NIUONE_PARTIAL_TAKE_PROFIT_RATIO,
+    NIUONE_REVERSAL_EARLY_PARTIAL_TAKE_PROFIT_R,
+    NIUONE_REVERSAL_EARLY_PARTIAL_TAKE_PROFIT_RATIO,
+    NIUONE_REVERSAL_EARLY_PROTECTION_REGIMES,
+    NIUONE_REVERSAL_MAINLINE_WEAK_CONFIRMATIONS,
     SHAOFU_MIN_HOLD_TRADING_DAYS,
     SHAOFU_SOFT_EXIT_CONFIRMATIONS,
     evaluate_shaofu_soft_exit,
     evaluate_strategy_time_exit,
+    niuone_climax_runner_active,
+    resolve_niuone_partial_take_profit,
+)
+from strategies.lifecycle import NIUONE_LIFECYCLE_STAGES
+from trading.fees import (
+    A_SHARE_COMMISSION_RATE,
+    A_SHARE_MINIMUM_COMMISSION,
+    A_SHARE_SELL_STAMP_DUTY_RATE,
+    A_SHARE_TRANSFER_FEE_RATE,
+    calculate_a_share_trade_fees,
+)
+from trading.niuone_forward import (
+    FORWARD_EXECUTION_EVIDENCE_SCHEMA_VERSION,
+    FORWARD_SELL_EXECUTION_EVIDENCE_SCHEMA_VERSION,
+    decision_has_durable_candidate_evidence,
 )
 from strategies.performance import (
     _add_perf_open_position,
@@ -92,6 +123,9 @@ from strategies.performance import (
 )
 from strategies.policy import (
     candidate_buy_blockers as _strategy_candidate_buy_blockers,
+    niuone_markup_rebalance_observation,
+    niuone_markup_rebalance_reentry_blocker,
+    niuone_markup_upgrade_blocker,
     strategy_position_limit_pct as _strategy_position_limit_pct,
 )
 from strategies.prompts import (
@@ -101,6 +135,21 @@ from strategies.prompts import (
 )
 from strategies.niuone_risk import (
     NIUONE_ABSOLUTE_POSITION_CAP_PCT,
+    NIUONE_ENTRY_REGIMES,
+    NIUONE_MARKUP_MOMENTUM_PROBE_MAX_EXECUTION_GAP_PCT,
+    NIUONE_MARKUP_MOMENTUM_PROBE_POSITION_CAP_PCT,
+    NIUONE_MARKUP_MOMENTUM_PROBE_SUBROUTE,
+    NIUONE_MARKUP_EARLY_UPGRADE_POSITION_CAP_PCT,
+    NIUONE_MARKUP_REBALANCE_MIN_SESSIONS_AFTER_ADD,
+    NIUONE_MARKUP_REBALANCE_PULLBACK_ATR,
+    NIUONE_MARKUP_REBALANCE_REBOUND_ATR,
+    NIUONE_MARKUP_REBALANCE_STALL_MIN_ATR,
+    NIUONE_MARKUP_REBALANCE_STALL_SESSIONS,
+    NIUONE_MARKUP_REBALANCE_TRIM_RATIO,
+    NIUONE_MARKUP_UPGRADE_MAX_PNL_PCT,
+    NIUONE_MARKUP_UPGRADE_MIN_PNL_PCT,
+    NIUONE_MARKUP_UPGRADE_POSITION_CAP_PCT,
+    NIUONE_MAX_NEW_POSITIONS_PER_TRADING_DAY,
     NIUONE_MAX_OPEN_POSITIONS,
     niuone_risk_budget,
     niuone_structural_stop_limits,
@@ -261,10 +310,10 @@ STOCK_TOOLS_SCRIPT = Path(
 INITIAL_CASH = 1_000_000.0
 # 交易费率：万一免五 = 佣金 0.01%，免 5 元最低佣金。
 # A股另计：印花税仅卖出 0.05%，过户费双向 0.001%。
-COMMISSION_RATE = 0.0001
-COMMISSION_MIN = 0.0
-STAMP_DUTY_SELL_RATE = 0.0005
-TRANSFER_FEE_RATE = 0.00001
+COMMISSION_RATE = A_SHARE_COMMISSION_RATE
+COMMISSION_MIN = A_SHARE_MINIMUM_COMMISSION
+STAMP_DUTY_SELL_RATE = A_SHARE_SELL_STAMP_DUTY_RATE
+TRANSFER_FEE_RATE = A_SHARE_TRANSFER_FEE_RATE
 REALTIME_QUOTE_MAX_AGE_SECONDS = 8
 EQUITY_HEARTBEAT_MIN_SECONDS = 60
 _PENDING_EQUITY_DB_SYNC_TIME = "_pending_equity_db_sync_time"
@@ -1709,16 +1758,135 @@ def position_today_pnl(pos: dict[str, Any], price: float, qty: int, prev_close: 
 
 def calc_trade_fees(amount: float, side: str) -> dict[str, float]:
     """Calculate A-share paper-trading fees for 万一免五 account."""
-    amount = float(amount or 0)
-    commission = max(amount * COMMISSION_RATE, COMMISSION_MIN)
-    transfer_fee = amount * TRANSFER_FEE_RATE
-    stamp_duty = amount * STAMP_DUTY_SELL_RATE if side.upper() == "SELL" else 0.0
-    total_fee = commission + transfer_fee + stamp_duty
+    return calculate_a_share_trade_fees(amount, side)
+
+
+def dynamic_risk_order_ceiling(
+    *,
+    price: float,
+    total_equity: float,
+    cash: float,
+    current_position_value: float,
+    current_market_value: float,
+    other_industry_value: float,
+    dynamic_position_cap_pct: float,
+    total_position_cap_pct: float,
+    sector_position_cap_pct: float,
+    effective_loss_distance_pct_value: float,
+    max_open_risk_pct: float,
+    existing_open_risk_pct: float,
+    max_sector_risk_pct: float,
+    existing_sector_risk_pct: float,
+    required_cash_pct: float,
+    board_lot: int = 100,
+) -> dict[str, Any]:
+    """Return the largest whole-lot order allowed by every sizing ceiling.
+
+    Binary admission rules such as market state, candidate eligibility, and
+    position count remain with the caller. This helper combines the continuous
+    single-name, portfolio, theme, stop-risk, cash, fee, and cash-reserve limits
+    without changing whether the execution path accepts or rejects an order.
+    """
+    resolved_price = float(price)
+    equity = float(total_equity)
+    resolved_lot = int(board_lot)
+    loss_distance = float(effective_loss_distance_pct_value)
+    if (
+        not math.isfinite(resolved_price)
+        or not math.isfinite(equity)
+        or not math.isfinite(loss_distance)
+        or resolved_price <= 0
+        or equity <= 0
+        or loss_distance <= 0
+        or resolved_lot <= 0
+    ):
+        return {
+            "maximum_permitted_shares": 0,
+            "maximum_permitted_gross": 0.0,
+            "binding_constraints": ["invalid_risk_inputs"],
+        }
+
+    current_value = max(0.0, float(current_position_value))
+    market_value = max(0.0, float(current_market_value))
+    industry_value = max(0.0, float(other_industry_value))
+    open_risk_room = max(
+        0.0,
+        float(max_open_risk_pct) - float(existing_open_risk_pct),
+    )
+    sector_risk_room = max(
+        0.0,
+        float(max_sector_risk_pct) - float(existing_sector_risk_pct),
+    )
+    gross_caps = {
+        "single_name_risk": max(
+            0.0,
+            float(dynamic_position_cap_pct) / 100.0 * equity - current_value,
+        ),
+        "total_exposure": max(
+            0.0,
+            float(total_position_cap_pct) / 100.0 * equity - market_value,
+        ),
+        "theme_exposure": max(
+            0.0,
+            float(sector_position_cap_pct) / 100.0 * equity
+            - industry_value
+            - current_value,
+        ),
+        "strategy_open_risk": max(
+            0.0,
+            open_risk_room / loss_distance * equity - current_value,
+        ),
+        "theme_open_risk": max(
+            0.0,
+            sector_risk_room / loss_distance * equity - current_value,
+        ),
+        "cash": max(0.0, float(cash)),
+    }
+    gross_limit = min(gross_caps.values())
+    binding = sorted(
+        name
+        for name, value in gross_caps.items()
+        if math.isclose(value, gross_limit, rel_tol=0.0, abs_tol=1e-7)
+    )
+    maximum_shares = (
+        int(math.floor(gross_limit / resolved_price / resolved_lot))
+        * resolved_lot
+    )
+    required_cash = max(0.0, min(100.0, float(required_cash_pct)))
+    reduced_for_cash = False
+    reduced_for_reserve = False
+    while maximum_shares > 0:
+        gross = maximum_shares * resolved_price
+        fees = calc_trade_fees(gross, "BUY")
+        total_cost = gross + float(fees["total_fee"])
+        if total_cost > float(cash) + 1e-9:
+            reduced_for_cash = True
+            maximum_shares -= resolved_lot
+            continue
+        equity_after_fees = max(0.0, equity - float(fees["total_fee"]))
+        cash_after_trade = float(cash) - total_cost
+        cash_after_pct = (
+            cash_after_trade / equity_after_fees * 100.0
+            if equity_after_fees > 0 else 0.0
+        )
+        if cash_after_pct + 1e-9 < required_cash:
+            reduced_for_reserve = True
+            maximum_shares -= resolved_lot
+            continue
+        break
+    if reduced_for_cash or reduced_for_reserve:
+        binding = []
+        if reduced_for_cash:
+            binding.append("cash_after_fees")
+        if reduced_for_reserve:
+            binding.append("cash_reserve_after_fees")
     return {
-        "commission": round(commission, 2),
-        "transfer_fee": round(transfer_fee, 2),
-        "stamp_duty": round(stamp_duty, 2),
-        "total_fee": round(total_fee, 2),
+        "maximum_permitted_shares": maximum_shares,
+        "maximum_permitted_gross": round(
+            maximum_shares * resolved_price,
+            2,
+        ),
+        "binding_constraints": sorted(set(binding)),
     }
 
 
@@ -1805,6 +1973,15 @@ def decision_candidate_rows(b1_payload: dict[str, Any]) -> list[Any]:
     return []
 
 
+def observed_candidate_rows(b1_payload: dict[str, Any]) -> list[Any]:
+    """Return the full displayed opportunity set when the caller preserved it."""
+    for key in ("observed_items", "items", "candidates", "trade_items"):
+        if key in b1_payload:
+            value = b1_payload.get(key)
+            return value if isinstance(value, list) else []
+    return []
+
+
 def current_stock_universe() -> tuple[str, ...]:
     return selected_stock_universe(os.environ.get(STOCK_UNIVERSE_ENV))
 
@@ -1826,28 +2003,45 @@ def candidate_matches_active_strategy(candidate: dict[str, Any] | None) -> bool:
 
 
 def quote_is_at_limit_up(code: str, name: str, quote: dict[str, Any] | None) -> bool:
-    """Conservatively reject buys that have reached the board's price limit."""
+    """Reject only quotes that have reached the board's rounded limit price."""
     quote = quote if isinstance(quote, dict) else {}
-    limit_pct = (
-        4.8
+    limit_ratio = (
+        0.05
         if stock_name_is_st(name)
-        else 19.8
+        else 0.20
         if stock_board(code) in {"chi_next", "star_market"}
-        else 9.8
+        else 0.10
     )
-    change_pct = _safe_float(quote.get("change_pct"), -999.0)
-    if change_pct >= limit_pct:
-        return True
     price = _safe_float(quote.get("price"), 0.0)
     prev_close = _safe_float(quote.get("prev_close"), 0.0)
-    return bool(price > 0 and prev_close > 0 and (price / prev_close - 1) * 100 >= limit_pct)
+    if price > 0 and prev_close > 0:
+        limit_price = float(
+            (Decimal(str(prev_close)) * Decimal(str(1.0 + limit_ratio))).quantize(
+                Decimal("0.01"),
+                rounding=ROUND_HALF_UP,
+            )
+        )
+        return price >= limit_price - 1e-9
+    change_pct = _safe_float(quote.get("change_pct"), -999.0)
+    return change_pct >= limit_ratio * 100
 
 
-def add_execution_block(decision: dict[str, Any], code: str, reason: str) -> None:
+def add_execution_block(
+    decision: dict[str, Any],
+    code: str,
+    reason: str,
+    *,
+    category: str = "other",
+) -> None:
     blocks = decision.setdefault("execution_blocked_reasons", [])
     text = f"{code}: {reason}" if code else reason
     blocks.append(text)
     decision["execution_blocked_reason"] = "；".join(blocks[-5:])
+    decision.setdefault("execution_blocks", []).append({
+        "code": normalize_code(code),
+        "category": str(category or "other"),
+        "reason": str(reason or ""),
+    })
 
 
 def record_equity(state: dict[str, Any]) -> bool:
@@ -1903,6 +2097,7 @@ def record_equity(state: dict[str, Any]) -> bool:
             "cash": snap["cash"],
             "market_value": snap["market_value"],
             "pnl_pct": snap["total_pnl_pct"],
+            "account_created_at": str(state.get("created_at") or ""),
         }
         history.append(pt)
         state["equity_history"] = history[-2000:]
@@ -2012,6 +2207,7 @@ def rebuild_intraday_equity_curve(
                 "cash": round(cash, 2),
                 "market_value": round(market_value, 2),
                 "pnl_pct": round((equity / initial_cash - 1) * 100, 2) if initial_cash > 0 else 0.0,
+                "account_created_at": str(state.get("created_at") or ""),
             })
 
     if not rebuilt:
@@ -2207,7 +2403,6 @@ N_STRUCTURE_STOP_LOOKBACK_DAYS = 30  # N型结构前低最多回看交易日
 N_STRUCTURE_LOW_TOLERANCE_PCT = 0.02  # 后低允许比前低低不超过2%
 NO_PROGRESS_HOLD_DAYS = 3         # 买入后没涨，最少观察天数
 NO_PROGRESS_MAX_PNL_PCT = 1.0
-NIUONE_LEADER_LOSS_CONFIRMATIONS = 2
 SHAOFU_SOFT_EXIT_START_TIME = dtime(10, 0)  # 开盘前30分钟仅允许结构性硬退出
 LUZHU_MEDIUM_YANG_PCT = 2.0       # 卤煮：连续中/大阳线的保守量化阈值
 SELL_SCORE_REDUCE_THRESHOLD = 3
@@ -3903,6 +4098,466 @@ def is_niuone_strategy(strategy_id: str) -> bool:
     return STRATEGY_DEFINITIONS.get(str(strategy_id or ""), {}).get("persona") == "niuone"
 
 
+def niuone_opened_position_codes_on_date(
+    state: dict[str, Any],
+    trading_date: str | None = None,
+) -> set[str]:
+    """Return durable NiuOne opening codes for one Beijing trading date.
+
+    Adds do not consume the daily opening budget. Code de-duplication keeps
+    replayed or merged copies of the same fill idempotent.
+    """
+    target_date = str(trading_date or today_key())[:10]
+    opened_codes: set[str] = set()
+    for raw_trade in state.get("trade_log") or []:
+        if not isinstance(raw_trade, dict):
+            continue
+        if str(raw_trade.get("action") or "").upper() != "BUY":
+            continue
+        if str(raw_trade.get("time") or "")[:10] != target_date:
+            continue
+        strategy_mark = raw_trade.get("strategy_mark")
+        strategy_id = str(raw_trade.get("buy_strategy") or "")
+        if not strategy_id and isinstance(strategy_mark, dict):
+            strategy_id = str(strategy_mark.get("strategy_id") or "")
+        if not is_niuone_strategy(strategy_id):
+            continue
+        position_opened = raw_trade.get("position_opened") is True
+        before_qty = raw_trade.get("position_before_qty")
+        opened_from_quantity = (
+            before_qty is not None
+            and not isinstance(before_qty, bool)
+            and _safe_float(before_qty, -1.0) == 0.0
+        )
+        if not position_opened and not opened_from_quantity:
+            continue
+        code = normalize_code(raw_trade.get("code") or "")
+        if code:
+            opened_codes.add(code)
+    return opened_codes
+
+
+NIUONE_ENTRY_CONTEXT_FIELDS = (
+    "entry_niuone_lifecycle_stage",
+    "entry_niuone_lifecycle_label",
+    "entry_niuone_lifecycle_order",
+    "entry_niuone_lifecycle_entry_policy",
+    "entry_mainline_state",
+    "entry_mainline_score",
+    "entry_mainline_score_change",
+    "entry_mainline_state_streak",
+    "entry_mainline_cross_day_persistent",
+    "entry_mainline_confirmed",
+    "entry_today_strength_score",
+    "entry_strong_stock_count",
+    "entry_effective_strong_count",
+    "entry_stock_sector_rank",
+    "entry_stock_strong",
+    "entry_stock_leader_tier",
+    "entry_daily_v_recovery_ratio",
+    "entry_signal_score",
+    "entry_candidate_pool_size",
+    "entry_same_stage_candidate_count",
+    "entry_same_stage_candidate_rank",
+    "entry_same_stage_top_score_gap",
+    "entry_execution_reference_price",
+    "entry_execution_gap_pct",
+    "entry_signal_generated_at",
+    "entry_schedule_slot",
+    "entry_schedule_run_kind",
+    "entry_schedule_triggered_at",
+    "entry_execution_mode",
+    "entry_industry",
+    "entry_model_requested_shares",
+    "entry_executed_shares",
+    "entry_maximum_permitted_shares",
+    "entry_risk_ceiling_utilization_pct",
+    "entry_risk_ceiling_binding_constraints",
+    "entry_risk_ceiling_auto_reduced",
+)
+
+NIUONE_HOLDING_LIFECYCLE_SCHEMA_VERSION = 1
+NIUONE_HOLDING_LIFECYCLE_PATH_FIELD = "niuone_holding_lifecycle_path"
+
+
+def _niuone_lifecycle_path_number(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return round(number, 4) if math.isfinite(number) else None
+
+
+def _niuone_lifecycle_path_timestamp(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    return text
+
+
+def _niuone_lifecycle_path_datetime(value: Any) -> datetime | None:
+    text = _niuone_lifecycle_path_timestamp(value)
+    if not text:
+        return None
+    parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    offset = parsed.utcoffset()
+    if offset is not None:
+        parsed = (parsed - offset).replace(tzinfo=None)
+    return parsed
+
+
+def record_niuone_lifecycle_observation(
+    position: dict[str, Any],
+    *,
+    observed_at: str,
+    source: str,
+    complete_from_entry: bool = False,
+) -> bool:
+    """Append or extend one canonical holding-stage segment.
+
+    This telemetry never changes a buy, sell, score, or position limit.  A
+    segment is appended only when the canonical lifecycle stage changes;
+    repeated scans extend the last segment so the stored path remains compact.
+    """
+    timestamp = _niuone_lifecycle_path_timestamp(observed_at)
+    stage = str(position.get("niuone_lifecycle_stage") or "").strip()
+    definition = NIUONE_LIFECYCLE_STAGES.get(stage)
+    if not timestamp or definition is None:
+        return False
+    observation_detail = {
+        "observed_at": timestamp,
+        "source": str(source or "holding_context"),
+        "mainline_state": str(position.get("mainline_state") or ""),
+        "mainline_score": _niuone_lifecycle_path_number(
+            position.get("mainline_score")
+        ),
+    }
+    observation = {
+        "stage": stage,
+        "label": str(definition.get("label") or ""),
+        "order": int(definition.get("order") or 0),
+        "entry_policy": str(definition.get("entry_policy") or ""),
+        "entered_at": timestamp,
+        "last_observed_at": timestamp,
+        "observation_count": 1,
+        "source": str(source or "holding_context"),
+        "observations": [observation_detail],
+        "mainline_state_at_entry": str(
+            position.get("mainline_state") or ""
+        ),
+        "mainline_score_at_entry": _niuone_lifecycle_path_number(
+            position.get("mainline_score")
+        ),
+        "last_mainline_state": str(position.get("mainline_state") or ""),
+        "last_mainline_score": _niuone_lifecycle_path_number(
+            position.get("mainline_score")
+        ),
+    }
+    raw_path = position.get(NIUONE_HOLDING_LIFECYCLE_PATH_FIELD)
+    path = raw_path if isinstance(raw_path, list) else []
+    if not isinstance(raw_path, list):
+        position[NIUONE_HOLDING_LIFECYCLE_PATH_FIELD] = path
+    if complete_from_entry and not path:
+        position["niuone_holding_lifecycle_complete_from_entry"] = True
+    else:
+        position.setdefault(
+            "niuone_holding_lifecycle_complete_from_entry",
+            False,
+        )
+    if not path:
+        path.append(observation)
+        return True
+    last = path[-1]
+    if not isinstance(last, dict):
+        position["niuone_holding_lifecycle_complete_from_entry"] = False
+        path.append(observation)
+        return True
+    last_timestamp = _niuone_lifecycle_path_timestamp(
+        last.get("last_observed_at")
+    )
+    last_datetime = _niuone_lifecycle_path_datetime(last_timestamp)
+    current_datetime = _niuone_lifecycle_path_datetime(timestamp)
+    if (
+        last_datetime is not None
+        and current_datetime is not None
+        and current_datetime < last_datetime
+    ):
+        return False
+    if str(last.get("stage") or "") != stage:
+        path.append(observation)
+        return True
+    if last_datetime == current_datetime:
+        return False
+    raw_observations = last.get("observations")
+    observations = (
+        raw_observations if isinstance(raw_observations, list) else []
+    )
+    if not isinstance(raw_observations, list):
+        last["observations"] = observations
+    observations.append(observation_detail)
+    last["last_observed_at"] = timestamp
+    last["observation_count"] = len(observations)
+    last["last_mainline_state"] = observation["last_mainline_state"]
+    last["last_mainline_score"] = observation["last_mainline_score"]
+    return True
+
+
+def niuone_lifecycle_exit_evidence_from_position(
+    position: dict[str, Any],
+    *,
+    observed_at: str,
+) -> dict[str, Any]:
+    """Freeze the causal stage path visible at one simulated sell."""
+    record_niuone_lifecycle_observation(
+        position,
+        observed_at=observed_at,
+        source="exit_fill",
+    )
+    raw_path = position.get(NIUONE_HOLDING_LIFECYCLE_PATH_FIELD)
+    path = [
+        _json_safe_copy(item)
+        for item in (raw_path if isinstance(raw_path, list) else [])
+        if isinstance(item, dict)
+    ]
+    stage = str(position.get("niuone_lifecycle_stage") or "").strip()
+    definition = NIUONE_LIFECYCLE_STAGES.get(stage) or {}
+    sequence = [str(item.get("stage") or "") for item in path]
+    return {
+        "schema_version": NIUONE_HOLDING_LIFECYCLE_SCHEMA_VERSION,
+        "path_complete_from_entry": (
+            position.get("niuone_holding_lifecycle_complete_from_entry")
+            is True
+        ),
+        "exit_niuone_lifecycle_stage": stage,
+        "exit_niuone_lifecycle_label": str(
+            definition.get("label") or ""
+        ),
+        "exit_niuone_lifecycle_order": definition.get("order"),
+        "exit_niuone_lifecycle_entry_policy": str(
+            definition.get("entry_policy") or ""
+        ),
+        "stage_sequence": sequence,
+        "transition_count": max(0, len(sequence) - 1),
+        "reached_markup": "markup" in sequence,
+        "reached_climax": "climax" in sequence,
+        "reached_divergence": "divergence" in sequence,
+        "reached_fade": "fade" in sequence,
+        "path": path,
+    }
+
+
+def niuone_entry_context_from_position(
+    position: dict[str, Any],
+) -> dict[str, Any]:
+    """Project immutable entry-era evidence from a NiuOne position."""
+    return {
+        key: position[key]
+        for key in NIUONE_ENTRY_CONTEXT_FIELDS
+        if key in position
+    }
+
+
+def niuone_candidate_selection_context(
+    candidate: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    strategy_id: str,
+) -> dict[str, Any]:
+    """Describe the selected name's rank inside the current decision pool."""
+    if "selection_same_stage_candidate_count" in candidate:
+        return {
+            "entry_signal_score": candidate.get("selection_signal_score"),
+            "entry_candidate_pool_size": candidate.get(
+                "selection_candidate_pool_size"
+            ),
+            "entry_same_stage_candidate_count": candidate.get(
+                "selection_same_stage_candidate_count"
+            ),
+            "entry_same_stage_candidate_rank": candidate.get(
+                "selection_same_stage_candidate_rank"
+            ),
+            "entry_same_stage_top_score_gap": candidate.get(
+                "selection_same_stage_top_score_gap"
+            ),
+        }
+    indexed: list[tuple[int, dict[str, Any], float]] = []
+    for index, item in enumerate(candidates):
+        item_strategy = str(
+            item.get("best_strategy")
+            or item.get("strategy")
+            or item.get("strategy_id")
+            or ""
+        ).strip()
+        if item_strategy != strategy_id:
+            continue
+        score = _safe_float(
+            item.get("best_decision_score")
+            if item.get("best_decision_score") is not None
+            else item.get("best_score")
+            if item.get("best_score") is not None
+            else item.get("score"),
+            float("nan"),
+        )
+        if math.isfinite(score):
+            indexed.append((index, item, score))
+    ranked = sorted(indexed, key=lambda item: (-item[2], item[0]))
+    candidate_code = normalize_code(candidate.get("code") or "")
+    candidate_rank = next(
+        (
+            rank
+            for rank, (_index, item, _score) in enumerate(ranked, start=1)
+            if item is candidate
+            or normalize_code(item.get("code") or "") == candidate_code
+        ),
+        None,
+    )
+    signal_score = next(
+        (
+            score
+            for _index, item, score in indexed
+            if item is candidate
+            or normalize_code(item.get("code") or "") == candidate_code
+        ),
+        None,
+    )
+    top_gap = (
+        round(ranked[0][2] - ranked[1][2], 4)
+        if len(ranked) > 1
+        else None
+    )
+    return {
+        "entry_signal_score": round(signal_score, 4)
+        if signal_score is not None else None,
+        "entry_candidate_pool_size": len(candidates),
+        "entry_same_stage_candidate_count": len(ranked),
+        "entry_same_stage_candidate_rank": candidate_rank,
+        "entry_same_stage_top_score_gap": top_gap,
+    }
+
+
+PRACTICE_CANDIDATE_EVIDENCE_FIELDS = (
+    "code",
+    "name",
+    "industry",
+    "sector",
+    "best_strategy",
+    "strategy",
+    "strategy_id",
+    "best_score",
+    "best_decision_score",
+    "score",
+    "entry_threshold",
+    "actionable",
+    "hard_blockers",
+    "risk_flags",
+    "market_regime",
+    "market_allows_buys",
+    "market_hard_stop",
+    "mainline_state",
+    "mainline_score",
+    "mainline_confirmed",
+    "mainline_cross_day_persistent",
+    "niuone_lifecycle_stage",
+    "niuone_lifecycle_label",
+    "niuone_lifecycle_order",
+    "niuone_lifecycle_entry_policy",
+    "stock_sector_rank",
+    "stock_leader_rank",
+    "stock_leader_tier",
+    "stock_strong",
+    "daily_v_reversal",
+    "daily_v_recovery_ratio",
+    "stop_price",
+    "stop_source",
+    "atr",
+    "atr20",
+    "recent_close",
+    "execution_buffer_pct",
+    "selection_signal_score",
+    "selection_candidate_pool_size",
+    "selection_same_stage_candidate_count",
+    "selection_same_stage_candidate_rank",
+    "selection_same_stage_top_score_gap",
+)
+
+
+def _practice_candidate_evidence_key(candidate: dict[str, Any]) -> str:
+    snapshot = {
+        key: candidate.get(key)
+        for key in PRACTICE_CANDIDATE_EVIDENCE_FIELDS
+        if key in candidate
+    }
+    snapshot["code"] = normalize_code(candidate.get("code") or "")
+    return json.dumps(
+        snapshot,
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    )
+
+
+def build_practice_candidate_evidence(
+    raw_candidates: list[Any],
+    eligible_candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Freeze the observed opportunity set without raw prompts or news text."""
+    eligible_ids = {id(item) for item in eligible_candidates}
+    eligible_keys = [
+        _practice_candidate_evidence_key(item)
+        for item in eligible_candidates
+    ]
+    evidence: list[dict[str, Any]] = []
+    for observed_rank, raw in enumerate(raw_candidates, start=1):
+        if not isinstance(raw, dict):
+            continue
+        code = normalize_code(raw.get("code") or "")
+        strategy_id = str(
+            raw.get("best_strategy")
+            or raw.get("strategy")
+            or raw.get("strategy_id")
+            or ""
+        ).strip()
+        blockers: list[str] = []
+        if not candidate_in_stock_universe(raw):
+            blockers.append("outside_configured_stock_universe")
+        if not candidate_matches_active_strategy(raw):
+            blockers.append("outside_active_strategy_suite")
+        blockers.extend(candidate_buy_blockers(raw))
+        candidate_key = _practice_candidate_evidence_key(raw)
+        eligible = id(raw) in eligible_ids
+        if not eligible and candidate_key in eligible_keys:
+            eligible = True
+        if eligible and candidate_key in eligible_keys:
+            eligible_keys.remove(candidate_key)
+        if not eligible:
+            blockers.append("not_selected_for_decision")
+        snapshot = {
+            key: raw.get(key)
+            for key in PRACTICE_CANDIDATE_EVIDENCE_FIELDS
+            if key in raw
+        }
+        snapshot.update({
+            "code": code,
+            "strategy_id": strategy_id,
+            "observed_rank": observed_rank,
+            "eligible_for_decision": eligible,
+            "eligibility_blockers": blockers,
+        })
+        if is_niuone_strategy(strategy_id):
+            snapshot.update(
+                niuone_candidate_selection_context(
+                    raw,
+                    eligible_candidates,
+                    strategy_id,
+                )
+            )
+        evidence.append(snapshot)
+    return evidence
+
+
 def is_dynamic_risk_strategy(strategy_id: str) -> bool:
     return is_sector_tide_strategy(strategy_id) or is_niuone_strategy(strategy_id)
 
@@ -4061,7 +4716,12 @@ def sync_niuone_position_context(state: dict[str, Any], b1_payload: dict[str, An
         entry_strategy = position_entry_strategy(pos) if isinstance(pos, dict) else ""
         if not isinstance(pos, dict) or not is_niuone_strategy(entry_strategy):
             continue
-        budget = niuone_risk_budget(str(market.get("state") or ""), entry_strategy)
+        regime = str(
+            market.get("risk_state")
+            or market.get("state")
+            or ""
+        )
+        budget = niuone_risk_budget(regime, entry_strategy)
         normalized_code = normalize_code(code)
         candidate = candidates.get(normalized_code, {})
         stock = stocks.get(normalized_code) if isinstance(stocks.get(normalized_code), dict) else {}
@@ -4090,25 +4750,17 @@ def sync_niuone_position_context(state: dict[str, Any], b1_payload: dict[str, An
             pos.pop("mainline_weak_last_date", None)
         reversal_probe = entry_strategy == "niu_reversal_probe"
         stock_role = str(
-            ("today_leader" if reversal_probe and stock.get("today_leader_rank") == 1 else "today_core")
-            if reversal_probe and stock.get("today_leader_tier")
-            else stock.get("role") or candidate.get("stock_role") or ""
+            stock.get("role") or candidate.get("stock_role") or ""
         ).strip()
-        stock_strong = stock.get("reversal_strong") if reversal_probe else stock.get("strong")
+        stock_strong = stock.get("strong")
         if stock_strong is None:
-            candidate_strong_key = "stock_reversal_strong" if reversal_probe else "stock_strong"
-            if candidate_strong_key in candidate:
-                stock_strong = bool(candidate.get(candidate_strong_key))
-        stock_leader_tier = stock.get("today_leader_tier") if reversal_probe else stock.get("leader_tier")
+            if "stock_strong" in candidate:
+                stock_strong = bool(candidate.get("stock_strong"))
+        stock_leader_tier = stock.get("leader_tier")
         if stock_leader_tier is None:
-            candidate_tier_key = "stock_reversal_leader_tier" if reversal_probe else "stock_leader_tier"
-            if candidate_tier_key in candidate:
-                stock_leader_tier = bool(candidate.get(candidate_tier_key))
-        stock_leader_rank = (
-            stock.get("today_leader_rank", candidate.get("stock_reversal_leader_rank"))
-            if reversal_probe
-            else stock.get("leader_rank", candidate.get("stock_leader_rank"))
-        )
+            if "stock_leader_tier" in candidate:
+                stock_leader_tier = bool(candidate.get("stock_leader_tier"))
+        stock_leader_rank = stock.get("leader_rank", candidate.get("stock_leader_rank"))
         leader_status_observed = stock_leader_tier is not None
         if leader_status_observed and not reversal_probe:
             is_current_leader = stock_leader_tier is True and stock_strong is not False
@@ -4136,18 +4788,57 @@ def sync_niuone_position_context(state: dict[str, Any], b1_payload: dict[str, An
             pos["stock_strong"] = bool(stock_strong)
         pos["mainline_score"] = theme.get("score")
         pos["mainline_state"] = state_name
+        if score >= 0:
+            previous_peak_score = _safe_float(
+                pos.get("mainline_peak_score"),
+                score,
+            )
+            mainline_peak_score = max(previous_peak_score, score)
+            pos["mainline_peak_score"] = round(mainline_peak_score, 3)
+            pos["mainline_peak_drawdown_points"] = round(
+                max(0.0, mainline_peak_score - score),
+                3,
+            )
         pos["mainline_raw_state"] = theme.get("raw_state")
         pos["mainline_confirmation_count"] = theme.get("confirmation_count")
         pos["mainline_cross_day_persistent"] = bool(theme.get("cross_day_persistent"))
         pos["mainline_confirmed"] = bool(theme.get("mainline_confirmed"))
-        pos["reversal_candidate"] = bool(theme.get("reversal_candidate"))
-        pos["reversal_confirmed"] = bool(theme.get("reversal_confirmed"))
-        pos["reversal_confirmation_count"] = theme.get("reversal_confirmation_count")
+        for key in (
+            "niuone_lifecycle_stage",
+            "niuone_lifecycle_label",
+            "niuone_lifecycle_order",
+            "niuone_lifecycle_entry_policy",
+        ):
+            if key in theme:
+                pos[key] = theme[key]
+        record_niuone_lifecycle_observation(
+            pos,
+            observed_at=generated_at,
+            source="mainline_scan",
+        )
+        if reversal_probe:
+            for key in (
+                "reversal_basis", "daily_v_reversal", "daily_v_left_peak_date",
+                "daily_v_trough_date", "daily_v_left_days", "daily_v_right_days",
+                "daily_v_decline_pct", "daily_v_rebound_pct", "daily_v_recovery_ratio",
+                "daily_v_rising_ratio", "daily_v_pattern_score",
+            ):
+                if candidate.get(key) is not None:
+                    pos[key] = candidate.get(key)
         pos["today_breadth_pct"] = theme.get("today_breadth_pct")
         pos["effective_strong_count"] = theme.get("effective_strong_count")
         pos["leader_concentration"] = theme.get("leader_concentration")
-        pos["market_regime"] = market.get("state")
-        pos["risk_budget_regime"] = market.get("state")
+        if not str(pos.get("entry_market_regime") or "").strip():
+            # Migrate pre-policy positions once from the best entry-era context
+            # still available, before current market state is refreshed below.
+            pos["entry_market_regime"] = str(
+                pos.get("risk_budget_regime")
+                or pos.get("market_regime")
+                or regime
+                or ""
+            )
+        pos["market_regime"] = regime
+        pos["risk_budget_regime"] = regime
         pos["per_trade_risk_budget_pct"] = budget["per_trade_risk_pct"]
         pos["max_open_risk_pct"] = budget["max_open_risk_pct"]
         pos["max_sector_risk_pct"] = budget["max_sector_risk_pct"]
@@ -4507,6 +5198,9 @@ def evaluate_sell_signal(
         or pos.get("avg_cost")
         or 0
     )
+    niuone_execution_price = (
+        realtime_price if niuone_position and realtime_price > 0 else price
+    )
     avg_cost = float(pos.get("avg_cost") or 0)
     if price <= 0 or avg_cost <= 0:
         return None
@@ -4517,14 +5211,19 @@ def evaluate_sell_signal(
 
     pnl_pct = (price / avg_cost - 1) * 100
     realtime_pnl_pct = (realtime_price / avg_cost - 1) * 100
-    prior_high = float(pos.get("highest_price") or price)
-    highest_price = max(prior_high, price)
+    performance_price = niuone_execution_price if niuone_position else price
+    performance_pnl_pct = (performance_price / avg_cost - 1) * 100
+    prior_high = float(pos.get("highest_price") or performance_price)
+    highest_price = max(prior_high, performance_price)
     pos["highest_price"] = round(highest_price, 3)
     prior_max = pos.get("max_pnl_pct")
     try:
-        max_pnl_pct = max(float(prior_max), pnl_pct) if prior_max is not None else pnl_pct
+        max_pnl_pct = (
+            max(float(prior_max), performance_pnl_pct)
+            if prior_max is not None else performance_pnl_pct
+        )
     except Exception:
-        max_pnl_pct = pnl_pct
+        max_pnl_pct = performance_pnl_pct
     pos["max_pnl_pct"] = round(max_pnl_pct, 2)
 
     bbi = float(pos.get("bbi") or 0)
@@ -4566,6 +5265,14 @@ def evaluate_sell_signal(
     shaofu_stop = 0.0 if pos.get("shaofu_stop_source") == "fallback_pct" else float(
         pos.get("shaofu_stop_price") or pos.get("entry_stop_price") or 0
     )
+    if (
+        niuone_position
+        and NIUONE_BREAK_EVEN_AFTER_PARTIAL
+        and pos.get("partial_tp_done")
+    ):
+        shaofu_stop = max(shaofu_stop, avg_cost)
+        pos["entry_stop_price"] = round(shaofu_stop, 3)
+        pos["entry_stop_source"] = "niu_breakeven"
     if shaofu_stop > 0 and price < shaofu_stop:
         stop_labels = {
             "n_structure_low": "N型结构前低",
@@ -4575,7 +5282,10 @@ def evaluate_sell_signal(
             "super_b1_washout_low": "超级B1洗盘阴线低点",
             "tide_structure_low": "板块潮汐结构低点",
             "niu_structure_low": "牛牛战法结构低点",
-            "niu_reversal_low": "牛牛反转日内低点",
+            "niu_breakout_pivot": "牛牛突破位",
+            "niu_reversal_low": "牛牛试仓V型低点",
+            "niu_reversal_right_low": "牛牛试仓右侧确认低点",
+            "niu_breakeven": "牛牛首段止盈后成本保护线",
         }
         stop_source = str(pos.get("shaofu_stop_source") or pos.get("entry_stop_source") or "")
         stop_label = stop_labels.get(stop_source, "入场止损")
@@ -4586,28 +5296,138 @@ def evaluate_sell_signal(
         )
         return _sell_signal(f"收盘价破{stop_label} (收盘{price:.2f} < 止损{shaofu_stop:.2f})", stop_signal)
 
+    climax_runner_active = False
     if sector_tide_position or niuone_position:
         if niuone_position:
             reversal_probe = entry_strategy == "niu_reversal_probe"
             theme_score = _safe_float(pos.get("mainline_score"), 100.0)
             theme_state = str(pos.get("mainline_state") or "")
+            climax_runner_active = niuone_climax_runner_active(
+                enabled=NIUONE_CLIMAX_RUNNER_ENABLED,
+                climax_partial_done=bool(
+                    pos.get("niuone_lifecycle_climax_partial_done")
+                ),
+                partial_tp_done=bool(pos.get("partial_tp_done")),
+                stock_strong=pos.get("stock_strong") is True,
+                theme_score=theme_score,
+                theme_state=theme_state,
+            )
+            leader_loss_confirmations = (
+                NIUONE_CLIMAX_RUNNER_LEADER_LOSS_CONFIRMATIONS
+                if climax_runner_active
+                else NIUONE_LEADER_LOSS_CONFIRMATIONS
+            )
             if pos.get("market_hard_stop") and (theme_score < 55 or theme_state in {"fading", "inactive"}):
                 return _sell_signal(
                     f"市场硬停止且主线转弱 ({pos.get('industry') or '-'}分数{theme_score:.1f}，状态{theme_state or '-'})",
                     "niu_market_hard_stop",
                 )
-            if not reversal_probe and int(pos.get("niu_leader_lost_count") or 0) >= NIUONE_LEADER_LOSS_CONFIRMATIONS:
+            if not reversal_probe and int(
+                pos.get("niu_leader_lost_count") or 0
+            ) >= leader_loss_confirmations:
                 return _sell_signal(
-                    f"连续{NIUONE_LEADER_LOSS_CONFIRMATIONS}个交易日跌出强势行业龙头梯队 "
-                    f"({pos.get('industry') or '-'}，当前排名{pos.get('stock_leader_rank') or '-'})",
+                    f"连续{leader_loss_confirmations}个交易日跌出强势行业龙头梯队 "
+                    f"({pos.get('industry') or '-'}，当前排名"
+                    f"{pos.get('stock_leader_rank') or '-'}"
+                    f"{'，高潮减仓后余仓' if climax_runner_active else ''})",
                     "niu_leader_lost",
                 )
             if not reversal_probe and (
-                int(pos.get("mainline_weak_count") or 0) >= 2 or theme_state == "inactive"
+                int(pos.get("mainline_weak_count") or 0)
+                >= NIUONE_MAINLINE_WEAK_CONFIRMATIONS
+                or theme_state == "inactive"
             ):
                 return _sell_signal(
                     f"主线连续转弱 ({pos.get('industry') or '-'}分数{theme_score:.1f}，状态{theme_state or '-'})",
                     "niu_mainline_faded",
+                )
+            if reversal_probe and (
+                int(pos.get("mainline_weak_count") or 0)
+                >= NIUONE_REVERSAL_MAINLINE_WEAK_CONFIRMATIONS
+                or theme_state == "inactive"
+            ):
+                return _sell_signal(
+                    "牛牛试仓所属题材未能维持主线酝酿强度 "
+                    f"({pos.get('industry') or '-'}分数{theme_score:.1f}，"
+                    f"状态{theme_state or '-'})",
+                    "niu_reversal_theme_failed",
+                )
+            if (
+                time_exit_allowed
+                and (
+                    entry_strategy == "niu_leader"
+                    or pos.get("niuone_markup_rebalance_reduced") is True
+                )
+            ):
+                rebalance_atr = _safe_float(
+                    pos.get("atr20") or pos.get("entry_atr20"),
+                    0.0,
+                )
+                rebalance = niuone_markup_rebalance_observation(
+                    pos,
+                    current_price=price,
+                    atr=rebalance_atr,
+                    session_key=today,
+                    lifecycle_stage=str(
+                        pos.get("niuone_lifecycle_stage") or ""
+                    ),
+                    current_pnl_pct=pnl_pct,
+                    strong_leader=bool(
+                        pos.get("stock_leader_tier") is True
+                        and pos.get("stock_strong") is True
+                    ),
+                    pullback_atr=NIUONE_MARKUP_REBALANCE_PULLBACK_ATR,
+                    stall_sessions=NIUONE_MARKUP_REBALANCE_STALL_SESSIONS,
+                    stall_min_atr=NIUONE_MARKUP_REBALANCE_STALL_MIN_ATR,
+                    minimum_sessions_after_add=(
+                        NIUONE_MARKUP_REBALANCE_MIN_SESSIONS_AFTER_ADD
+                    ),
+                )
+                pos.update(dict(rebalance.get("state") or {}))
+                if rebalance.get("arm_existing_reduction") is True:
+                    pos.update({
+                        "niuone_markup_rebalance_armed": True,
+                        "niuone_markup_rebalance_armed_date": today,
+                        "niuone_markup_rebalance_reentry_price": round(
+                            price
+                            + NIUONE_MARKUP_REBALANCE_REBOUND_ATR
+                            * rebalance_atr,
+                            3,
+                        ),
+                        "niuone_markup_rebalance_last_trigger": str(
+                            rebalance.get("trigger") or ""
+                        ),
+                        "niuone_markup_rebalance_arm_count": (
+                            int(
+                                pos.get(
+                                    "niuone_markup_rebalance_arm_count"
+                                ) or 0
+                            ) + 1
+                        ),
+                    })
+                if rebalance.get("trim") is True:
+                    trigger_label = (
+                        "回落"
+                        if rebalance.get("trigger") == "pullback"
+                        else "横盘"
+                    )
+                    return _sell_signal(
+                        f"牛牛主升{trigger_label}释放波段仓位 "
+                        f"(距周期高点{rebalance.get('drawdown_atr', 0):g}ATR，"
+                        f"横盘计数{rebalance.get('stall_count', 0)})",
+                        "niu_markup_rebalance_partial",
+                        NIUONE_MARKUP_REBALANCE_TRIM_RATIO,
+                    )
+            if (
+                str(pos.get("niuone_lifecycle_stage") or "") == "climax"
+                and pnl_pct + 1e-9 >= NIUONE_LIFECYCLE_CLIMAX_MIN_PNL_PCT
+                and not pos.get("niuone_lifecycle_climax_partial_done")
+            ):
+                return _sell_signal(
+                    "牛牛主线进入高潮阶段，先减仓1/3锁定利润 "
+                    f"(现盈亏{pnl_pct:.1f}%)",
+                    "niu_lifecycle_climax_partial",
+                    NIUONE_LIFECYCLE_CLIMAX_PARTIAL_RATIO,
                 )
         else:
             sector_score = _safe_float(pos.get("sector_score"), 100.0)
@@ -4638,33 +5458,85 @@ def evaluate_sell_signal(
                 pos.get("mainline_cross_day_persistent")
                 or pos.get("mainline_confirmed")
             ),
+            strategy_variant=str(pos.get("reversal_basis") or ""),
         )
         if strategy_time_exit:
             return strategy_time_exit
 
         entry_stop = _safe_float(pos.get("entry_stop_price"), 0.0)
         initial_risk = avg_cost - entry_stop if 0 < entry_stop < avg_cost else 0.0
-        two_r_price = avg_cost + 2 * initial_risk if initial_risk > 0 else 0.0
-        if two_r_price > 0:
-            pos["two_r_price"] = round(two_r_price, 3)
-            if price >= two_r_price and not pos.get("partial_tp_done"):
+        if niuone_position:
+            target_r, partial_take_profit_ratio = resolve_niuone_partial_take_profit(
+                strategy_id=entry_strategy,
+                entry_market_regime=str(
+                    pos.get("entry_market_regime")
+                    or pos.get("market_regime")
+                    or ""
+                ),
+                default_r=NIUONE_PARTIAL_TAKE_PROFIT_R,
+                default_ratio=NIUONE_PARTIAL_TAKE_PROFIT_RATIO,
+                reversal_early_regimes=NIUONE_REVERSAL_EARLY_PROTECTION_REGIMES,
+                reversal_early_r=NIUONE_REVERSAL_EARLY_PARTIAL_TAKE_PROFIT_R,
+                reversal_early_ratio=(
+                    NIUONE_REVERSAL_EARLY_PARTIAL_TAKE_PROFIT_RATIO
+                ),
+            )
+        else:
+            target_r = 2.0
+            partial_take_profit_ratio = TAKE_PROFIT_PARTIAL_RATIO
+        partial_target_price = (
+            avg_cost + target_r * initial_risk if initial_risk > 0 else 0.0
+        )
+        if partial_target_price > 0:
+            target_key = "niu_partial_target_price" if niuone_position else "two_r_price"
+            pos[target_key] = round(partial_target_price, 3)
+            if (
+                niuone_execution_price >= partial_target_price
+                and not pos.get("partial_tp_done")
+            ):
+                target_label = f"{target_r:g}R"
                 return _sell_signal(
-                    f"{'牛牛战法' if niuone_position else '板块潮汐'}达到2R先减半 (现价{price:.2f} ≥ 2R目标{two_r_price:.2f})",
-                    "niu_2r_partial" if niuone_position else "tide_2r_partial",
-                    TAKE_PROFIT_PARTIAL_RATIO,
+                    f"{'牛牛战法' if niuone_position else '板块潮汐'}达到{target_label}"
+                    f"先减仓{partial_take_profit_ratio * 100:g}% "
+                    f"(现价{niuone_execution_price:.2f} ≥ {target_label}目标{partial_target_price:.2f})",
+                    "niu_r_partial" if niuone_position else "tide_2r_partial",
+                    partial_take_profit_ratio,
                 )
 
         atr20 = _safe_float(pos.get("atr20") or pos.get("entry_atr20"), 0.0)
-        if atr20 > 0 and (pos.get("partial_tp_done") or (two_r_price > 0 and highest_price >= two_r_price)):
-            dynamic_trailing_stop = highest_price - 2.0 * atr20
+        if atr20 > 0 and (
+            pos.get("partial_tp_done")
+            or (
+                partial_target_price > 0
+                and highest_price >= partial_target_price
+            )
+        ):
+            trailing_atr = (
+                NIUONE_CLIMAX_RUNNER_TRAILING_ATR
+                if niuone_position and climax_runner_active
+                else 2.0
+            )
+            dynamic_trailing_stop = highest_price - trailing_atr * atr20
             pos["niu_trailing_stop" if niuone_position else "tide_trailing_stop"] = round(dynamic_trailing_stop, 3)
-            if dynamic_trailing_stop > avg_cost and price <= dynamic_trailing_stop:
+            if (
+                dynamic_trailing_stop > avg_cost
+                and niuone_execution_price <= dynamic_trailing_stop
+            ):
                 return _sell_signal(
-                    f"{'牛牛战法' if niuone_position else '板块潮汐'}2ATR跟踪退出 (现价{price:.2f} ≤ 跟踪线{dynamic_trailing_stop:.2f})",
+                    f"{'牛牛战法' if niuone_position else '板块潮汐'}"
+                    f"{trailing_atr:g}ATR跟踪退出 "
+                    f"(现价{niuone_execution_price:.2f} ≤ 跟踪线{dynamic_trailing_stop:.2f})",
                     "niu_atr_trail" if niuone_position else "tide_atr_trail",
                 )
-        if hold_days >= MAX_HOLD_DAYS:
-            return _sell_signal(f"持仓到期 ({hold_days}d ≥ {MAX_HOLD_DAYS}d)", "max_hold_days")
+        max_hold_days = (
+            NIUONE_MAX_HOLD_CALENDAR_DAYS
+            if niuone_position else MAX_HOLD_DAYS
+        )
+        if hold_days >= max_hold_days:
+            return _sell_signal(
+                f"持仓到期 ({hold_days}d ≥ {max_hold_days}d)",
+                "max_hold_days",
+            )
         return None
 
     chuhuo = pos.get("chuhuo_wushi") or {}
@@ -4740,6 +5612,7 @@ def evaluate_sell_signal(
         time_exit_hhmm=TIME_EXIT_HHMM,
         no_progress_hold_days=NO_PROGRESS_HOLD_DAYS,
         no_progress_max_pnl_pct=NO_PROGRESS_MAX_PNL_PCT,
+        strategy_variant=str(pos.get("reversal_basis") or ""),
     )
     if strategy_time_exit:
         return strategy_time_exit
@@ -5030,13 +5903,41 @@ def _refresh_position_bbi(state: dict[str, Any], dt: datetime | None = None) -> 
         except Exception:
             continue
 
-def check_auto_exits(state: dict[str, Any], dt: datetime | None = None) -> list[dict[str, Any]]:
+AUTO_EXIT_PERSISTENCE_STATUS_KEY = "_auto_exit_persistence_status"
+
+
+def _default_persistence_status() -> dict[str, bool]:
+    return {
+        "trades_persisted": True,
+        "decision_persisted": True,
+        "durable_evidence_persisted": True,
+    }
+
+
+def _pop_auto_exit_persistence_status(
+    state: dict[str, Any],
+) -> dict[str, bool]:
+    raw = state.pop(AUTO_EXIT_PERSISTENCE_STATUS_KEY, None)
+    if not isinstance(raw, dict):
+        return _default_persistence_status()
+    defaults = _default_persistence_status()
+    return {
+        key: raw.get(key) is True
+        for key in defaults
+    }
+
+
+def check_auto_exits(
+    state: dict[str, Any],
+    dt: datetime | None = None,
+) -> list[dict[str, Any]]:
     """检查所有持仓是否触发自动止盈/止损/技术退出条件。
     
     退出优先级由 evaluate_sell_signal 统一维护：
     硬止损、S1/BBI失效、10日低点、峰值回撤/ATR吊灯、
     分批止盈、目标止盈、持仓时间离场。
     """
+    state[AUTO_EXIT_PERSISTENCE_STATUS_KEY] = _default_persistence_status()
     check_dt = dt or datetime.now()
     trade_allowed, _ = is_a_share_execution_time(check_dt)
     if not trade_allowed:
@@ -5086,6 +5987,20 @@ def check_auto_exits(state: dict[str, Any], dt: datetime | None = None) -> list[
             or classify_buy_strategy(str(pos.get("entry_reason") or ""))
         )
         exit_rule = classify_exit_rule(exit_reason, str(exit_signal.get("signal") or ""))
+        trade_time = now_ts()
+        niuone_entry_context = (
+            niuone_entry_context_from_position(pos)
+            if is_niuone_strategy(entry_strategy)
+            else {}
+        )
+        niuone_lifecycle_evidence = (
+            niuone_lifecycle_exit_evidence_from_position(
+                pos,
+                observed_at=trade_time,
+            )
+            if is_niuone_strategy(entry_strategy)
+            else {}
+        )
         sell_ratio = float(exit_signal.get("sell_ratio") or 1.0)
         
         # 执行卖出
@@ -5098,6 +6013,50 @@ def check_auto_exits(state: dict[str, Any], dt: datetime | None = None) -> list[
                 pos["luzhu_half_done"] = True
             if exit_signal.get("signal") == "shaofu_soft_reduce":
                 pos["shaofu_soft_exit_reduced"] = True
+            if exit_signal.get("signal") == "niu_lifecycle_climax_partial":
+                pos["niuone_lifecycle_climax_partial_done"] = True
+            if exit_signal.get("signal") in {"niu_r_partial", "niu_2r_partial"}:
+                pos.update({
+                    "niuone_markup_rebalance_reduced": True,
+                    "niuone_markup_rebalance_cycle_peak_price": round(
+                        float(price),
+                        3,
+                    ),
+                    "niuone_markup_rebalance_stall_count": 0,
+                    "niuone_markup_rebalance_observation_count": 0,
+                    "niuone_markup_rebalance_last_observation": today,
+                    "niuone_markup_rebalance_reduction_source": str(
+                        exit_signal.get("signal") or ""
+                    ),
+                })
+            if exit_signal.get("signal") == "niu_markup_rebalance_partial":
+                rebalance_atr = _safe_float(
+                    pos.get("atr20") or pos.get("entry_atr20"),
+                    0.0,
+                )
+                pos.update({
+                    "niuone_markup_rebalance_armed": True,
+                    "niuone_markup_rebalance_reduced": True,
+                    "niuone_markup_rebalance_armed_date": today,
+                    "niuone_markup_rebalance_reentry_price": round(
+                        float(price)
+                        + NIUONE_MARKUP_REBALANCE_REBOUND_ATR
+                        * rebalance_atr,
+                        3,
+                    ),
+                    "niuone_markup_rebalance_trim_count": (
+                        int(
+                            pos.get("niuone_markup_rebalance_trim_count") or 0
+                        ) + 1
+                    ),
+                    "niuone_markup_rebalance_last_trim_price": round(
+                        float(price),
+                        3,
+                    ),
+                    "niuone_markup_rebalance_reduction_source": (
+                        "niu_markup_rebalance_partial"
+                    ),
+                })
             pos["partial_tp_done"] = True
         qty = qty // 100 * 100
         if qty <= 0:
@@ -5140,8 +6099,8 @@ def check_auto_exits(state: dict[str, Any], dt: datetime | None = None) -> list[
             positions.pop(code, None)
         cash += net_proceeds
         
-        executed.append({
-            "time": now_ts(),
+        executed_trade = {
+            "time": trade_time,
             "action": "SELL",
             "code": code,
             "name": pos.get("name") or "",
@@ -5165,22 +6124,24 @@ def check_auto_exits(state: dict[str, Any], dt: datetime | None = None) -> list[
             "strategy_mark": entry_mark,
             "exit_strategy_mark": exit_mark,
             "reason": exit_reason,
-        })
+        }
+        if niuone_entry_context:
+            executed_trade["niuone_entry_context"] = dict(
+                niuone_entry_context
+            )
+        if niuone_lifecycle_evidence:
+            executed_trade["niuone_lifecycle_evidence"] = dict(
+                niuone_lifecycle_evidence
+            )
+        executed.append(executed_trade)
     
     if executed:
         state["cash"] = round(cash, 2)
         state.setdefault("trade_log", []).extend(executed)
         del state["trade_log"][:-TRADE_LOG_LIMIT]
-        # 同步写入 DB
-        for e in executed:
-            try:
-                from niuniu_db import record_trade as _rt
-                _rt(e)
-            except Exception: pass
-        try:
-            from niuniu_db import snapshot_positions as _sp
-            _sp(state.get("positions", {}))
-        except Exception: pass
+        trades_persisted = _sync_trades_to_db(executed)
+        if trades_persisted:
+            _sync_positions_to_db(state)
         # 记录系统自动退出决策
         log_entry = {
             "time": now_ts(),
@@ -5196,7 +6157,14 @@ def check_auto_exits(state: dict[str, Any], dt: datetime | None = None) -> list[
             "executed": executed,
         }
         state.setdefault("decision_log", []).append(log_entry)
-        _sync_decision_to_db(log_entry)
+        decision_persisted = _sync_decision_to_db(log_entry)
+        state[AUTO_EXIT_PERSISTENCE_STATUS_KEY] = {
+            "trades_persisted": trades_persisted,
+            "decision_persisted": decision_persisted,
+            "durable_evidence_persisted": (
+                trades_persisted and decision_persisted
+            ),
+        }
     
     return executed
 
@@ -5213,18 +6181,21 @@ def run_auto_exits_once(dt: datetime | None = None) -> dict[str, Any]:
     refresh_position_intraday(state)
     _refresh_position_bbi(state, dt)
     update_zettaranc_volume_context(state, dt)
+    state.pop(AUTO_EXIT_PERSISTENCE_STATUS_KEY, None)
     executed = check_auto_exits(state, dt)
+    persistence_status = _pop_auto_exit_persistence_status(state)
     record_equity(state)
     save_state(state)
     if executed:
         _notify_trade_executions_safely(executed)
     return {
-        "ok": True,
+        "ok": persistence_status["durable_evidence_persisted"],
         "checked_at": dt.strftime("%Y-%m-%d %H:%M:%S"),
         "b3_exit_time": B3_EXIT_HHMM,
         "time_exit_time": TIME_EXIT_HHMM,
         "executed": executed,
         "executed_count": len(executed),
+        **persistence_status,
         "portfolio": enrich_portfolio(state),
     }
 
@@ -5771,12 +6742,12 @@ def current_trade_discipline_text(position_limit_desc: str, adaptive: dict[str, 
             )
         if any(is_niuone_strategy(strategy_id) for strategy_id in enabled):
             custom += (
-                "\n- 牛牛战法执行层动态风险预算：防守/市场硬停止禁止新仓；进攻/轮动/修复的单笔权益风险分别≤1.50%/1.00%/0.60%，"
-                "策略内组合风险≤4.50%/3.00%/1.80%，总仓≤70%/55%/35%，主题风险≤3.00%/2.00%/1.20%，主题敞口≤55%/40%/25%；"
-                f"领航/回踩/启动/反转试仓单票30%/25%/15%/5%仅为绝对上限，同一主题最多2只、同时最多持有{NIUONE_MAX_OPEN_POSITIONS}只。"
-                "\n- 牛牛反转只允许弱势起点后的板块V形修复：报价覆盖、上涨广度、低点反弹、领涨家数和资金条件达标，且至少间隔20分钟完成两次确认；只买日内前三且收复昨收的股票。"
-                "反转试仓在进攻/轮动/修复的单笔权益风险分别≤0.35%/0.30%/0.25%，T+0禁止加仓；跨日延续后才能升级为启动，确认主线后才能升级为领航/回踩。"
-                "\n- 牛牛战法退出：反转试仓T+1未延续退出、T+2仍未升级强制退出；成熟路径另按连续两个交易日跌出行业前三龙头梯队、主线连续转弱、市场硬停止叠加退潮、策略时间窗、2R减半和2ATR跟踪退出。"
+                "\n- 牛牛战法执行层动态风险预算：进攻/轮动/修复/防守的单笔权益风险分别≤1.50%/1.00%/0.60%/0.30%，"
+                "策略内组合风险≤4.50%/3.00%/1.80%/0.90%，总仓≤70%/55%/35%/20%，主题风险≤3.00%/2.00%/1.20%/0.60%，主题敞口≤55%/40%/25%/12%；仅市场复合硬停止禁止新仓。"
+                f"领涨/转强/启动/试仓单票30%/25%/15%/6.25%仅为绝对上限，同一主题最多2只、当日跨轮最多新开{NIUONE_MAX_NEW_POSITIONS_PER_TRADING_DAY}只、同时最多持有{NIUONE_MAX_OPEN_POSITIONS}只。"
+                "\n- 牛牛战法按主线酝酿→主升→高潮→分歧→退幕识别；试仓只参与candidate/emerging早段，主升阶段围绕启动/领涨，高潮不追普遍新仓，分歧只观察核心股调整后转强或减仓，持续回落不触发买点，退幕只退出。最近30根日K还须满足：左侧至少回落5日和8%，低点后至少修复3日和6%，收复左侧跌幅须在60%（含）至200%（不含）之间，并确认右侧持续抬高；达到200%后不再按早期试仓。"
+                "试仓在进攻/轮动/修复/防守的单笔权益风险分别≤0.35%/0.30%/0.25%/0.15%，以右侧最近3根日K低点为止损；试仓/启动持仓浮盈在2%～12%、仍处主升且个股保持强势领涨时，跨日延续先向10%上限加仓，主线确认后再向20%上限加仓，每级一次，分歧/高潮/退幕不加仓。"
+                "\n- 牛牛战法退出：试仓所属题材首次进入退幕即退出，3个交易日未延续右侧趋势也退出；成熟路径另按连续两个交易日跌出行业前三龙头梯队、主线连续转弱、市场硬停止叠加退幕和策略时间窗退出；高潮且不亏先减仓1/3，进攻/修复/防守试仓盘中达到0.75R先减仓50%，轮动试仓及成熟路径达到1R先减仓45%，余仓成本保护并按2ATR跟踪。"
             )
         return custom
     adaptive = adaptive or {}
@@ -6035,6 +7006,7 @@ def call_model_decision(
 加仓语义与纪律：
 - 对当前账户JSON里已有持仓输出 BUY，表示加仓/补仓；shares 是本次新增股数，不是目标总股数。
 - 加仓只用于顺势确认或强势回踩重新达标；亏损扩大、跌破原止损、今日新买T+1锁仓、盘面谨慎/防守时，不得为了摊低成本而加仓。
+- 牛牛试仓/启动持仓首次加仓仅限浮盈{NIUONE_MARKUP_UPGRADE_MIN_PNL_PCT:g}%～{NIUONE_MARKUP_UPGRADE_MAX_PNL_PCT:g}%、生命周期主升且个股保持强势领涨：启动跨日延续先向{NIUONE_MARKUP_EARLY_UPGRADE_POSITION_CAP_PCT:g}%上限加仓，主线完全确认后向{NIUONE_MARKUP_UPGRADE_POSITION_CAP_PCT:g}%上限加仓。确认领涨仓随后可重复执行波段再平衡：有效回落或横盘先减仓1/3，只有重新转强价被收复、生命周期回到主升且个股恢复强势领涨才补回风险上限；补回后必须等待下一次独立回撤，不设终身加仓次数上限。每笔仍取风险预算和阶段/单票上限的较小值，shares 只填写当前仓位到目标仓位的差额；高潮、未转强分歧、退幕不得加仓。
 - 加仓理由必须写明：原入场战法、当前盈亏/仓位、加仓后仓位占比、失效/止损条件，以及为何优于新开仓或继续HOLD。
 
 严格返回JSON，不要markdown，不要解释，格式：
@@ -6275,8 +7247,14 @@ def execute_actions(
     cash = float(state.get("cash") or 0)
     new_buys = 0
     market_strategy_ctx = market_strategy_ctx or current_market_strategy_context()
+    execution_context = decision.pop("_niuone_execution_context", {})
+    execution_context = (
+        execution_context if isinstance(execution_context, dict) else {}
+    )
+    decision.setdefault("execution_blocks", [])
     effective_max_open_positions = int(market_strategy_ctx.get("max_open_positions", MAX_OPEN_POSITIONS))
     effective_max_new_buys = int(market_strategy_ctx.get("max_new_buys_per_decision", MAX_NEW_BUYS_PER_DECISION))
+    niuone_opened_today = niuone_opened_position_codes_on_date(state)
     allow_market_guidance_buys = bool(market_strategy_ctx.get("allow_new_buys", True))
     daily_loss_budget_exceeded, daily_loss_budget_pnl = check_daily_loss_budget(state)
     if not trade_allowed:
@@ -6301,10 +7279,20 @@ def execute_actions(
         action["reason"] = reason
         shares = parse_model_action_shares(action)
         if shares is None or shares <= 0:
-            add_execution_block(decision, code, "模型未给出有效仓位 shares，本轮不自动补默认仓位")
+            add_execution_block(
+                decision,
+                code,
+                "模型未给出有效仓位 shares，本轮不自动补默认仓位",
+                category="invalid_order_quantity",
+            )
             continue
         if shares % 100 != 0:
-            add_execution_block(decision, code, f"模型仓位{shares}股不是100股整数倍，本轮不自动取整")
+            add_execution_block(
+                decision,
+                code,
+                f"模型仓位{shares}股不是100股整数倍，本轮不自动取整",
+                category="invalid_order_quantity",
+            )
             continue
         if act == "BUY":
             if daily_loss_budget_exceeded:
@@ -6312,56 +7300,150 @@ def execute_actions(
                     decision,
                     code,
                     f"日内亏损预算已触发({daily_loss_budget_pnl:.1f}%)，仅暂停BUY，SELL继续执行",
+                    category="daily_loss_budget",
                 )
                 continue
             if not candidate or not candidate_in_stock_universe(candidate):
-                add_execution_block(decision, code, "买入标的不在当前选股范围")
+                add_execution_block(
+                    decision,
+                    code,
+                    "买入标的不在当前选股范围",
+                    category="candidate_eligibility",
+                )
                 continue
             if not allow_market_guidance_buys:
-                add_execution_block(decision, code, f"盘面指引为{market_strategy_ctx.get('tone_label', '防守')}，暂停买入")
+                add_execution_block(
+                    decision,
+                    code,
+                    f"盘面指引为{market_strategy_ctx.get('tone_label', '防守')}，暂停买入",
+                    category="market_guidance",
+                )
                 continue
             buy_strategy = classify_buy_strategy(reason, candidate)
+            niuone_selection_context = (
+                niuone_candidate_selection_context(
+                    candidate,
+                    candidates,
+                    buy_strategy,
+                )
+                if is_niuone_strategy(buy_strategy)
+                else {}
+            )
             blockers = candidate_buy_blockers(candidate)
             if blockers:
-                add_execution_block(decision, code, "买入拦截：" + "、".join(blockers))
+                add_execution_block(
+                    decision,
+                    code,
+                    "买入拦截：" + "、".join(blockers),
+                    category="candidate_eligibility",
+                )
                 continue
             if is_niuone_strategy(buy_strategy) and quote_is_at_limit_up(code, str(name), q):
-                add_execution_block(decision, code, "牛牛战法不在涨停价模拟买入，改选行业龙头梯队后续可交易标的")
+                add_execution_block(
+                    decision,
+                    code,
+                    "牛牛战法不在涨停价模拟买入，改选行业龙头梯队后续可交易标的",
+                    category="market_mechanics",
+                )
                 continue
             existing_pos = positions.get(code)
             old_qty = position_qty(existing_pos or {})
             existing_entry_strategy = position_entry_strategy(existing_pos or {}) if old_qty > 0 else ""
-            reversal_upgrade_add = bool(
-                old_qty > 0
-                and existing_entry_strategy == "niu_reversal_probe"
-                and (
-                    (
-                        buy_strategy == "niu_emerging"
-                        and candidate.get("mainline_cross_day_persistent") is True
-                        and str(candidate.get("mainline_state") or "") == "emerging"
-                    )
-                    or (
-                        buy_strategy in {"niu_leader", "niu_pullback"}
-                        and candidate.get("mainline_confirmed") is True
-                        and str(candidate.get("mainline_state") or "") in {"mainline", "diverging"}
-                    )
-                )
-            )
-            emerging_upgrade_add = bool(
-                old_qty > 0
-                and existing_entry_strategy == "niu_emerging"
-                and buy_strategy in {"niu_leader", "niu_pullback"}
-                and candidate.get("mainline_confirmed") is True
-                and str(candidate.get("mainline_state") or "") in {"mainline", "diverging"}
-            )
-            niuone_upgrade_add = reversal_upgrade_add or emerging_upgrade_add
             if (
                 old_qty > 0
-                and existing_entry_strategy == "niu_reversal_probe"
+                and str(
+                    (existing_pos or {}).get("initial_buy_strategy")
+                    or existing_entry_strategy
+                ) == "niu_reversal_probe"
                 and int(((existing_pos or {}).get("buy_date_lots") or {}).get(today_key(), 0) or 0) > 0
             ):
-                add_execution_block(decision, code, "牛牛反转试仓受T+1约束，当日禁止加仓")
+                add_execution_block(
+                    decision,
+                    code,
+                    "牛牛试仓当日只建立一次轻仓，等待后续日线确认",
+                    category="lifecycle_rule",
+                )
                 continue
+            niuone_upgrade_source = str(
+                (existing_pos or {}).get("initial_buy_strategy")
+                or existing_entry_strategy
+            )
+            niuone_rebalance_reentry = bool(
+                old_qty > 0
+                and buy_strategy == "niu_leader"
+                and (existing_pos or {}).get(
+                    "niuone_markup_rebalance_armed"
+                ) is True
+            )
+            niuone_stage_add_attempt = bool(
+                old_qty > 0
+                and (
+                    niuone_upgrade_source in {
+                        "niu_reversal_probe",
+                        "niu_emerging",
+                    }
+                    or niuone_rebalance_reentry
+                )
+                and is_niuone_strategy(buy_strategy)
+            )
+            current_pnl_pct = (
+                (float(price) / float((existing_pos or {}).get("avg_cost")) - 1.0)
+                * 100.0
+                if niuone_stage_add_attempt
+                and _safe_float((existing_pos or {}).get("avg_cost"), 0.0) > 0
+                else 0.0
+            )
+            niuone_upgrade_blocker = (
+                niuone_markup_rebalance_reentry_blocker(
+                    niuone_upgrade_source,
+                    existing_pos or {},
+                    candidate,
+                    current_price=float(price),
+                    current_pnl_pct=current_pnl_pct,
+                )
+                if niuone_rebalance_reentry
+                else niuone_markup_upgrade_blocker(
+                    niuone_upgrade_source,
+                    candidate,
+                    current_pnl_pct=current_pnl_pct,
+                )
+                if niuone_stage_add_attempt
+                else None
+            )
+            if (
+                niuone_upgrade_blocker is None
+                and not niuone_rebalance_reentry
+                and buy_strategy == "niu_emerging"
+                and (existing_pos or {}).get(
+                    "niuone_markup_early_scale_in_done"
+                ) is True
+            ):
+                niuone_upgrade_blocker = "牛牛主升早期加仓已经执行，本阶段不重复加仓"
+            elif (
+                niuone_upgrade_blocker is None
+                and not niuone_rebalance_reentry
+                and buy_strategy == "niu_leader"
+                and (existing_pos or {}).get(
+                    "niuone_markup_confirmed_scale_in_done"
+                ) is True
+            ):
+                niuone_upgrade_blocker = "牛牛确认主升加仓已经执行，本阶段不重复加仓"
+            if niuone_upgrade_blocker:
+                add_execution_block(
+                    decision,
+                    code,
+                    niuone_upgrade_blocker,
+                    category="lifecycle_rule",
+                )
+                continue
+            niuone_markup_scale_add = bool(
+                niuone_stage_add_attempt
+                and niuone_upgrade_blocker is None
+            )
+            niuone_upgrade_add = bool(
+                niuone_markup_scale_add
+                and existing_entry_strategy != buy_strategy
+            )
             if (
                 old_qty > 0
                 and is_dynamic_risk_strategy(buy_strategy)
@@ -6373,6 +7455,7 @@ def execute_actions(
                     decision,
                     code,
                     f"{suite_label}不得把{buy_strategy_label(buy_strategy)}加到原{buy_strategy_label(existing_entry_strategy)}持仓形成混合策略",
+                    category="lifecycle_rule",
                 )
                 continue
             open_position_limit = (
@@ -6392,10 +7475,36 @@ def execute_actions(
                     decision,
                     code,
                     limit_reason,
+                    category="position_capacity",
                 )
                 continue
+            if old_qty <= 0 and is_niuone_strategy(buy_strategy):
+                action["niuone_daily_new_position_count_before"] = len(
+                    niuone_opened_today
+                )
+                action["niuone_daily_new_position_limit"] = (
+                    NIUONE_MAX_NEW_POSITIONS_PER_TRADING_DAY
+                )
+                if (
+                    len(niuone_opened_today)
+                    >= NIUONE_MAX_NEW_POSITIONS_PER_TRADING_DAY
+                ):
+                    add_execution_block(
+                        decision,
+                        code,
+                        "牛牛战法当日新开仓已达"
+                        f"{NIUONE_MAX_NEW_POSITIONS_PER_TRADING_DAY}只上限"
+                        "（跨决策轮次累计）",
+                        category="position_capacity",
+                    )
+                    continue
             if old_qty <= 0 and new_buys >= effective_max_new_buys:
-                add_execution_block(decision, code, f"盘面动态本轮新开仓已达{effective_max_new_buys}笔上限")
+                add_execution_block(
+                    decision,
+                    code,
+                    f"盘面动态本轮新开仓已达{effective_max_new_buys}笔上限",
+                    category="position_capacity",
+                )
                 continue
 
             total_equity = portfolio_total_equity_for_limits(cash, positions)
@@ -6416,6 +7525,10 @@ def execute_actions(
             tide_position_open_risk_pct = 0.0
             tide_dynamic_position_cap_pct = 0.0
             tide_risk_budget: dict[str, float] = {}
+            niuone_execution_reference_price = 0.0
+            niuone_execution_gap_pct: float | None = None
+            niuone_entry_subroute = ""
+            niuone_entry_context: dict[str, Any] = {}
             if is_zettaranc_strategy(buy_strategy):
                 single_limit_pct = strategy_position_limit_pct(buy_strategy)
                 market_total_limit_pct = float(market_strategy_ctx.get("max_total_position_pct", MAX_TOTAL_POSITION_PCT))
@@ -6443,18 +7556,89 @@ def execute_actions(
                 dynamic_label = "牛牛战法" if niuone_buy else "板块潮汐"
                 exposure_label = "主题" if niuone_buy else "行业"
                 risk_persona = "niuone" if niuone_buy else "sector_tide"
+                if niuone_buy:
+                    niuone_entry_subroute = str(
+                        candidate.get("niuone_entry_subroute") or ""
+                    )
+                    niuone_execution_reference_price = _safe_float(
+                        q.get("prev_close") or candidate.get("recent_close"),
+                        0.0,
+                    )
+                    if niuone_execution_reference_price > 0:
+                        niuone_execution_gap_pct = round(
+                            (
+                                float(price) / niuone_execution_reference_price
+                                - 1.0
+                            ) * 100.0,
+                            4,
+                        )
                 regime = str(candidate.get("market_regime") or "")
                 if candidate.get("market_hard_stop") or not candidate.get("market_allows_buys", False):
-                    add_execution_block(decision, code, f"{dynamic_label}市场风控禁止新开仓")
+                    add_execution_block(
+                        decision,
+                        code,
+                        f"{dynamic_label}市场风控禁止新开仓",
+                        category="market_guidance",
+                    )
                     continue
-                if regime not in {"offensive", "rotation", "recovery"}:
-                    add_execution_block(decision, code, f"{dynamic_label}市场状态{regime or '缺失'}不可买入")
+                allowed_regimes = (
+                    NIUONE_ENTRY_REGIMES
+                    if niuone_buy
+                    else {"offensive", "rotation", "recovery"}
+                )
+                if regime not in allowed_regimes:
+                    add_execution_block(
+                        decision,
+                        code,
+                        f"{dynamic_label}市场状态{regime or '缺失'}不可买入",
+                        category="market_guidance",
+                    )
+                    continue
+                if (
+                    niuone_buy
+                    and old_qty <= 0
+                    and niuone_entry_subroute
+                    == NIUONE_MARKUP_MOMENTUM_PROBE_SUBROUTE
+                    and (
+                        niuone_execution_gap_pct is None
+                        or niuone_execution_gap_pct
+                        > NIUONE_MARKUP_MOMENTUM_PROBE_MAX_EXECUTION_GAP_PCT
+                        + 1e-9
+                    )
+                ):
+                    reason = (
+                        "主升动量试仓缺少可核验的前收盘价"
+                        if niuone_execution_gap_pct is None
+                        else "主升动量试仓执行价较信号收盘高开"
+                        f"{niuone_execution_gap_pct:.2f}%超过"
+                        f"{NIUONE_MARKUP_MOMENTUM_PROBE_MAX_EXECUTION_GAP_PCT:g}%"
+                    )
+                    add_execution_block(
+                        decision,
+                        code,
+                        reason,
+                        category="market_mechanics",
+                    )
                     continue
                 if buy_strategy == "niu_reversal_probe" and old_qty > 0:
-                    add_execution_block(decision, code, "牛牛反转试仓只允许一次建仓，须跨日升级后再加仓")
+                    add_execution_block(
+                        decision,
+                        code,
+                        "牛牛试仓只允许一次初始建仓，须满足后续阶段条件再加仓",
+                        category="lifecycle_rule",
+                    )
                     continue
-                if buy_strategy == "niu_emerging" and old_qty > 0 and not niuone_upgrade_add:
-                    add_execution_block(decision, code, "牛牛启动观察仓升级为确认主线前禁止加仓")
+                if (
+                    buy_strategy == "niu_emerging"
+                    and old_qty > 0
+                    and not niuone_markup_scale_add
+                ):
+                    add_execution_block(
+                        decision,
+                        code,
+                        "牛牛启动观察仓只在主升早期延续条件满足后加仓",
+                        category="lifecycle_rule",
+                    )
                     continue
                 if buy_strategy == "tide_recovery" and old_qty > 0:
                     today_lots = int(((existing_pos or {}).get("buy_date_lots") or {}).get(today_key(), 0) or 0)
@@ -6472,6 +7656,36 @@ def execute_actions(
                     if niuone_buy
                     else strategy_position_limit_pct(buy_strategy)
                 )
+                if (
+                    niuone_buy
+                    and old_qty <= 0
+                    and niuone_entry_subroute
+                    == NIUONE_MARKUP_MOMENTUM_PROBE_SUBROUTE
+                ):
+                    single_limit_pct = min(
+                        single_limit_pct,
+                        NIUONE_MARKUP_MOMENTUM_PROBE_POSITION_CAP_PCT,
+                    )
+                if niuone_buy and niuone_markup_scale_add:
+                    if buy_strategy == "niu_emerging":
+                        markup_stage_cap_pct = (
+                            NIUONE_MARKUP_EARLY_UPGRADE_POSITION_CAP_PCT
+                        )
+                    elif niuone_upgrade_source in {
+                        "niu_reversal_probe",
+                        "niu_emerging",
+                    }:
+                        markup_stage_cap_pct = (
+                            NIUONE_MARKUP_UPGRADE_POSITION_CAP_PCT
+                        )
+                    else:
+                        markup_stage_cap_pct = (
+                            NIUONE_ABSOLUTE_POSITION_CAP_PCT["niu_leader"]
+                        )
+                    single_limit_pct = min(
+                        single_limit_pct,
+                        markup_stage_cap_pct,
+                    )
                 market_total_limit_pct = float(market_strategy_ctx.get("max_total_position_pct", MAX_TOTAL_POSITION_PCT))
                 reserve_pct = max(
                     MIN_CASH_RESERVE_PCT,
@@ -6484,17 +7698,26 @@ def execute_actions(
                 )
                 exact_position_after_pct = position_after_trade_value / total_equity * 100 if total_equity > 0 else 100.0
                 exact_total_after_pct = (current_market_value + requested_gross) / total_equity * 100 if total_equity > 0 else 100.0
-                if exact_total_after_pct > tide_total_limit_pct + 1e-9:
+                if (
+                    not niuone_buy
+                    and exact_total_after_pct > tide_total_limit_pct + 1e-9
+                ):
                     add_execution_block(
                         decision,
                         code,
                         f"{dynamic_label}{regime}状态买入后总仓位{exact_total_after_pct:.2f}%超过{tide_total_limit_pct:g}%硬上限",
+                        category="risk_ceiling",
                     )
                     continue
 
                 industry = str(candidate.get("industry") or candidate.get("sector") or "").strip()
                 if not industry:
-                    add_execution_block(decision, code, f"{dynamic_label}候选缺少{exposure_label}归属")
+                    add_execution_block(
+                        decision,
+                        code,
+                        f"{dynamic_label}候选缺少{exposure_label}归属",
+                        category="risk_input",
+                    )
                     continue
                 same_industry_positions = [
                     pos_item
@@ -6505,18 +7728,30 @@ def execute_actions(
                     and str(pos_item.get("industry") or pos_item.get("sector") or "").strip() == industry
                 ]
                 if old_qty <= 0 and len(same_industry_positions) >= 2:
-                    add_execution_block(decision, code, f"{industry}{exposure_label}已有2只持仓，达到{dynamic_label}上限")
+                    add_execution_block(
+                        decision,
+                        code,
+                        f"{industry}{exposure_label}已有2只持仓，达到{dynamic_label}上限",
+                        category="position_capacity",
+                    )
                     continue
-                industry_value_after = position_after_trade_value + sum(
+                other_industry_value = sum(
                     position_market_value(pos_item) for pos_item in same_industry_positions
+                )
+                industry_value_after = (
+                    position_after_trade_value + other_industry_value
                 )
                 industry_pct_after = industry_value_after / total_equity * 100 if total_equity > 0 else 100.0
                 sector_position_limit_pct = tide_risk_budget["max_sector_position_pct"]
-                if industry_pct_after > sector_position_limit_pct + 1e-9:
+                if (
+                    not niuone_buy
+                    and industry_pct_after > sector_position_limit_pct + 1e-9
+                ):
                     add_execution_block(
                         decision,
                         code,
                         f"{industry}{exposure_label}买入后敞口{industry_pct_after:.2f}%超过{regime}状态动态上限{sector_position_limit_pct:g}%",
+                        category="risk_ceiling",
                     )
                     continue
 
@@ -6534,12 +7769,17 @@ def execute_actions(
                         if entry_atr > 0 and tide_effective_stop_price > 0
                         else 0.0
                     )
-                    structural_limits = niuone_structural_stop_limits(regime, buy_strategy)
+                    structural_limits = niuone_structural_stop_limits(
+                        regime,
+                        buy_strategy,
+                        niuone_entry_subroute,
+                    )
                     if not niuone_structure_risk_ok(
                         actual_stop_distance_pct,
                         actual_stop_atr,
                         regime,
                         buy_strategy,
+                        niuone_entry_subroute,
                     ):
                         add_execution_block(
                             decision,
@@ -6547,17 +7787,28 @@ def execute_actions(
                             f"牛牛战法缺少有效结构止损/ATR，或止损距离超过"
                             f"{structural_limits['max_stop_distance_pct']:g}%/"
                             f"{structural_limits['max_stop_atr']:g}ATR",
+                            category="risk_input",
                         )
                         continue
                 elif actual_stop_distance_pct <= 0 or actual_stop_distance_pct > 6:
-                    add_execution_block(decision, code, f"{dynamic_label}缺少有效结构止损，或止损距离超过6%")
+                    add_execution_block(
+                        decision,
+                        code,
+                        f"{dynamic_label}缺少有效结构止损，或止损距离超过6%",
+                        category="risk_input",
+                    )
                     continue
                 tide_gap_buffer_pct = max(
                     _safe_float(candidate.get("gap_buffer_pct"), 0.0),
                     _safe_float((existing_pos or {}).get("gap_buffer_pct"), 0.0),
                 )
                 if tide_gap_buffer_pct <= 0:
-                    add_execution_block(decision, code, f"{dynamic_label}缺少历史跳空/ATR缓冲，动态风险预算无法计算")
+                    add_execution_block(
+                        decision,
+                        code,
+                        f"{dynamic_label}缺少历史跳空/ATR缓冲，动态风险预算无法计算",
+                        category="risk_input",
+                    )
                     continue
                 tide_execution_buffer_pct = max(
                     SECTOR_TIDE_EXECUTION_BUFFER_PCT,
@@ -6575,12 +7826,137 @@ def execute_actions(
                     effective_loss_distance_pct_value=tide_effective_loss_distance_pct,
                     absolute_cap_pct=single_limit_pct,
                 )
+                existing_open_risk_pct = dynamic_strategy_existing_open_risk_pct(
+                    positions,
+                    total_equity,
+                    persona=risk_persona,
+                    excluding_code=code,
+                )
+                existing_sector_risk_pct = (
+                    dynamic_strategy_existing_open_risk_pct(
+                        positions,
+                        total_equity,
+                        persona=risk_persona,
+                        excluding_code=code,
+                        industry=industry,
+                    )
+                )
+                risk_order_ceiling = dynamic_risk_order_ceiling(
+                    price=float(price),
+                    total_equity=total_equity,
+                    cash=cash,
+                    current_position_value=current_position_value,
+                    current_market_value=current_market_value,
+                    other_industry_value=other_industry_value,
+                    dynamic_position_cap_pct=tide_dynamic_position_cap_pct,
+                    total_position_cap_pct=tide_total_limit_pct,
+                    sector_position_cap_pct=sector_position_limit_pct,
+                    effective_loss_distance_pct_value=(
+                        tide_effective_loss_distance_pct
+                    ),
+                    max_open_risk_pct=tide_risk_budget["max_open_risk_pct"],
+                    existing_open_risk_pct=existing_open_risk_pct,
+                    max_sector_risk_pct=(
+                        tide_risk_budget["max_sector_risk_pct"]
+                    ),
+                    existing_sector_risk_pct=existing_sector_risk_pct,
+                    required_cash_pct=100.0 - tide_total_limit_pct,
+                )
+                maximum_permitted_shares = int(
+                    risk_order_ceiling["maximum_permitted_shares"]
+                )
+                model_requested_shares = shares
+                risk_ceiling_auto_reduced = bool(
+                    niuone_buy
+                    and maximum_permitted_shares > 0
+                    and model_requested_shares > maximum_permitted_shares
+                )
+                if risk_ceiling_auto_reduced:
+                    shares = maximum_permitted_shares
+                    action["shares"] = shares
+                action["model_requested_shares"] = model_requested_shares
+                action["maximum_permitted_shares"] = (
+                    maximum_permitted_shares
+                )
+                action["maximum_permitted_gross"] = risk_order_ceiling[
+                    "maximum_permitted_gross"
+                ]
+                action["risk_ceiling_binding_constraints"] = list(
+                    risk_order_ceiling["binding_constraints"]
+                )
+                action["risk_ceiling_utilization_pct"] = (
+                    round(shares / maximum_permitted_shares * 100.0, 4)
+                    if maximum_permitted_shares > 0 else None
+                )
+                action["risk_ceiling_auto_reduced"] = (
+                    risk_ceiling_auto_reduced
+                )
+                action["position_before_qty"] = old_qty
+                action["position_opened"] = old_qty <= 0
+
+                # NiuOne is allowed to preserve an otherwise valid signal by
+                # reducing only to the deterministic whole-lot risk ceiling.
+                # Recompute every dependent value from the executable size so
+                # the same hard limits remain fail-closed after adjustment.
+                requested_gross = shares * float(price)
+                order_position_pct = position_pct_of_equity(
+                    requested_gross,
+                    total_equity,
+                )
+                position_after_trade_value = (
+                    current_position_value + requested_gross
+                )
+                position_after_trade_pct = position_pct_of_equity(
+                    position_after_trade_value,
+                    total_equity,
+                )
+                total_position_after_trade_pct = position_pct_of_equity(
+                    current_market_value + requested_gross,
+                    total_equity,
+                )
+                exact_position_after_pct = (
+                    position_after_trade_value / total_equity * 100
+                    if total_equity > 0 else 100.0
+                )
+                exact_total_after_pct = (
+                    (current_market_value + requested_gross)
+                    / total_equity * 100
+                    if total_equity > 0 else 100.0
+                )
+                industry_value_after = (
+                    position_after_trade_value + other_industry_value
+                )
+                industry_pct_after = (
+                    industry_value_after / total_equity * 100
+                    if total_equity > 0 else 100.0
+                )
+                if exact_total_after_pct > tide_total_limit_pct + 1e-9:
+                    add_execution_block(
+                        decision,
+                        code,
+                        f"{dynamic_label}{regime}状态风险裁单后总仓位"
+                        f"{exact_total_after_pct:.2f}%仍超过"
+                        f"{tide_total_limit_pct:g}%硬上限",
+                        category="risk_ceiling",
+                    )
+                    continue
+                if industry_pct_after > sector_position_limit_pct + 1e-9:
+                    add_execution_block(
+                        decision,
+                        code,
+                        f"{industry}{exposure_label}风险裁单后敞口"
+                        f"{industry_pct_after:.2f}%仍超过{regime}状态"
+                        f"动态上限{sector_position_limit_pct:g}%",
+                        category="risk_ceiling",
+                    )
+                    continue
                 if exact_position_after_pct > tide_dynamic_position_cap_pct + 1e-9:
                     add_execution_block(
                         decision,
                         code,
                         f"{dynamic_label}{buy_strategy_label(buy_strategy)}买入后仓位{exact_position_after_pct:.2f}%超过风险预算动态上限"
                         f"{tide_dynamic_position_cap_pct:.2f}%（绝对上限{single_limit_pct:g}%）",
+                        category="risk_ceiling",
                     )
                     continue
                 tide_position_open_risk_pct = position_open_risk_pct(
@@ -6594,35 +7970,31 @@ def execute_actions(
                         code,
                         f"买入后有效损失风险{tide_position_open_risk_pct:.3f}%超过{regime}状态单笔预算"
                         f"{tide_risk_budget['per_trade_risk_pct']:.2f}%",
+                        category="risk_ceiling",
                     )
                     continue
-                open_risk_after = dynamic_strategy_existing_open_risk_pct(
-                    positions,
-                    total_equity,
-                    persona=risk_persona,
-                    excluding_code=code,
-                ) + tide_position_open_risk_pct
+                open_risk_after = (
+                    existing_open_risk_pct + tide_position_open_risk_pct
+                )
                 if open_risk_after > tide_risk_budget["max_open_risk_pct"] + 1e-9:
                     add_execution_block(
                         decision,
                         code,
                         f"{dynamic_label}买入后策略内未实现止损风险{open_risk_after:.3f}%超过{regime}状态组合预算"
                         f"{tide_risk_budget['max_open_risk_pct']:.2f}%",
+                        category="risk_ceiling",
                     )
                     continue
-                sector_risk_after = dynamic_strategy_existing_open_risk_pct(
-                    positions,
-                    total_equity,
-                    persona=risk_persona,
-                    excluding_code=code,
-                    industry=industry,
-                ) + tide_position_open_risk_pct
+                sector_risk_after = (
+                    existing_sector_risk_pct + tide_position_open_risk_pct
+                )
                 if sector_risk_after > tide_risk_budget["max_sector_risk_pct"] + 1e-9:
                     add_execution_block(
                         decision,
                         code,
                         f"{industry}{exposure_label}买入后未实现止损风险{sector_risk_after:.3f}%超过{regime}状态{exposure_label}预算"
                         f"{tide_risk_budget['max_sector_risk_pct']:.2f}%",
+                        category="risk_ceiling",
                     )
                     continue
             qty = shares
@@ -6630,7 +8002,12 @@ def execute_actions(
             fees = calc_trade_fees(gross, "BUY")
             total_cost = gross + fees["total_fee"]
             if total_cost > cash:
-                add_execution_block(decision, code, f"模型买入仓位{shares}股现金不足，本轮不自动缩小")
+                add_execution_block(
+                    decision,
+                    code,
+                    f"模型买入仓位{shares}股现金不足，本轮不自动缩小",
+                    category="risk_ceiling",
+                )
                 continue
             if is_zettaranc_strategy(buy_strategy) or is_dynamic_risk_strategy(buy_strategy):
                 equity_after_fees = max(0.0, total_equity - float(fees["total_fee"]))
@@ -6649,6 +8026,7 @@ def execute_actions(
                         decision,
                         code,
                         f"{buy_strategy_label(buy_strategy)}买入后现金{float(cash_after_trade_pct or 0):.2f}%低于{required_cash_pct:g}%硬下限（含交易费用）",
+                        category="risk_ceiling",
                     )
                     continue
             pos = positions.setdefault(code, {"code": code, "name": name, "qty": 0, "avg_cost": 0.0, "buy_date_lots": {}, "last_price": price})
@@ -6707,13 +8085,20 @@ def execute_actions(
                 pos["position_open_risk_pct"] = round(tide_position_open_risk_pct, 4)
                 pos["dynamic_position_cap_pct"] = round(tide_dynamic_position_cap_pct, 3)
                 pos["absolute_position_cap_pct"] = round(single_limit_pct, 3)
+                entry_market_regime = str(
+                    pos.get("entry_market_regime")
+                    or pos.get("risk_budget_regime")
+                    or pos.get("market_regime")
+                    or candidate.get("market_regime")
+                    or ""
+                )
                 pos["risk_budget_regime"] = str(candidate.get("market_regime") or "")
                 pos["per_trade_risk_budget_pct"] = tide_risk_budget.get("per_trade_risk_pct")
                 pos["max_open_risk_pct"] = tide_risk_budget.get("max_open_risk_pct")
                 pos["max_sector_risk_pct"] = tide_risk_budget.get("max_sector_risk_pct")
                 pos["max_total_position_pct"] = tide_risk_budget.get("max_total_position_pct")
                 pos["max_sector_position_pct"] = tide_risk_budget.get("max_sector_position_pct")
-                pos["entry_market_regime"] = str(candidate.get("market_regime") or "")
+                pos["entry_market_regime"] = entry_market_regime
                 pos["market_regime"] = str(candidate.get("market_regime") or "")
                 pos["sector_score"] = candidate.get("sector_score")
                 pos["sector_status"] = candidate.get("sector_status")
@@ -6726,36 +8111,164 @@ def execute_actions(
                     pos["mainline_confirmation_count"] = candidate.get("mainline_confirmation_count")
                     pos["mainline_cross_day_persistent"] = bool(candidate.get("mainline_cross_day_persistent"))
                     pos["mainline_confirmed"] = bool(candidate.get("mainline_confirmed"))
-                    pos["reversal_candidate"] = bool(candidate.get("reversal_candidate"))
-                    pos["reversal_confirmed"] = bool(candidate.get("reversal_confirmed"))
-                    pos["reversal_confirmation_count"] = candidate.get("reversal_confirmation_count")
+                    if niuone_entry_subroute:
+                        pos["niuone_entry_subroute"] = niuone_entry_subroute
+                    for key in (
+                        "niuone_lifecycle_stage",
+                        "niuone_lifecycle_label",
+                        "niuone_lifecycle_order",
+                        "niuone_lifecycle_entry_policy",
+                    ):
+                        if key in candidate:
+                            pos[key] = candidate[key]
+                    if reversal_buy:
+                        for key in (
+                            "reversal_basis", "daily_v_reversal", "daily_v_left_peak_date",
+                            "daily_v_trough_date", "daily_v_left_days", "daily_v_right_days",
+                            "daily_v_decline_pct", "daily_v_rebound_pct",
+                            "daily_v_recovery_ratio", "daily_v_rising_ratio",
+                            "daily_v_pattern_score",
+                        ):
+                            pos[key] = candidate.get(key)
                     pos["today_breadth_pct"] = candidate.get("today_breadth_pct")
                     pos["effective_strong_count"] = candidate.get("effective_strong_count")
                     pos["leader_concentration"] = candidate.get("leader_concentration")
                     pos["mainline_weak_count"] = 0
-                    pos["stock_role"] = (
-                        "today_leader"
-                        if reversal_buy and candidate.get("stock_reversal_leader_rank") == 1
-                        else "today_core"
-                        if reversal_buy
-                        else candidate.get("stock_role")
-                    )
-                    pos["stock_leader_rank"] = (
-                        candidate.get("stock_reversal_leader_rank")
-                        if reversal_buy
-                        else candidate.get("stock_leader_rank")
-                    )
-                    pos["stock_leader_tier"] = bool(
-                        candidate.get("stock_reversal_leader_tier")
-                        if reversal_buy
-                        else candidate.get("stock_leader_tier")
-                    )
-                    pos["stock_strong"] = bool(
-                        candidate.get("stock_reversal_strong")
-                        if reversal_buy
-                        else candidate.get("stock_strong")
-                    )
+                    pos["stock_role"] = candidate.get("stock_role")
+                    pos["stock_leader_rank"] = candidate.get("stock_leader_rank")
+                    pos["stock_leader_tier"] = bool(candidate.get("stock_leader_tier"))
+                    pos["stock_strong"] = bool(candidate.get("stock_strong"))
                     pos["niu_leader_lost_count"] = 0
+                    if (
+                        old_qty <= 0
+                        and niuone_execution_reference_price > 0
+                        and niuone_execution_gap_pct is not None
+                    ):
+                        pos["entry_execution_reference_price"] = round(
+                            niuone_execution_reference_price,
+                            3,
+                        )
+                        pos["entry_execution_gap_pct"] = (
+                            niuone_execution_gap_pct
+                        )
+                    if old_qty <= 0:
+                        pos["entry_industry"] = industry
+                        pos["entry_model_requested_shares"] = action.get(
+                            "model_requested_shares"
+                        )
+                        pos["entry_executed_shares"] = shares
+                        pos["entry_maximum_permitted_shares"] = action.get(
+                            "maximum_permitted_shares"
+                        )
+                        pos["entry_risk_ceiling_utilization_pct"] = (
+                            action.get("risk_ceiling_utilization_pct")
+                        )
+                        pos["entry_risk_ceiling_binding_constraints"] = list(
+                            action.get("risk_ceiling_binding_constraints")
+                            or []
+                        )
+                        pos["entry_risk_ceiling_auto_reduced"] = bool(
+                            action.get("risk_ceiling_auto_reduced")
+                        )
+                        for key in (
+                            "entry_signal_generated_at",
+                            "entry_schedule_slot",
+                            "entry_schedule_run_kind",
+                            "entry_schedule_triggered_at",
+                            "entry_execution_mode",
+                        ):
+                            if execution_context.get(key):
+                                pos[key] = execution_context[key]
+                        entry_context_fields = (
+                            (
+                                "niuone_lifecycle_stage",
+                                "entry_niuone_lifecycle_stage",
+                            ),
+                            (
+                                "niuone_lifecycle_label",
+                                "entry_niuone_lifecycle_label",
+                            ),
+                            (
+                                "niuone_lifecycle_order",
+                                "entry_niuone_lifecycle_order",
+                            ),
+                            (
+                                "niuone_lifecycle_entry_policy",
+                                "entry_niuone_lifecycle_entry_policy",
+                            ),
+                            ("mainline_state", "entry_mainline_state"),
+                            ("mainline_score", "entry_mainline_score"),
+                            (
+                                "mainline_score_change",
+                                "entry_mainline_score_change",
+                            ),
+                            (
+                                "mainline_state_streak",
+                                "entry_mainline_state_streak",
+                            ),
+                            (
+                                "mainline_cross_day_persistent",
+                                "entry_mainline_cross_day_persistent",
+                            ),
+                            (
+                                "mainline_confirmed",
+                                "entry_mainline_confirmed",
+                            ),
+                            (
+                                "today_strength_score",
+                                "entry_today_strength_score",
+                            ),
+                            (
+                                "strong_stock_count",
+                                "entry_strong_stock_count",
+                            ),
+                            (
+                                "effective_strong_count",
+                                "entry_effective_strong_count",
+                            ),
+                            (
+                                "stock_sector_rank",
+                                "entry_stock_sector_rank",
+                            ),
+                            ("stock_strong", "entry_stock_strong"),
+                            (
+                                "stock_leader_tier",
+                                "entry_stock_leader_tier",
+                            ),
+                            (
+                                "daily_v_recovery_ratio",
+                                "entry_daily_v_recovery_ratio",
+                            ),
+                        )
+                        for source_key, target_key in entry_context_fields:
+                            if (
+                                source_key in candidate
+                                and candidate.get(source_key) is not None
+                            ):
+                                pos[target_key] = candidate.get(source_key)
+                        pos.update(niuone_selection_context)
+                        entry_mainline_score = _safe_float(
+                            pos.get("entry_mainline_score"),
+                            -1.0,
+                        )
+                        if entry_mainline_score >= 0:
+                            pos["mainline_peak_score"] = round(
+                                entry_mainline_score,
+                                3,
+                            )
+                            pos["mainline_peak_drawdown_points"] = 0.0
+                        record_niuone_lifecycle_observation(
+                            pos,
+                            observed_at=str(
+                                pos.get("entry_signal_generated_at")
+                                or now_ts()
+                            ),
+                            source="entry_signal",
+                            complete_from_entry=True,
+                        )
+                        niuone_entry_context = (
+                            niuone_entry_context_from_position(pos)
+                        )
                 else:
                     pos["sector_weak_count"] = 0
             if niuone_upgrade_add:
@@ -6784,6 +8297,73 @@ def execute_actions(
                 entry_mark_strategy = buy_strategy
                 entry_mark_component = ""
                 entry_mark_source = "BUY_ADD"
+            if niuone_markup_scale_add:
+                early_markup_scale_in = buy_strategy == "niu_emerging"
+                if early_markup_scale_in:
+                    markup_stage_cap_pct = (
+                        NIUONE_MARKUP_EARLY_UPGRADE_POSITION_CAP_PCT
+                    )
+                elif niuone_upgrade_source in {
+                    "niu_reversal_probe",
+                    "niu_emerging",
+                }:
+                    markup_stage_cap_pct = (
+                        NIUONE_MARKUP_UPGRADE_POSITION_CAP_PCT
+                    )
+                else:
+                    markup_stage_cap_pct = (
+                        NIUONE_ABSOLUTE_POSITION_CAP_PCT["niu_leader"]
+                    )
+                pos["niuone_markup_scale_in"] = True
+                pos["niuone_markup_scale_in_cap_pct"] = (
+                    markup_stage_cap_pct
+                )
+                pos["niuone_markup_scale_in_tier"] = (
+                    "early" if early_markup_scale_in else "confirmed"
+                )
+                pos[
+                    "niuone_markup_early_scale_in_done"
+                    if early_markup_scale_in
+                    else "niuone_markup_confirmed_scale_in_done"
+                ] = True
+                pos["niuone_markup_scale_in_min_pnl_pct"] = (
+                    NIUONE_MARKUP_UPGRADE_MIN_PNL_PCT
+                )
+                pos["niuone_markup_scale_in_max_pnl_pct"] = (
+                    NIUONE_MARKUP_UPGRADE_MAX_PNL_PCT
+                )
+                pos["niuone_markup_scale_in_count"] = (
+                    int(pos.get("niuone_markup_scale_in_count") or 0) + 1
+                )
+                pos["niuone_markup_scale_in_last_at"] = now_ts()
+                pos["niuone_markup_scale_in_signal_pnl_pct"] = round(
+                    current_pnl_pct,
+                    4,
+                )
+                if buy_strategy == "niu_leader":
+                    pos.update({
+                        "niuone_markup_rebalance_cycle_peak_price": round(
+                            float(price),
+                            3,
+                        ),
+                        "niuone_markup_rebalance_stall_count": 0,
+                        "niuone_markup_rebalance_observation_count": 0,
+                        "niuone_markup_rebalance_last_observation": (
+                            today_key()
+                        ),
+                        "niuone_markup_rebalance_last_add_date": today_key(),
+                        "niuone_markup_rebalance_armed": False,
+                        "niuone_markup_rebalance_reduced": False,
+                        "niuone_markup_rebalance_reentry_price": None,
+                    })
+                    if niuone_rebalance_reentry:
+                        pos["niuone_markup_rebalance_reentry_count"] = (
+                            int(
+                                pos.get(
+                                    "niuone_markup_rebalance_reentry_count"
+                                ) or 0
+                            ) + 1
+                        )
             entry_mark = apply_entry_strategy_mark(
                 pos,
                 entry_mark_strategy,
@@ -6799,6 +8379,14 @@ def execute_actions(
                 action["effective_loss_distance_pct"] = round(tide_effective_loss_distance_pct, 3)
                 action["position_open_risk_pct"] = round(tide_position_open_risk_pct, 4)
                 action["dynamic_position_cap_pct"] = round(tide_dynamic_position_cap_pct, 3)
+                if niuone_execution_gap_pct is not None:
+                    action["execution_gap_pct"] = niuone_execution_gap_pct
+                if niuone_entry_subroute:
+                    action["niuone_entry_subroute"] = niuone_entry_subroute
+                if niuone_entry_context:
+                    action["niuone_entry_context"] = dict(
+                        niuone_entry_context
+                    )
             pos["highest_price"] = round(max(float(pos.get("highest_price") or price), float(price)), 3)
             current_pnl_pct = ((float(price) / float(pos["avg_cost"]) - 1) * 100) if pos.get("avg_cost") else 0.0
             prior_max_pnl = float(pos.get("max_pnl_pct") or current_pnl_pct)
@@ -6808,18 +8396,43 @@ def execute_actions(
             cash -= total_cost
             if old_qty <= 0:
                 new_buys += 1
-            executed.append({"time": now_ts(), "action": "BUY", "code": code, "name": name,
-                             "shares": qty, "price": round(price, 3), "amount": round(gross, 2),
-                             "commission": fees["commission"], "transfer_fee": fees["transfer_fee"],
-                             "stamp_duty": fees["stamp_duty"], "fee": fees["total_fee"],
-                             "total_cost": round(total_cost, 2), "price_source": price_source,
-                             "quote_time": q.get("quote_time") or now_ts(),
-                             "quote_source": q.get("source") or price_source,
-                             "order_position_pct": order_position_pct,
-                             "position_after_trade_pct": position_after_trade_pct,
-                             "total_position_after_trade_pct": total_position_after_trade_pct,
-                             "trade_reason": current_reason, "reason": reason,
-                             "buy_strategy": buy_strategy, "strategy_mark": entry_mark})
+                if is_niuone_strategy(buy_strategy):
+                    niuone_opened_today.add(code)
+            executed_trade = {
+                "time": now_ts(), "action": "BUY", "code": code, "name": name,
+                "shares": qty, "price": round(price, 3), "amount": round(gross, 2),
+                "commission": fees["commission"], "transfer_fee": fees["transfer_fee"],
+                "stamp_duty": fees["stamp_duty"], "fee": fees["total_fee"],
+                "total_cost": round(total_cost, 2), "price_source": price_source,
+                "quote_time": q.get("quote_time") or now_ts(),
+                "quote_source": q.get("source") or price_source,
+                "position_before_qty": old_qty,
+                "position_after_qty": old_qty + qty,
+                "position_opened": old_qty <= 0,
+                "order_position_pct": order_position_pct,
+                "position_after_trade_pct": position_after_trade_pct,
+                "total_position_after_trade_pct": total_position_after_trade_pct,
+                "trade_reason": current_reason, "reason": reason,
+                "buy_strategy": buy_strategy,
+                "strategy_mark": entry_mark,
+            }
+            for key in (
+                "model_requested_shares",
+                "maximum_permitted_shares",
+                "maximum_permitted_gross",
+                "risk_ceiling_utilization_pct",
+                "risk_ceiling_binding_constraints",
+                "risk_ceiling_auto_reduced",
+            ):
+                if key in action:
+                    executed_trade[key] = _json_safe_copy(action[key])
+            if niuone_execution_gap_pct is not None:
+                executed_trade["execution_gap_pct"] = niuone_execution_gap_pct
+            if niuone_entry_context:
+                executed_trade["niuone_entry_context"] = dict(
+                    niuone_entry_context
+                )
+            executed.append(executed_trade)
         elif act == "SELL":
             pos = positions.get(code)
             if not pos:
@@ -6828,6 +8441,11 @@ def execute_actions(
                 position_entry_strategy(pos)
                 or latest_buy_strategy_for_code(state, code)
                 or classify_buy_strategy(str(pos.get("entry_reason") or ""))
+            )
+            sell_niuone_entry_context = (
+                niuone_entry_context_from_position(pos)
+                if is_niuone_strategy(entry_strategy)
+                else {}
             )
             if entry_strategy == "shaofu_b1":
                 add_execution_block(
@@ -6843,6 +8461,27 @@ def execute_actions(
                 continue
             avg_cost = float(pos.get("avg_cost") or 0)
             available_qty = available_to_sell(pos)
+            if is_niuone_strategy(entry_strategy):
+                model_requested_sell_shares = shares
+                sell_quantity_auto_reduced = bool(
+                    available_qty > 0
+                    and available_qty % 100 == 0
+                    and model_requested_sell_shares > available_qty
+                )
+                if sell_quantity_auto_reduced:
+                    shares = available_qty
+                    action["shares"] = shares
+                action["sell_execution_evidence_schema_version"] = (
+                    FORWARD_SELL_EXECUTION_EVIDENCE_SCHEMA_VERSION
+                )
+                action["sell_execution_source"] = "model_action"
+                action["model_requested_sell_shares"] = (
+                    model_requested_sell_shares
+                )
+                action["available_sell_shares"] = available_qty
+                action["sell_quantity_auto_reduced"] = (
+                    sell_quantity_auto_reduced
+                )
             if shares > available_qty:
                 add_execution_block(
                     decision,
@@ -6882,6 +8521,15 @@ def execute_actions(
             action["position_before_trade_pct"] = position_before_trade_pct
             action["position_after_trade_pct"] = position_after_trade_pct
             action["total_position_after_trade_pct"] = total_position_after_trade_pct
+            sell_trade_time = now_ts()
+            sell_niuone_lifecycle_evidence = (
+                niuone_lifecycle_exit_evidence_from_position(
+                    pos,
+                    observed_at=sell_trade_time,
+                )
+                if is_niuone_strategy(entry_strategy)
+                else {}
+            )
             pos["qty"] = position_qty(pos) - qty
             pos.pop("shares", None)
             pos["last_price"] = price
@@ -6899,46 +8547,106 @@ def execute_actions(
             if pos["qty"] <= 0:
                 positions.pop(code, None)
             cash += net_proceeds
-            executed.append({"time": now_ts(), "action": "SELL", "code": code, "name": pos.get("name") or name,
-                             "shares": qty, "price": round(price, 3), "amount": round(gross, 2),
-                             "commission": fees["commission"], "transfer_fee": fees["transfer_fee"],
-                             "stamp_duty": fees["stamp_duty"], "fee": fees["total_fee"],
-                             "net_proceeds": round(net_proceeds, 2), "pnl": round(realized_pnl, 2),
-                             "pnl_pct": round(realized_pnl_pct, 2), "price_source": price_source,
-                             "day_pnl": round(day_pnl, 2) if day_pnl is not None else None,
-                             "day_pnl_pct": round(day_pnl_pct, 2) if day_pnl_pct is not None else None,
-                             "quote_time": q.get("quote_time") or now_ts(),
-                             "quote_source": q.get("source") or price_source,
-                             "order_position_pct": order_position_pct,
-                             "position_before_trade_pct": position_before_trade_pct,
-                             "position_after_trade_pct": position_after_trade_pct,
-                             "total_position_after_trade_pct": total_position_after_trade_pct,
-                             "trade_reason": current_reason, "reason": reason,
-                             "buy_strategy": entry_strategy, "exit_rule": exit_rule,
-                             "strategy_mark": entry_mark, "exit_strategy_mark": exit_mark})
+            executed_trade = {
+                "time": sell_trade_time, "action": "SELL", "code": code,
+                "name": pos.get("name") or name, "shares": qty,
+                "price": round(price, 3), "amount": round(gross, 2),
+                "commission": fees["commission"],
+                "transfer_fee": fees["transfer_fee"],
+                "stamp_duty": fees["stamp_duty"], "fee": fees["total_fee"],
+                "net_proceeds": round(net_proceeds, 2),
+                "pnl": round(realized_pnl, 2),
+                "pnl_pct": round(realized_pnl_pct, 2),
+                "price_source": price_source,
+                "day_pnl": round(day_pnl, 2) if day_pnl is not None else None,
+                "day_pnl_pct": round(day_pnl_pct, 2)
+                if day_pnl_pct is not None else None,
+                "quote_time": q.get("quote_time") or now_ts(),
+                "quote_source": q.get("source") or price_source,
+                "order_position_pct": order_position_pct,
+                "position_before_trade_pct": position_before_trade_pct,
+                "position_after_trade_pct": position_after_trade_pct,
+                "total_position_after_trade_pct": total_position_after_trade_pct,
+                "position_before_qty": position_qty(pos) + qty,
+                "position_after_qty": max(0, position_qty(pos)),
+                "position_fully_closed": position_qty(pos) <= 0,
+                "trade_reason": current_reason, "reason": reason,
+                "buy_strategy": entry_strategy, "exit_rule": exit_rule,
+                "strategy_mark": entry_mark, "exit_strategy_mark": exit_mark,
+            }
+            for key in (
+                "sell_execution_evidence_schema_version",
+                "sell_execution_source",
+                "model_requested_sell_shares",
+                "available_sell_shares",
+                "sell_quantity_auto_reduced",
+            ):
+                if key in action:
+                    executed_trade[key] = _json_safe_copy(action[key])
+            if sell_niuone_entry_context:
+                executed_trade["niuone_entry_context"] = dict(
+                    sell_niuone_entry_context
+                )
+            if sell_niuone_lifecycle_evidence:
+                executed_trade["niuone_lifecycle_evidence"] = dict(
+                    sell_niuone_lifecycle_evidence
+                )
+            executed.append(executed_trade)
     state["cash"] = round(cash, 2)
     state.setdefault("trade_log", []).extend(executed)
     del state["trade_log"][:-TRADE_LOG_LIMIT]
     return executed
 
 
-def _sync_decision_to_db(log_entry: dict):
+def _sync_decision_to_db(log_entry: dict) -> bool:
     """将决策日志同步写入 SQLite。"""
     try:
         from niuniu_db import record_decision as _rd
-        _rd(log_entry)
-    except Exception: pass
+        return _rd(log_entry) is True
+    except Exception as exc:
+        print(
+            "[WARN] 决策耐久证据写入失败: "
+            f"{type(exc).__name__}",
+            flush=True,
+        )
+        return False
 
 
-def _sync_trades_to_db(executed: list[dict[str, Any]]):
+def _sync_trades_to_db(executed: list[dict[str, Any]]) -> bool:
     """将已成交记录同步写入 SQLite。"""
     if not executed:
-        return
+        return True
     try:
         from niuniu_db import record_trade as _rt
-        for item in executed:
-            _rt(item)
-    except Exception: pass
+        results = [_rt(item) is True for item in executed]
+        return all(results)
+    except Exception as exc:
+        print(
+            "[WARN] 成交耐久证据写入失败: "
+            f"{type(exc).__name__}",
+            flush=True,
+        )
+        return False
+
+
+def _latest_b1_decision_log(
+    state: Mapping[str, Any],
+    generated_at: str,
+    schedule_slot: str,
+) -> dict[str, Any] | None:
+    for raw in reversed(state.get("decision_log") or []):
+        if not isinstance(raw, dict):
+            continue
+        if str(raw.get("b1_generated_at") or "") != generated_at:
+            continue
+        if str(raw.get("schedule_slot") or "") != schedule_slot:
+            continue
+        return raw
+    return None
+
+
+def _decision_has_candidate_evidence(log_entry: Mapping[str, Any]) -> bool:
+    return decision_has_durable_candidate_evidence(log_entry)
 
 
 def _sync_positions_to_db(state: dict[str, Any]):
@@ -7036,6 +8744,7 @@ def queue_deferred_decision(
     due_at: str,
     decision: dict[str, Any],
     candidates: list[dict[str, Any]],
+    candidate_evidence: list[dict[str, Any]],
     reason: str,
 ) -> dict[str, Any]:
     pending_id = f"{schedule_slot or 'unscheduled'}|{generated_at}"
@@ -7053,6 +8762,11 @@ def queue_deferred_decision(
         "strategy_suite": current_strategy_suite(),
         "decision": _json_safe_copy(decision),
         "candidates": _json_safe_copy(candidates[:20]),
+        "candidate_evidence_schema_version": 1,
+        "execution_evidence_schema_version": (
+            FORWARD_EXECUTION_EVIDENCE_SCHEMA_VERSION
+        ),
+        "candidate_evidence": _json_safe_copy(candidate_evidence),
     }
     for idx, old in enumerate(pending):
         if isinstance(old, dict) and old.get("id") == pending_id:
@@ -7127,6 +8841,13 @@ def execute_due_pending_decisions(now: datetime | None = None) -> dict[str, Any]
             enrich_portfolio(state),
             market_strategy_ctx,
         )
+        decision["_niuone_execution_context"] = {
+            "entry_signal_generated_at": entry.get("b1_generated_at") or "",
+            "entry_schedule_slot": entry.get("schedule_slot") or "",
+            "entry_schedule_run_kind": entry.get("schedule_run_kind") or "",
+            "entry_schedule_triggered_at": entry.get("schedule_triggered_at") or "",
+            "entry_execution_mode": "deferred",
+        }
         executed = execute_actions(
             state,
             decision,
@@ -7147,6 +8868,15 @@ def execute_due_pending_decisions(now: datetime | None = None) -> dict[str, Any]
             "trade_reason": f"延迟成交触发：原计划{entry.get('schedule_slot') or '-'}，{trade_reason}",
             "decision": decision,
             "executed": executed,
+            "candidate_evidence_schema_version": entry.get(
+                "candidate_evidence_schema_version"
+            ),
+            "execution_evidence_schema_version": entry.get(
+                "execution_evidence_schema_version"
+            ),
+            "candidate_evidence": _json_safe_copy(
+                entry.get("candidate_evidence") or []
+            ),
         }
         for key in ("schedule_slot", "schedule_run_kind", "schedule_triggered_at"):
             if entry.get(key):
@@ -7173,12 +8903,34 @@ def run_decision_after_b1(b1_payload: dict[str, Any], force: bool = False) -> di
     schedule_slot = b1_payload.get("schedule_slot") or ""
     schedule_run_kind = b1_payload.get("schedule_run_kind") or ""
     schedule_triggered_at = b1_payload.get("schedule_triggered_at") or ""
+    execution_context = {
+        "entry_signal_generated_at": generated_at,
+        "entry_schedule_slot": schedule_slot,
+        "entry_schedule_run_kind": schedule_run_kind,
+        "entry_schedule_triggered_at": schedule_triggered_at,
+        "entry_execution_mode": "direct",
+    }
     already_decided = bool(not force and state.get("last_b1_generated_at") == generated_at)
     sync_sector_tide_position_context(state, b1_payload)
     sync_niuone_position_context(state, b1_payload)
     sync_zettaranc_position_context(state, b1_payload)
-    position_exit_executed = run_position_exit_checks_before_decision(state, datetime.now())
+    state.pop(AUTO_EXIT_PERSISTENCE_STATUS_KEY, None)
+    position_exit_executed = run_position_exit_checks_before_decision(
+        state,
+        datetime.now(),
+    )
+    position_exit_persistence = _pop_auto_exit_persistence_status(state)
     if already_decided:
+        prior_decision = _latest_b1_decision_log(
+            state,
+            str(generated_at),
+            str(schedule_slot),
+        )
+        decision_persisted = bool(
+            prior_decision
+            and _decision_has_candidate_evidence(prior_decision)
+            and _sync_decision_to_db(prior_decision)
+        )
         record_equity(state)
         save_state(state)
         if position_exit_executed:
@@ -7189,6 +8941,16 @@ def run_decision_after_b1(b1_payload: dict[str, Any], force: bool = False) -> di
             "executed": position_exit_executed,
             "position_exit_executed": position_exit_executed,
             "model_executed": [],
+            "decision_persisted": decision_persisted,
+            "trades_persisted": position_exit_persistence[
+                "trades_persisted"
+            ],
+            "durable_evidence_persisted": (
+                decision_persisted
+                and position_exit_persistence[
+                    "durable_evidence_persisted"
+                ]
+            ),
             "state": enrich_portfolio(state),
         }
     market_strategy_ctx = market_strategy_context_for_b1(b1_payload)
@@ -7224,6 +8986,7 @@ def run_decision_after_b1(b1_payload: dict[str, Any], force: bool = False) -> di
     adaptive = get_adaptive_params()
     
     raw_candidates = decision_candidate_rows(b1_payload)
+    observed_candidates = observed_candidate_rows(b1_payload)
     candidates = [
         c for c in raw_candidates
         if (
@@ -7233,6 +8996,10 @@ def run_decision_after_b1(b1_payload: dict[str, Any], force: bool = False) -> di
             and candidate_is_buyable(c)
         )
     ]
+    candidate_evidence = build_practice_candidate_evidence(
+        observed_candidates,
+        candidates,
+    )
     
     trade_allowed, trade_reason = is_a_share_execution_time()
     if buy_budget_exceeded:
@@ -7278,7 +9045,15 @@ def run_decision_after_b1(b1_payload: dict[str, Any], force: bool = False) -> di
             if execution_allowed:
                 trade_allowed = True
                 trade_reason = execution_reason
-                executed = execute_actions(state, decision, candidates, execution_allowed, execution_reason, market_strategy_ctx)
+                decision["_niuone_execution_context"] = execution_context
+                executed = execute_actions(
+                    state,
+                    decision,
+                    candidates,
+                    execution_allowed,
+                    execution_reason,
+                    market_strategy_ctx,
+                )
             else:
                 trade_allowed = False
                 trade_reason = f"{trade_reason}；已生成买卖策略，等待{deferred_due_at[-8:-3]}成交"
@@ -7293,6 +9068,7 @@ def run_decision_after_b1(b1_payload: dict[str, Any], force: bool = False) -> di
                         due_at=deferred_due_at,
                         decision=decision,
                         candidates=candidates,
+                        candidate_evidence=candidate_evidence,
                         reason=trade_reason,
                     )
                     decision["deferred_execution"] = {
@@ -7330,7 +9106,15 @@ def run_decision_after_b1(b1_payload: dict[str, Any], force: bool = False) -> di
                 if execution_reason != trade_reason:
                     decision["decision_trade_reason"] = trade_reason
                     trade_reason = execution_reason
-                executed = execute_actions(state, decision, candidates, execution_allowed, execution_reason, market_strategy_ctx)
+                decision["_niuone_execution_context"] = execution_context
+                executed = execute_actions(
+                    state,
+                    decision,
+                    candidates,
+                    execution_allowed,
+                    execution_reason,
+                    market_strategy_ctx,
+                )
         state["last_error"] = ""
     except Exception as exc:
         decision = {
@@ -7359,6 +9143,11 @@ def run_decision_after_b1(b1_payload: dict[str, Any], force: bool = False) -> di
         "decision": decision,
         "executed": executed,
         "market_decision_context": compact_market_ctx,
+        "candidate_evidence_schema_version": 1,
+        "execution_evidence_schema_version": (
+            FORWARD_EXECUTION_EVIDENCE_SCHEMA_VERSION
+        ),
+        "candidate_evidence": candidate_evidence,
     }
     if schedule_slot:
         log_entry["schedule_slot"] = schedule_slot
@@ -7366,9 +9155,10 @@ def run_decision_after_b1(b1_payload: dict[str, Any], force: bool = False) -> di
         log_entry["schedule_triggered_at"] = schedule_triggered_at
     state.setdefault("decision_log", []).append(log_entry)
     del state["decision_log"][:-50]
-    _sync_decision_to_db(log_entry)
-    if executed:
-        _sync_trades_to_db(executed)
+    decision_persisted = _sync_decision_to_db(log_entry)
+    candidate_evidence_valid = _decision_has_candidate_evidence(log_entry)
+    model_trades_persisted = _sync_trades_to_db(executed)
+    if executed and model_trades_persisted:
         _sync_positions_to_db(state)
     record_equity(state)
     save_state(state)
@@ -7380,6 +9170,18 @@ def run_decision_after_b1(b1_payload: dict[str, Any], force: bool = False) -> di
         "executed": all_executed,
         "position_exit_executed": position_exit_executed,
         "model_executed": executed,
+        "decision_persisted": decision_persisted,
+        "candidate_evidence_valid": candidate_evidence_valid,
+        "trades_persisted": (
+            position_exit_persistence["trades_persisted"]
+            and model_trades_persisted
+        ),
+        "durable_evidence_persisted": (
+            candidate_evidence_valid
+            and decision_persisted
+            and position_exit_persistence["durable_evidence_persisted"]
+            and model_trades_persisted
+        ),
         "portfolio": enrich_portfolio(state),
     }
 
@@ -7411,18 +9213,69 @@ def build_trade_rule_note() -> str:
         f"总仓位最高{MAX_TOTAL_POSITION_PCT:g}%并至少保留{MIN_CASH_RESERVE_PCT:g}%现金；其他人格仓位由模型结合盘面与风险决定。"
         f"板块潮汐另行按市场状态硬执行单笔/组合/行业动态风险预算、总仓45%/30%/15%、行业敞口12%/10%/6%；"
         f"单票8%/6%/4%仅为绝对天花板。"
-        f"牛牛战法成熟路径按强势股共振确认主线且只买行业前三龙头梯队；反转试仓仅在板块V形修复完成至少间隔20分钟的双确认后，买日内前三且收复昨收的股票。"
-        f"最多同时持有{NIUONE_MAX_OPEN_POSITIONS}只，并硬执行单笔/组合/主题风险预算；总仓70%/55%/35%、主题敞口55%/40%/25%，"
-        f"领航/回踩/启动/反转试仓单票绝对上限30%/25%/15%/5%，反转试仓单笔风险仅0.35%/0.30%/0.25%且T+0禁止加仓。"
-        f"允许无明确主线；单只股票独强既不得确认主线，也不得触发反转试仓。"
+        f"牛牛战法按主线酝酿→主升→高潮→分歧→退幕识别，试仓只参与candidate/emerging早段，candidate强势股等待启动确认；主升围绕启动/领涨，高潮不追普遍新仓，分歧只观察核心股调整后转强或减仓，持续回落不触发买点，退幕只退出。"
+        f"当日跨决策轮次累计最多新开{NIUONE_MAX_NEW_POSITIONS_PER_TRADING_DAY}只、最多同时持有{NIUONE_MAX_OPEN_POSITIONS}只，并硬执行单笔/组合/主题风险预算；总仓70%/55%/35%、主题敞口55%/40%/25%，"
+        f"领涨/转强/启动/试仓单票绝对上限30%/25%/15%/6.25%，试仓单笔风险仅0.35%/0.30%/0.25%。"
+        f"允许无明确主线；单只股票独强不得确认主线，日线V型结构则按独立试仓路径评估。"
         f"系统底线风控：峰值回撤/ATR吊灯保护、持仓超25日退出；"
         f"Z哥卖出风控：少妇B1至少观察{SHAOFU_MIN_HOLD_TRADING_DAYS}个交易日，开盘前30分钟仅执行硬退出，普通转弱经行业资金/预测量能连续确认后先减半；"
         f"模型SELL不直接成交。另保留防卖飞5分评分、B3次日不涨离场({B3_EXIT_HHMM}开盘检查)、B2两日不延续离场、超级B1未兑现离场({TIME_EXIT_HHMM}尾盘检查)、"
         f"卤煮半仓、S1/S2/S3逃顶、出货五式、BBI/白线两日破位、白线死叉黄线。"
         f"板块潮汐按行业连续两日退潮、市场硬停止、时间窗、2R减半和2ATR跟踪退出。"
-        f"牛牛反转试仓T+1未延续退出、T+2仍未升级强制退出；成熟路径按龙头梯队、主线退潮、市场硬停止、时间窗、2R减半和2ATR跟踪退出。"
+        f"牛牛试仓所属题材首次进入退幕即退出，3个交易日未延续右侧趋势也退出；成熟路径按龙头梯队、主线退幕、市场硬停止和时间窗退出；进攻/修复/防守试仓盘中达到0.75R先减仓50%，轮动试仓及成熟路径达到1R先减仓45%，余仓成本保护并按2ATR跟踪。"
         f"买入按万一免五计费。"
     )
+
+
+def snapshot_closing_equity_once() -> dict[str, Any]:
+    """Refresh prices and persist one post-close account mark without trading."""
+    now = datetime.now()
+    if not is_a_share_trading_day(now):
+        return {
+            "ok": True,
+            "skipped": True,
+            "reason": "non_trading_day",
+        }
+    state = load_state()
+    latest_strategy_payload = load_latest_sector_tide_payload()
+    sync_sector_tide_position_context(state, latest_strategy_payload)
+    sync_niuone_position_context(state, latest_strategy_payload)
+    sync_zettaranc_position_context(state, latest_strategy_payload)
+    refresh_realtime_prices(state)
+    refresh_position_intraday(state)
+    _refresh_position_bbi(state)
+    rebuild_intraday_equity_curve(state, now=now)
+    record_equity(state)
+    _sync_positions_to_db(state)
+    save_state(state)
+    today = now.strftime("%Y-%m-%d")
+    closing_points = [
+        point
+        for point in state.get("daily_equity_history", [])
+        if isinstance(point, dict)
+        and str(point.get("time") or "").startswith(today)
+        and str(point.get("time") or "")[11:16] >= "15:00"
+    ]
+    if not closing_points:
+        return {
+            "ok": False,
+            "skipped": False,
+            "reason": "post_close_equity_point_missing",
+        }
+    latest = max(closing_points, key=lambda point: str(point.get("time") or ""))
+    return {
+        "ok": True,
+        "skipped": False,
+        "time": latest.get("time"),
+        "equity": latest.get("equity"),
+        "cash": latest.get("cash"),
+        "market_value": latest.get("market_value"),
+        "position_count": sum(
+            position_qty(position) > 0
+            for position in (state.get("positions") or {}).values()
+            if isinstance(position, dict)
+        ),
+    }
 
 
 def get_dashboard_payload() -> dict[str, Any]:
@@ -7479,6 +9332,14 @@ def get_dashboard_payload() -> dict[str, Any]:
 
 if __name__ == "__main__":
     if "--auto-exits" in sys.argv:
-        print(json.dumps(run_auto_exits_once(), ensure_ascii=False, indent=2))
+        auto_exit_result = run_auto_exits_once()
+        print(json.dumps(auto_exit_result, ensure_ascii=False, indent=2))
+        if auto_exit_result.get("ok") is not True:
+            raise SystemExit(1)
+    elif "--snapshot-equity" in sys.argv:
+        snapshot_result = snapshot_closing_equity_once()
+        print(json.dumps(snapshot_result, ensure_ascii=False, indent=2))
+        if snapshot_result.get("ok") is not True:
+            raise SystemExit(1)
     else:
         print(json.dumps(get_dashboard_payload(), ensure_ascii=False, indent=2))

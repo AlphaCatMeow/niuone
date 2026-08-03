@@ -30,6 +30,23 @@ class AppModuleBoundaryTests(unittest.TestCase):
     def test_app_root_contains_no_loose_python_modules(self):
         self.assertEqual([path.name for path in APP.glob("*.py")], ["__init__.py"])
 
+    def test_simulated_trading_does_not_load_backtesting_package(self):
+        result = self.run_python(
+            f"""
+import json, sys
+sys.path[:0] = [{str(COMPAT)!r}, {str(APP)!r}]
+import niuniu_practice_trader
+print(json.dumps({{
+    "loaded": any(
+        name == "backtesting" or name.startswith("backtesting.")
+        or name == "app.backtesting" or name.startswith("app.backtesting.")
+        for name in sys.modules
+    )
+}}))
+"""
+        )
+        self.assertEqual(result, {"loaded": False})
+
     def test_relocated_entrypoints_publish_their_implementation_path(self):
         result = self.run_python(
             f"""

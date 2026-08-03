@@ -47,13 +47,19 @@ def classify_exit_rule(reason: str = "", exit_signal: str | None = None) -> str:
     if signal:
         if signal in {"shaofu_entry_stop", "tide_structure_stop", "niu_structure_stop", "hard_stop"}:
             return "stop_loss"
-        if signal in {"take_profit", "partial_take_profit", "luzhu_half", "tide_2r_partial", "niu_2r_partial"}:
+        if signal in {
+            "take_profit", "partial_take_profit", "luzhu_half",
+            "tide_2r_partial", "niu_2r_partial", "niu_r_partial",
+        }:
             return "take_profit"
         if signal in {"profit_giveback", "atr_chandelier", "tide_atr_trail", "niu_atr_trail", "breakeven_trail", "profit_to_loss"}:
             return "profit_protection"
         if signal == "tide_sector_weak":
             return "sector_retreat"
-        if signal in {"niu_mainline_faded", "niu_leader_lost"}:
+        if signal in {
+            "niu_mainline_faded", "niu_leader_lost",
+            "niu_reversal_theme_failed",
+        }:
             return "sector_retreat"
         if signal == "tide_market_hard_stop":
             return "market_risk"
@@ -74,7 +80,7 @@ def classify_exit_rule(reason: str = "", exit_signal: str | None = None) -> str:
             "no_progress", "max_hold_days", "stale_loser", "stale_below_bbi",
             "tide_leader_no_progress", "tide_rotation_no_follow_through", "tide_recovery_unconfirmed",
             "niu_leader_no_progress", "niu_pullback_no_follow_through", "niu_emerging_unconfirmed",
-            "niu_reversal_unconfirmed", "niu_reversal_not_upgraded",
+            "niu_reversal_unconfirmed", "niu_reversal_not_upgraded", "niu_reversal_no_progress",
         }:
             return "no_progress"
 

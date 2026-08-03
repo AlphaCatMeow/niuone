@@ -47,6 +47,11 @@ class PublicProjectionTests(unittest.TestCase):
                     "industry_flow_rank": 2,
                     "industry_flow_adjustment": 0.55,
                     "industry_flow_matched": True,
+                    "reversal_basis": "daily_v",
+                    "daily_v_reversal": True,
+                    "daily_v_trough_date": "2026-07-15",
+                    "daily_v_decline_pct": 12.5,
+                    "daily_v_rebound_pct": 8.2,
                     "hard_blockers": ["停牌"],
                     "private_note": "secret",
                 }],
@@ -96,6 +101,9 @@ class PublicProjectionTests(unittest.TestCase):
         self.assertEqual(sections["candidates"]["items"][0]["best_score"], 8.5)
         self.assertEqual(sections["candidates"]["items"][0]["industry_flow_rank"], 2)
         self.assertEqual(sections["candidates"]["items"][0]["industry_flow_adjustment"], 0.55)
+        self.assertEqual(sections["candidates"]["items"][0]["reversal_basis"], "daily_v")
+        self.assertTrue(sections["candidates"]["items"][0]["daily_v_reversal"])
+        self.assertEqual(sections["candidates"]["items"][0]["daily_v_trough_date"], "2026-07-15")
         self.assertEqual(sections["candidates"]["items"][0]["hard_blockers"], ["停牌"])
         self.assertNotIn("private_note", sections["candidates"]["items"][0])
         self.assertEqual(

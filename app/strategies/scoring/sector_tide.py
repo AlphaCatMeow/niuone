@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 import statistics
+from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from typing import Any, Mapping
 
@@ -354,12 +355,16 @@ def _return_pct(rows: list[dict[str, Any]], lookback: int) -> float | None:
 
 def _percentile(value: float, population: list[float]) -> float:
     clean = sorted(float(item) for item in population if item is not None)
+    return _percentile_from_sorted(value, clean)
+
+
+def _percentile_from_sorted(value: float, clean: list[float]) -> float:
     if not clean:
         return 50.0
     if len(clean) == 1:
         return 50.0
-    below = sum(1 for item in clean if item < value)
-    equal = sum(1 for item in clean if item == value)
+    below = bisect_left(clean, value)
+    equal = bisect_right(clean, value) - below
     return _clamp((below + max(0, equal - 1) / 2) / (len(clean) - 1) * 100)
 
 
@@ -546,26 +551,47 @@ def build_sector_tide_context(
         }
 
     flows = _flow_map(flow_rows)
-    flow_population = list(flows.values())
-    ret5_population = [sector["ret5"] - market_ret5 for sector in raw_sectors.values()]
-    ret20_population = [sector["ret20"] - market_ret20 for sector in raw_sectors.values()]
-    volume_population = [sector["volume_ratio"] for sector in raw_sectors.values()]
-    liquidity_population = [sector["amount"] for sector in raw_sectors.values()]
+    flow_population = sorted(flows.values())
+    ret5_population = sorted(
+        sector["ret5"] - market_ret5 for sector in raw_sectors.values()
+    )
+    ret20_population = sorted(
+        sector["ret20"] - market_ret20 for sector in raw_sectors.values()
+    )
+    volume_population = sorted(
+        sector["volume_ratio"] for sector in raw_sectors.values()
+    )
+    liquidity_population = sorted(sector["amount"] for sector in raw_sectors.values())
     for sector in raw_sectors.values():
         sector["relative_5d_pct"] = sector["ret5"] - market_ret5
         sector["relative_20d_pct"] = sector["ret20"] - market_ret20
-        sector["rs5_percentile"] = _percentile(sector["relative_5d_pct"], ret5_population)
-        sector["rs20_percentile"] = _percentile(sector["relative_20d_pct"], ret20_population)
+        sector["rs5_percentile"] = _percentile_from_sorted(
+            sector["relative_5d_pct"], ret5_population
+        )
+        sector["rs20_percentile"] = _percentile_from_sorted(
+            sector["relative_20d_pct"], ret20_population
+        )
         sector["rank_acceleration"] = sector["rs5_percentile"] - sector["rs20_percentile"]
-    acceleration_population = [sector["rank_acceleration"] for sector in raw_sectors.values()]
+    acceleration_population = sorted(
+        sector["rank_acceleration"] for sector in raw_sectors.values()
+    )
 
     sectors: dict[str, dict[str, Any]] = {}
     for industry, sector in raw_sectors.items():
-        acceleration_percentile = _percentile(sector["rank_acceleration"], acceleration_population)
-        volume_percentile = _percentile(sector["volume_ratio"], volume_population)
-        liquidity_percentile = _percentile(sector["amount"], liquidity_population)
+        acceleration_percentile = _percentile_from_sorted(
+            sector["rank_acceleration"], acceleration_population
+        )
+        volume_percentile = _percentile_from_sorted(
+            sector["volume_ratio"], volume_population
+        )
+        liquidity_percentile = _percentile_from_sorted(
+            sector["amount"], liquidity_population
+        )
         flow_value = _matched_flow(industry, flows)
-        flow_score = _percentile(flow_value, flow_population) if flow_value is not None else volume_percentile
+        flow_score = (
+            _percentile_from_sorted(flow_value, flow_population)
+            if flow_value is not None else volume_percentile
+        )
         base_score = (
             sector["rs20_percentile"] * 0.25
             + sector["rs5_percentile"] * 0.15
@@ -619,20 +645,22 @@ def build_sector_tide_context(
         }
 
     stock_context: dict[str, dict[str, Any]] = {}
-    all_ret20 = [float(member["ret20"]) for member in members]
+    all_ret20 = sorted(float(member["ret20"]) for member in members)
     for industry, sector_members in grouped.items():
-        sector_ret5 = [float(member["ret5"]) for member in sector_members]
-        sector_ret20 = [float(member["ret20"]) for member in sector_members]
+        sector_ret5 = sorted(float(member["ret5"]) for member in sector_members)
+        sector_ret20 = sorted(float(member["ret20"]) for member in sector_members)
         for member in sector_members:
-            rs5_rank = _percentile(float(member["ret5"]), sector_ret5)
-            rs20_rank = _percentile(float(member["ret20"]), sector_ret20)
+            rs5_rank = _percentile_from_sorted(float(member["ret5"]), sector_ret5)
+            rs20_rank = _percentile_from_sorted(float(member["ret20"]), sector_ret20)
             dragon_tiger_stock = dragon_tiger_stocks.get(str(member["code"])) or {}
             dragon_tiger_strength = float(dragon_tiger_stock.get("strength") or 0.0)
             news_stock = news_stocks.get(str(member["code"])) or {}
             stock_context[str(member["code"])] = {
                 "industry": industry,
                 "sector_relative_rank": round(rs20_rank * 0.6 + rs5_rank * 0.4, 2),
-                "market_relative_rank": round(_percentile(float(member["ret20"]), all_ret20), 2),
+                "market_relative_rank": round(
+                    _percentile_from_sorted(float(member["ret20"]), all_ret20), 2
+                ),
                 "ret5": round(float(member["ret5"]), 2),
                 "ret20": round(float(member["ret20"]), 2),
                 "dragon_tiger_listed": bool(dragon_tiger_stock.get("listed")),
