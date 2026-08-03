@@ -6,7 +6,6 @@ import re
 import statistics
 from bisect import bisect_left, bisect_right
 from collections import defaultdict
-from datetime import datetime
 from typing import Any, Mapping
 
 from ..niuone_risk import (
@@ -59,13 +58,7 @@ NIUONE_CORE_STOCK_LIMIT = 5
 NIUONE_LEADER_TIER_LIMIT = 3
 NIUONE_MIN_CROSS_DAY_CORE_OVERLAP = 2
 NIUONE_TODAY_MIN_QUOTE_COVERAGE = 0.8
-NIUONE_REVERSAL_MIN_SAMPLE_GAP_MINUTES = 20.0
-NIUONE_REVERSAL_MIN_QUOTE_COVERAGE = 0.70
-NIUONE_REVERSAL_MIN_BREADTH_PCT = 60.0
-NIUONE_REVERSAL_MIN_MEDIAN_CHANGE_PCT = 0.5
 NIUONE_REVERSAL_MIN_REBOUND_PCT = 1.5
-NIUONE_REVERSAL_MIN_STRENGTH_SCORE = 60.0
-NIUONE_REVERSAL_MIN_CORE_COUNT = 2
 NIUONE_DAILY_V_LOOKBACK = 30
 NIUONE_DAILY_V_LEFT_LOOKBACK = 15
 NIUONE_DAILY_V_MIN_LEFT_DAYS = 5
@@ -352,8 +345,6 @@ def _today_theme_metrics(theme_members: list[dict[str, Any]]) -> dict[str, Any]:
             "today_median_change_pct": None,
             "today_strength_score": None,
             "today_leadership_score": None,
-            "today_median_rebound_pct": None,
-            "today_prior_median_ret5_pct": None,
             "today_leaders": [],
         }
 
@@ -366,16 +357,6 @@ def _today_theme_metrics(theme_members: list[dict[str, Any]]) -> dict[str, Any]:
     advance_3_pct = advance_3_count / quote_count * 100
     advance_5_pct = advance_5_count / quote_count * 100
     median_change = statistics.median(changes)
-    rebound_values = [
-        float(value)
-        for member in quoted_members
-        if (value := safe_float(member.get("rebound_from_low_pct"))) is not None
-    ]
-    prior_ret5_values = [
-        float(value)
-        for member in quoted_members
-        if (value := safe_float(member.get("prior_ret5"))) is not None
-    ]
     positive_median_score = _clamp(max(0.0, median_change) / 5.0 * 100)
     strength_score = _clamp(
         breadth_pct * 0.45
@@ -402,148 +383,16 @@ def _today_theme_metrics(theme_members: list[dict[str, Any]]) -> dict[str, Any]:
         "today_median_change_pct": round(median_change, 2),
         "today_strength_score": round(strength_score, 2),
         "today_leadership_score": round(leadership_score, 2),
-        "today_median_rebound_pct": (
-            round(statistics.median(rebound_values), 2) if rebound_values else None
-        ),
-        "today_prior_median_ret5_pct": (
-            round(statistics.median(prior_ret5_values), 2) if prior_ret5_values else None
-        ),
         "today_leaders": [
             {
                 "code": member["code"],
                 "name": member["name"],
                 "strong_score": round(float(member["strong_score"]), 2),
                 "change_pct": round(float(member["change_pct"]), 2),
-                "rebound_from_low_pct": safe_round(member.get("rebound_from_low_pct"), 2),
-                "reclaim_previous_close": bool(member.get("reclaim_previous_close")),
                 "role": "today_leader" if index == 0 else "today_core",
             }
             for index, member in enumerate(leaders)
         ],
-    }
-
-
-def _sample_time(value: Any) -> datetime | None:
-    text = str(value or "").strip()[:19]
-    for pattern in ("%Y-%m-%d %H:%M:%S", "%Y%m%d%H%M%S"):
-        try:
-            return datetime.strptime(text, pattern)
-        except ValueError:
-            continue
-    return None
-
-
-def _reversal_state(
-    *,
-    today_metrics: Mapping[str, Any],
-    previous: Mapping[str, Any],
-    flow_value: float | None,
-    sample_at: str,
-    as_of_date: str,
-) -> dict[str, Any]:
-    """Detect a broad V-reversal and require two meaningfully spaced samples."""
-    previous_date = str(previous.get("as_of_date") or "")[:10]
-    same_day = bool(as_of_date and previous_date == as_of_date)
-    previous_state = str(previous.get("state") or previous.get("raw_state") or "")
-    prior_median_ret5 = safe_float(today_metrics.get("today_prior_median_ret5_pct"))
-    origin_weak = bool(
-        (same_day and previous.get("reversal_origin_weak") is True)
-        or (not same_day and previous_state in {"inactive", "fading", "candidate"})
-        or (prior_median_ret5 is not None and prior_median_ret5 <= 0)
-    )
-    previous_flow = safe_float(previous.get("flow_net_yi"))
-    flow_available = flow_value is not None
-    flow_positive = bool(flow_value is not None and flow_value > 0)
-    flow_flip = bool(flow_positive and previous_flow is not None and previous_flow <= 0)
-    flow_improving = bool(
-        flow_positive
-        and (previous_flow is None or flow_value > previous_flow)
-    )
-    breadth = safe_float(today_metrics.get("today_breadth_pct")) or 0.0
-    median_change = safe_float(today_metrics.get("today_median_change_pct")) or 0.0
-    median_rebound = safe_float(today_metrics.get("today_median_rebound_pct")) or 0.0
-    strength = safe_float(today_metrics.get("today_strength_score")) or 0.0
-    core_count = int(safe_float(today_metrics.get("today_1_5pct_count")) or 0)
-    quote_count = int(safe_float(today_metrics.get("today_quote_count")) or 0)
-    quote_coverage = safe_float(today_metrics.get("today_data_coverage")) or 0.0
-    quote_coverage_ok = bool(
-        quote_count >= NIUONE_MIN_THEME_MEMBERS
-        and quote_coverage >= NIUONE_REVERSAL_MIN_QUOTE_COVERAGE
-    )
-    current_candidate = bool(
-        quote_coverage_ok
-        and origin_weak
-        and not previous.get("mainline_confirmed")
-        and breadth >= NIUONE_REVERSAL_MIN_BREADTH_PCT
-        and median_change >= NIUONE_REVERSAL_MIN_MEDIAN_CHANGE_PCT
-        and median_rebound >= NIUONE_REVERSAL_MIN_REBOUND_PCT
-        and strength >= NIUONE_REVERSAL_MIN_STRENGTH_SCORE
-        and core_count >= NIUONE_REVERSAL_MIN_CORE_COUNT
-        and (not flow_available or flow_positive)
-    )
-
-    confirmation_count = 0
-    last_confirmation_at = ""
-    sample_gap_minutes: float | None = None
-    if current_candidate:
-        previous_count = max(0, int(safe_float(previous.get("reversal_confirmation_count")) or 0))
-        prior_candidate = bool(
-            same_day
-            and (
-                previous.get("reversal_candidate") is True
-                or previous.get("reversal_confirmed") is True
-                or previous_count > 0
-            )
-        )
-        confirmation_count = max(1, previous_count) if prior_candidate else 1
-        previous_confirmation_at = str(
-            previous.get("reversal_last_confirmation_at")
-            or previous.get("sample_at")
-            or ""
-        )[:19]
-        current_time = _sample_time(sample_at)
-        previous_time = _sample_time(previous_confirmation_at)
-        if current_time is not None and previous_time is not None:
-            sample_gap_minutes = max(0.0, (current_time - previous_time).total_seconds() / 60.0)
-        if (
-            prior_candidate
-            and sample_gap_minutes is not None
-            and sample_gap_minutes >= NIUONE_REVERSAL_MIN_SAMPLE_GAP_MINUTES
-        ):
-            confirmation_count += 1
-            last_confirmation_at = str(sample_at or "")[:19]
-        else:
-            last_confirmation_at = previous_confirmation_at or str(sample_at or "")[:19]
-
-    rebound_score = _clamp(median_rebound / 3.0 * 100)
-    flow_score = (
-        100.0 if flow_flip
-        else 85.0 if flow_improving
-        else 70.0 if flow_positive
-        else 50.0 if not flow_available
-        else 0.0
-    )
-    reversal_score = _clamp(
-        strength * 0.30
-        + breadth * 0.20
-        + rebound_score * 0.20
-        + (safe_float(today_metrics.get("today_leadership_score")) or 0.0) * 0.15
-        + flow_score * 0.15
-    )
-    return {
-        "reversal_candidate": current_candidate,
-        "reversal_confirmed": bool(current_candidate and confirmation_count >= 2),
-        "reversal_confirmation_count": confirmation_count,
-        "reversal_min_sample_gap_minutes": NIUONE_REVERSAL_MIN_SAMPLE_GAP_MINUTES,
-        "reversal_sample_gap_minutes": safe_round(sample_gap_minutes, 2),
-        "reversal_last_confirmation_at": last_confirmation_at,
-        "reversal_origin_weak": origin_weak,
-        "reversal_quote_coverage_ok": quote_coverage_ok,
-        "reversal_flow_available": flow_available,
-        "reversal_flow_positive": flow_positive,
-        "reversal_flow_flip": flow_flip,
-        "reversal_flow_improving": flow_improving,
-        "reversal_score": round(reversal_score, 2),
     }
 
 
@@ -1035,13 +884,6 @@ def build_niuone_context(
             previous_context_date=previous_context_date,
             previous_trading_day=previous_trading_day,
         )
-        reversal_detail = _reversal_state(
-            today_metrics=today_metrics,
-            previous=previous,
-            flow_value=flow_value,
-            sample_at=sample_at,
-            as_of_date=as_of_date,
-        )
         raw_state = str(state_detail["raw_state"])
         state = str(state_detail["state"])
         lifecycle = niuone_lifecycle_metadata(
@@ -1097,7 +939,6 @@ def build_niuone_context(
             "single_stock_dominated": bool(strong_count == 1 or concentration > 0.70),
             "flow_net_yi": safe_round(flow_value, 2),
             "flow_source": "industry_net_flow" if flow_value is not None else "liquidity_fallback",
-            **reversal_detail,
             "strength_component": round(strength_component, 2),
             "breadth_component": round(breadth_component, 2),
             "leadership_component": round(leadership_component, 2),
@@ -1255,15 +1096,6 @@ def build_niuone_context(
         and float(today_ordered[0].get("today_strength_score") or 0.0) >= NIUONE_TODAY_OBSERVATION_THRESHOLD
         else None
     )
-    reversal_ordered = sorted(
-        (theme for theme in themes.values() if theme.get("reversal_candidate")),
-        key=lambda theme: float(theme.get("reversal_score") or 0.0),
-        reverse=True,
-    )
-    reversal_primary = next(
-        (theme for theme in reversal_ordered if theme.get("reversal_confirmed")),
-        None,
-    )
     primary = confirmed[0] if confirmed else None
     secondary = confirmed[1] if len(confirmed) > 1 and float(confirmed[0]["score"]) - float(confirmed[1]["score"]) <= 8 else None
     summary = {
@@ -1284,17 +1116,8 @@ def build_niuone_context(
         "today_primary": today_primary["industry"] if today_primary else "",
         "today_primary_score": today_primary["today_strength_score"] if today_primary else None,
         "today_primary_breadth_pct": today_primary["today_breadth_pct"] if today_primary else None,
-        "reversal_primary": reversal_primary["industry"] if reversal_primary else "",
-        "reversal_primary_score": reversal_primary["reversal_score"] if reversal_primary else None,
-        "reversal_confirmation_count": (
-            reversal_primary["reversal_confirmation_count"] if reversal_primary else 0
-        ),
         "today_observation_reason": (
-            "日内V形修复已完成分时双确认，仅作题材研究观察"
-            if reversal_primary
-            else "日内V形修复正在等待间隔确认，不改变牛牛试仓或跨日主线门槛"
-            if reversal_ordered
-            else "今日强度仅作观察，不改变原有跨日主线确认门槛"
+            "今日强度仅作观察，不改变原有跨日主线确认门槛"
             if today_primary
             else ""
         ),
@@ -1336,7 +1159,7 @@ def build_niuone_context(
             "description": "未归入已知数据质量分类",
         })
     return {
-        "version": 6,
+        "version": 7,
         "strategy": "niuone",
         "theme_basis": resolved_theme_basis,
         "as_of_date": as_of_date,
@@ -1741,22 +1564,8 @@ def _payload(
         "today_1_5pct_count": theme.get("today_1_5pct_count"),
         "today_breadth_pct": theme.get("today_breadth_pct"),
         "today_median_change_pct": theme.get("today_median_change_pct"),
-        "today_median_rebound_pct": theme.get("today_median_rebound_pct"),
-        "today_prior_median_ret5_pct": theme.get("today_prior_median_ret5_pct"),
         "today_strength_score": theme.get("today_strength_score"),
         "today_leadership_score": theme.get("today_leadership_score"),
-        "reversal_candidate": bool(theme.get("reversal_candidate")),
-        "reversal_confirmed": bool(theme.get("reversal_confirmed")),
-        "reversal_confirmation_count": theme.get("reversal_confirmation_count"),
-        "reversal_min_sample_gap_minutes": theme.get("reversal_min_sample_gap_minutes"),
-        "reversal_sample_gap_minutes": theme.get("reversal_sample_gap_minutes"),
-        "reversal_origin_weak": bool(theme.get("reversal_origin_weak")),
-        "reversal_quote_coverage_ok": bool(theme.get("reversal_quote_coverage_ok")),
-        "reversal_flow_available": bool(theme.get("reversal_flow_available")),
-        "reversal_flow_positive": bool(theme.get("reversal_flow_positive")),
-        "reversal_flow_flip": bool(theme.get("reversal_flow_flip")),
-        "reversal_flow_improving": bool(theme.get("reversal_flow_improving")),
-        "reversal_score": theme.get("reversal_score"),
         "market_regime": regime,
         "market_score": market.get("score"),
         "market_hard_stop": bool(market.get("hard_stop")),

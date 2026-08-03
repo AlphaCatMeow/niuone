@@ -84,11 +84,11 @@ def sample_scan() -> dict[str, object]:
                 "primary": "",
                 "intraday_primary": "银行",
                 "intraday_primary_score": 79.03,
-                "observation_reason": "日内强势仅观察",
+                "observation_reason": "日内V形修复已完成分时双确认，仅作题材研究观察",
                 "today_primary": "工业金属",
                 "today_primary_score": 80.0,
                 "today_primary_breadth_pct": 87.5,
-                "today_observation_reason": "今日强度仅作观察",
+                "today_observation_reason": "日内V形修复已完成分时双确认，仅作题材研究观察",
                 "reversal_primary": "工业金属",
                 "reversal_primary_score": 82.5,
                 "reversal_confirmation_count": 2,
@@ -213,11 +213,15 @@ class NiuOneMainlineViewTests(unittest.TestCase):
         self.assertEqual(view["mainline"]["intraday_primary"], "银行")
         self.assertEqual(view["mainline"]["today_primary"], "工业金属")
         self.assertEqual(view["mainline"]["today_primary_breadth_pct"], 87.5)
-        self.assertEqual(view["mainline"]["reversal_primary"], "工业金属")
-        self.assertEqual(view["mainline"]["reversal_confirmation_count"], 2)
+        self.assertEqual(
+            view["mainline"]["today_observation_reason"],
+            "今日强度仅作观察，不改变原有跨日主线确认门槛",
+        )
+        self.assertNotIn("observation_reason", view["mainline"])
+        self.assertNotIn("reversal_primary", view["mainline"])
         self.assertEqual([theme["industry"] for theme in view["themes"]], ["银行", "工业金属"])
         self.assertEqual([theme["industry"] for theme in view["today_themes"]], ["工业金属", "银行"])
-        self.assertEqual([theme["industry"] for theme in view["reversal_themes"]], ["工业金属"])
+        self.assertNotIn("reversal_themes", view)
         industrial_metals = next(theme for theme in view["themes"] if theme["industry"] == "工业金属")
         self.assertEqual(industrial_metals["effective_strong_count"], 3.2)
         self.assertEqual(industrial_metals["niuone_lifecycle_stage"], "markup")
@@ -233,12 +237,12 @@ class NiuOneMainlineViewTests(unittest.TestCase):
         self.assertEqual(industrial_metals["leader_stock"]["change_pct"], 5.26)
         self.assertEqual(industrial_metals["today_strength_score"], 80)
         self.assertEqual(industrial_metals["today_breadth_pct"], 87.5)
-        self.assertTrue(industrial_metals["reversal_confirmed"])
-        self.assertEqual(industrial_metals["reversal_sample_gap_minutes"], 25)
-        self.assertEqual(industrial_metals["today_median_rebound_pct"], 2.4)
+        self.assertNotIn("reversal_confirmed", industrial_metals)
+        self.assertNotIn("reversal_score", industrial_metals)
+        self.assertNotIn("today_median_rebound_pct", industrial_metals)
         self.assertEqual(industrial_metals["today_leader_stock"]["code"], "603979")
-        self.assertEqual(industrial_metals["leader_stock"]["rebound_from_low_pct"], 3.1)
-        self.assertTrue(industrial_metals["leader_stock"]["reclaim_previous_close"])
+        self.assertNotIn("rebound_from_low_pct", industrial_metals["leader_stock"])
+        self.assertNotIn("reclaim_previous_close", industrial_metals["leader_stock"])
         self.assertEqual(
             [(stock["code"], stock["change_pct"]) for stock in industrial_metals["strong_stocks"]],
             [("603979", 5.26), ("600111", -1.35)],
@@ -258,6 +262,7 @@ class NiuOneMainlineViewTests(unittest.TestCase):
         self.assertNotIn("provider_token", serialized)
         self.assertNotIn("raw_news", serialized)
         self.assertNotIn("internal_samples", serialized)
+        self.assertNotIn("V形修复", serialized)
 
     def test_empty_payload_returns_stable_unavailable_view(self) -> None:
         view = build_niuone_mainline_view(None)
@@ -265,7 +270,7 @@ class NiuOneMainlineViewTests(unittest.TestCase):
         self.assertFalse(view["available"])
         self.assertEqual(view["themes"], [])
         self.assertEqual(view["today_themes"], [])
-        self.assertEqual(view["reversal_themes"], [])
+        self.assertNotIn("reversal_themes", view)
 
     def test_legacy_snapshot_marks_uncovered_reason_as_pending(self) -> None:
         scan = sample_scan()
@@ -326,32 +331,6 @@ class NiuOneMainlineViewTests(unittest.TestCase):
             [theme["industry"] for theme in view["today_themes"]],
             ["题材1", "题材2", "题材3", "题材4", "题材5"],
         )
-
-    def test_public_view_keeps_reversal_list_independent_of_structure_top_five(self) -> None:
-        scan = sample_scan()
-        scan["niuone_context"]["themes"] = {
-            f"题材{index}": {
-                "industry": f"题材{index}",
-                "score": index,
-                "state": "candidate",
-                "reversal_candidate": index == 1,
-                "reversal_confirmed": index == 1,
-                "reversal_score": 88 if index == 1 else 0,
-            }
-            for index in range(1, 9)
-        }
-
-        view = build_niuone_mainline_view(scan)
-
-        self.assertEqual(
-            [theme["industry"] for theme in view["themes"]],
-            ["题材8", "题材7", "题材6", "题材5", "题材4"],
-        )
-        self.assertEqual(
-            [theme["industry"] for theme in view["reversal_themes"]],
-            ["题材1"],
-        )
-
 
 if __name__ == "__main__":
     unittest.main()

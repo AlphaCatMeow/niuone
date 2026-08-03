@@ -190,9 +190,6 @@ def reversal_candidate(**updates) -> dict:
         stock_role="follower",
         stock_leader_rank=4,
         stock_leader_tier=False,
-        reversal_candidate=True,
-        reversal_confirmed=True,
-        reversal_confirmation_count=2,
         reversal_basis="daily_v",
         daily_v_reversal=True,
         daily_v_left_days=7,
@@ -370,7 +367,7 @@ class NiuOneStrategyTests(unittest.TestCase):
                 })
         return prepared
 
-    def test_intraday_v_observation_remains_research_only(self):
+    def test_context_omits_intraday_v_observation_state(self):
         prepared = self._prepared_reversal_market()
         context_args = {
             "market_snapshot": {
@@ -386,59 +383,22 @@ class NiuOneStrategyTests(unittest.TestCase):
             "as_of_date": "2026-07-31",
             "previous_trading_day": "2026-07-30",
         }
-        first = build_niuone_context(
+        context = build_niuone_context(
             prepared,
             sample_at="2026-07-31 10:00:00",
             **context_args,
         )
-        too_soon = build_niuone_context(
-            prepared,
-            previous_context=first,
-            sample_at="2026-07-31 10:10:00",
-            **context_args,
-        )
-        confirmed = build_niuone_context(
-            prepared,
-            previous_context=too_soon,
-            sample_at="2026-07-31 10:25:00",
-            **context_args,
-        )
 
-        first_theme = first["themes"]["半导体"]
-        too_soon_theme = too_soon["themes"]["半导体"]
-        theme = confirmed["themes"]["半导体"]
-        self.assertTrue(first_theme["reversal_candidate"])
-        self.assertEqual(first_theme["reversal_confirmation_count"], 1)
-        self.assertFalse(too_soon_theme["reversal_confirmed"])
-        self.assertEqual(too_soon_theme["reversal_confirmation_count"], 1)
-        self.assertTrue(theme["reversal_confirmed"])
-        self.assertEqual(theme["reversal_confirmation_count"], 2)
-        self.assertEqual(theme["reversal_sample_gap_minutes"], 25)
-        self.assertEqual(confirmed["mainline"]["reversal_primary"], "半导体")
-        self.assertEqual(confirmed["mainline"]["mode"], "none")
-
-        rows = [dict(row) for row in prepared[0]["rows"]]
-        previous_close = float(rows[-2]["close"])
-        rows[-1].update({
-            "open": previous_close * 0.995,
-            "close": previous_close * 1.036,
-            "high": previous_close * 1.041,
-            "low": previous_close * 0.997,
-            "quote_change_pct": 3.6,
-        })
-        enrich_rows(rows)
-        rows[-1].update({
-            "symbol_code": "600000",
-            "stock_name": "测试600000",
-            "industry": "半导体",
-            "quote_amount": 2.5e9,
-        })
-        result = score_niu_reversal_probe(rows, confirmed)
-
-        self.assertIsNotNone(result)
-        self.assertFalse(result["actionable"])
-        self.assertFalse(result["daily_v_reversal"])
-        self.assertTrue(any("V型" in item for item in result["hard_blockers"]))
+        self.assertEqual(context["mainline"]["mode"], "none")
+        self.assertFalse(any(
+            key.startswith("reversal_")
+            for key in context["mainline"]
+        ))
+        for theme in context["themes"].values():
+            self.assertFalse(any(
+                key.startswith("reversal_")
+                for key in theme
+            ))
 
     def test_reversal_probe_uses_multi_session_daily_v(self):
         rows = make_daily_v_rows("600000", "半导体")
@@ -776,68 +736,6 @@ class NiuOneStrategyTests(unittest.TestCase):
         self.assertEqual(selected[0]["selection_same_stage_candidate_rank"], 1)
         self.assertEqual(selected[0]["selection_same_stage_top_score_gap"], 0.2)
         self.assertEqual(selected[1]["selection_same_stage_candidate_rank"], 2)
-
-    def test_reversal_probe_accepts_seventy_five_percent_quotes_but_requires_weak_origin(self):
-        prepared = self._prepared_reversal_market()
-        missing_quote = next(item for item in prepared if item["code"] == "600003")
-        missing_quote["quote"].pop("change_pct")
-        context_args = {
-            "market_snapshot": {
-                "up": 3000,
-                "down": 1500,
-                "median_change_pct": 0.8,
-                "limit_up": 20,
-                "limit_down": 2,
-                "core_index_count": 3,
-                "index_below_ma20_count": 0,
-            },
-            "flow_rows": {"inflow": [{"name": "半导体", "net_flow_yi": 10}], "outflow": []},
-            "as_of_date": "2026-07-31",
-            "previous_trading_day": "2026-07-30",
-            "sample_at": "2026-07-31 10:00:00",
-        }
-
-        partial = build_niuone_context(prepared, **context_args)
-        theme = partial["themes"]["半导体"]
-        self.assertEqual(theme["today_data_coverage"], 0.75)
-        self.assertFalse(theme["today_eligible_data"])
-        self.assertTrue(theme["reversal_quote_coverage_ok"])
-        self.assertTrue(theme["reversal_candidate"])
-
-        for item in prepared:
-            if item["industry"] != "半导体":
-                continue
-            rising_rows = make_rows(item["code"], "半导体", 0.03)
-            for row in rising_rows[-20:]:
-                row["high"] = float(row["close"]) * 1.02
-                row["low"] = float(row["close"]) * 0.98
-            enrich_rows(rising_rows)
-            rising_rows[-1].update({
-                "symbol_code": item["code"],
-                "stock_name": item["name"],
-                "industry": "半导体",
-                "quote_amount": 2.5e9,
-            })
-            previous_close = float(rising_rows[-2]["close"])
-            item["rows"] = rising_rows
-            item["quote"]["prev_close"] = previous_close
-            change_pct = float(item["quote"].get("change_pct") or 3.2)
-            item["quote"]["price"] = previous_close * (1 + change_pct / 100)
-            item["quote"]["low"] = previous_close * 0.997
-
-        no_weak_origin = build_niuone_context(prepared, **context_args)
-        strong_origin_theme = no_weak_origin["themes"]["半导体"]
-        self.assertFalse(strong_origin_theme["reversal_origin_weak"])
-        self.assertFalse(strong_origin_theme["reversal_candidate"])
-
-        repeated_strong_origin = build_niuone_context(
-            prepared,
-            previous_context=no_weak_origin,
-            **{**context_args, "sample_at": "2026-07-31 10:25:00"},
-        )
-        repeated_theme = repeated_strong_origin["themes"]["半导体"]
-        self.assertFalse(repeated_theme["reversal_origin_weak"])
-        self.assertFalse(repeated_theme["reversal_candidate"])
 
     def test_context_confirms_mainline_from_multiple_strong_stocks(self):
         prepared = self._prepared_market()

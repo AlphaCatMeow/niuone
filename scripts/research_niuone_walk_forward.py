@@ -62,10 +62,7 @@ from app.strategies.scoring.common import (  # noqa: E402
     with_strategy_profile,
 )
 from app.strategies.scoring import STRATEGY_SCORERS  # noqa: E402
-from app.strategies.scoring.niuone import (  # noqa: E402
-    NIUONE_REVERSAL_MIN_BREADTH_PCT,
-    score_niu_pullback,
-)
+from app.strategies.scoring.niuone import score_niu_pullback  # noqa: E402
 from app.strategies.exits import (  # noqa: E402
     NIUONE_REVERSAL_EARLY_PROTECTION_REGIMES,
 )
@@ -92,6 +89,10 @@ DEVELOPMENT_WINDOWS = {
     "validation": ("2026-02-01", "2026-04-30"),
     "recent": ("2026-04-28", "2026-06-27"),
 }
+
+# Frozen input for the rejected Round32 experiment. It is intentionally local
+# because production no longer has a theme-level intraday V-recovery rule.
+REJECTED_ROUND32_MIN_TODAY_BREADTH_PCT = 60.0
 PRIMARY_DEVELOPMENT_WINDOW_NAMES = (
     "old_sealed",
     "train_a",
@@ -146,8 +147,6 @@ THEME_CROSS_SECTION_FIELDS = (
     "today_breadth_pct",
     "today_strength_score",
     "today_leadership_score",
-    "reversal_candidate",
-    "reversal_confirmed",
     "niuone_lifecycle_stage",
     "niuone_lifecycle_label",
     "niuone_lifecycle_order",
@@ -1670,7 +1669,7 @@ def _lifecycle_early_quality_filter(
 
 
 LIFECYCLE_EARLY_BREADTH_60_FILTER = _lifecycle_early_quality_filter(
-    minimum_today_breadth_pct=NIUONE_REVERSAL_MIN_BREADTH_PCT,
+    minimum_today_breadth_pct=REJECTED_ROUND32_MIN_TODAY_BREADTH_PCT,
 )
 LIFECYCLE_EARLY_TODAY_STRENGTH_40_FILTER = _lifecycle_early_quality_filter(
     minimum_today_strength_score=40.0,
@@ -4229,7 +4228,7 @@ CANDIDATES: Mapping[str, Mapping[str, Any]] = {
             "lifecycle_stage_is_filter": True,
             "entry_strategy_ids": ("niu_reversal_probe",),
             "maximum_daily_v_recovery_ratio_exclusive": 2.0,
-            "minimum_today_breadth_pct": NIUONE_REVERSAL_MIN_BREADTH_PCT,
+            "minimum_today_breadth_pct": REJECTED_ROUND32_MIN_TODAY_BREADTH_PCT,
         },
         "research_status": "rejected_round32",
         "policy_options": None,
