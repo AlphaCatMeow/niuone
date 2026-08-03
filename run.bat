@@ -136,9 +136,6 @@ if "%SKIP_INSTALL%"=="1" (
     if errorlevel 1 exit /b 1
 )
 
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\scripts\build-frontend.ps1" -Root "%ROOT%"
-if errorlevel 1 exit /b 1
-
 set "URL=http://%DASHBOARD_HOST%:%DASHBOARD_PORT%/"
 set "DASHBOARD_ENV_FILE=%ENV_FILE%"
 set "PYTHONDONTWRITEBYTECODE=1"
@@ -146,6 +143,26 @@ if not defined DASHBOARD_CONFIG set "DASHBOARD_CONFIG=%DASHBOARD_HOME%\config.ya
 if not defined DASHBOARD_PUSH_HISTORY_DB set "DASHBOARD_PUSH_HISTORY_DB=%DASHBOARD_HOME%\push_history.db"
 if not defined DASHBOARD_PORTFOLIO_STATE set "DASHBOARD_PORTFOLIO_STATE=%DASHBOARD_HOME%\cron\output\niuniu_practice_portfolio.json"
 if not defined DASHBOARD_TRADER_SCRIPT set "DASHBOARD_TRADER_SCRIPT=%ROOT%\app\entrypoints\niuniu_practice_trader.py"
+
+if "%SERVICE_MODE%"=="0" if not defined NIUONE_MANAGED_SERVICE_CHILD (
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\scripts\manage-long-running.ps1" -Action IsInstalled -Root "%ROOT%" -Python "%PYTHON_BIN%" -LocalDataDir "%LOCAL_DATA_DIR%" -EnvFile "%ENV_FILE%" >nul 2>nul
+    if not errorlevel 1 (
+        echo == Existing NiuOne service mode detected; restarting managed services ==
+        powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\scripts\manage-long-running.ps1" -Action Restart -Root "%ROOT%" -Python "%PYTHON_BIN%" -LocalDataDir "%LOCAL_DATA_DIR%" -EnvFile "%ENV_FILE%"
+        if errorlevel 1 exit /b 1
+        echo == NiuOne service update is starting ==
+        echo   URL:        %URL%
+        echo   data:       %DASHBOARD_HOME%
+        echo   env:        %ENV_FILE%
+        if "%NO_BROWSER%"=="0" (
+            start "NiuOne Browser Opener" /min cmd /c "timeout /t 2 /nobreak >nul & start "" "%URL%""
+        )
+        exit /b 0
+    )
+)
+
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\scripts\build-frontend.ps1" -Root "%ROOT%"
+if errorlevel 1 exit /b 1
 
 if "%SERVICE_MODE%"=="1" (
     where powershell.exe >nul 2>nul

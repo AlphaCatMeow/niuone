@@ -27,6 +27,7 @@ try {
     switch ($Name) {
         "dashboard" {
             $Launcher = Join-Path $Root "run.bat"
+            $env:NIUONE_MANAGED_SERVICE_CHILD = "1"
             & $Launcher --no-browser --skip-install *>> $LogPath
         }
         "cron-scheduler" {

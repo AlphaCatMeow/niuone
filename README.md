@@ -418,7 +418,7 @@ git pull --ff-only
 ./run.sh --service --no-browser
 ```
 
-前台运行的安装可把第二条命令改为 `./run.sh --no-browser`。启动器会保留 `.local-data/`：虚拟环境缺失或 `requirements.txt` 变化时安装 Python 依赖，前端源码、样式或锁文件变化时重新构建 Vue。设置页的版本检查只负责提示，不会替用户执行升级。容器部署应修改 `NIUONE_IMAGE` 为明确的新版本标签后再执行 `docker compose pull` 和 `docker compose up -d --no-build`。
+尚未安装长期运行服务的前台部署，可把第二条命令改为 `./run.sh --no-browser`。macOS、Linux 或 Windows 已安装长期运行服务时，普通启动命令会自动识别并重启托管进程，避免只更新前端而旧后端继续运行。启动器会保留 `.local-data/`：虚拟环境缺失或 `requirements.txt` 变化时安装 Python 依赖，前端源码、样式或锁文件变化时重新构建 Vue。设置页的版本检查只负责提示，不会替用户执行升级。容器部署应修改 `NIUONE_IMAGE` 为明确的新版本标签后再执行 `docker compose pull` 和 `docker compose up -d --no-build`。
 
 各平台的状态、重启、卸载和无人值守运行说明参见 [独立运行说明](docs/STANDALONE.md)。部署更新、日志检查、备份和回滚步骤参见 [部署、验证和回滚手册](docs/OPERATIONS.md)。
 

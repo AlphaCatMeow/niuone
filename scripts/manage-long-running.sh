@@ -38,7 +38,7 @@ usage() {
 Manage NiuOne long-running services on macOS or Linux.
 
 Usage:
-  ./scripts/manage-long-running.sh [install|status|restart|uninstall]
+  ./scripts/manage-long-running.sh [install|status|restart|uninstall|is-installed]
 EOF
 }
 
@@ -117,6 +117,11 @@ status_macos() {
     fi
   done
   return "$failed"
+}
+
+is_installed_macos() {
+  command -v launchctl >/dev/null 2>&1 || return 1
+  launchctl print "gui/$(id -u)/${LABELS[0]}" >/dev/null 2>&1
 }
 
 restart_macos() {
@@ -225,6 +230,11 @@ status_linux() {
   systemctl --user status "${LINUX_UNITS[@]}" --no-pager
 }
 
+is_installed_linux() {
+  command -v systemctl >/dev/null 2>&1 || return 1
+  systemctl --user is-enabled "${LINUX_UNITS[0]}" >/dev/null 2>&1
+}
+
 restart_linux() {
   require_command systemctl
   systemctl --user restart "${LINUX_UNITS[@]}"
@@ -242,8 +252,12 @@ uninstall_linux() {
   echo "NiuOne systemd user services removed. Local data was kept at $LOCAL_DATA_DIR."
 }
 
+ACTION_IMPL="$ACTION"
 case "$ACTION" in
   install|status|restart|uninstall)
+    ;;
+  is-installed)
+    ACTION_IMPL="is_installed"
     ;;
   -h|--help|help)
     usage
@@ -258,10 +272,10 @@ esac
 
 case "$PLATFORM" in
   Darwin)
-    "${ACTION}_macos"
+    "${ACTION_IMPL}_macos"
     ;;
   Linux)
-    "${ACTION}_linux"
+    "${ACTION_IMPL}_linux"
     ;;
   *)
     echo "Unsupported platform for this script: $PLATFORM" >&2

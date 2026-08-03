@@ -5057,9 +5057,12 @@ process.stdout.write(JSON.stringify({{
         self.assertIn("title: '手动运行选股与交易策略'", PRACTICE_COMPONENTS)
         self.assertIn("submitLabel: '验证并运行'", PRACTICE_COMPONENTS)
         self.assertIn("/api/system/data-readiness", PRACTICE_DATA)
+        self.assertIn("error?.status === 404", PRACTICE_DATA)
+        self.assertIn("dashboard_restart_required", PRACTICE_DATA)
         self.assertIn(':data-readiness="state.dataReadiness"', PRACTICE_COMPONENTS)
         self.assertIn('class="practice-data-readiness"', PRACTICE_COMPONENTS)
         self.assertIn('初始化完成后运行选股与交易策略', PRACTICE_COMPONENTS)
+        self.assertIn('页面已更新，但后台仍在运行旧版本', PRACTICE_COMPONENTS)
 
     def test_manual_market_summary_snapshot_force_refreshes_live_channels(self):
         original_runner = dashboard.run_dashboard_helper

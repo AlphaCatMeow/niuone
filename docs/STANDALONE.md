@@ -254,7 +254,7 @@ git pull --ff-only
 ./run.sh --service --no-browser
 ```
 
-重复运行 `--service` 会更新并重启三个原生服务，同时保留 `.local-data/` 中的配置、数据库和日志。前台运行方式使用：
+重复运行 `--service` 会更新并重启三个原生服务，同时保留 `.local-data/` 中的配置、数据库和日志。已经安装长期运行服务时，普通执行 `./run.sh`（Windows 为 `run.bat`）也会自动重启托管进程，避免新前端由旧后端提供。尚未安装长期运行服务的前台运行方式使用：
 
 ```bash
 git pull --ff-only

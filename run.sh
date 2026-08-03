@@ -259,6 +259,19 @@ if [[ "$SERVICE_MODE" == "1" ]]; then
   exit 0
 fi
 
+if "$ROOT/scripts/manage-long-running.sh" is-installed; then
+  echo "== Existing NiuOne service mode detected; restarting managed services =="
+  "$ROOT/scripts/manage-long-running.sh" restart
+  echo "== NiuOne service update is starting =="
+  echo "  URL:        $URL"
+  echo "  data:       $DASHBOARD_HOME"
+  echo "  env:        $ENV_FILE"
+  if [[ "$OPEN_BROWSER" != "0" ]]; then
+    open_dashboard_when_ready || true
+  fi
+  exit 0
+fi
+
 echo "== Starting NiuOne Dashboard =="
 echo "  URL:        $URL"
 echo "  data:       $DASHBOARD_HOME"

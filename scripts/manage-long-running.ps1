@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("Install", "Status", "Restart", "Uninstall")]
+    [ValidateSet("Install", "Status", "Restart", "Uninstall", "IsInstalled")]
     [string]$Action = "Install",
     [string]$Root = "",
     [string]$Python = "",
@@ -78,6 +78,12 @@ function Show-NiuOneTasks {
 }
 
 switch ($Action) {
+    "IsInstalled" {
+        if ($null -ne (Get-ScheduledTask -TaskName $Tasks[0].TaskName -ErrorAction SilentlyContinue)) {
+            exit 0
+        }
+        exit 1
+    }
     "Install" {
         if (-not (Test-Path -LiteralPath $Python -PathType Leaf)) {
             throw "Python virtual environment is missing: $Python. Run run.bat once and retry."

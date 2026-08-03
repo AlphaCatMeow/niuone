@@ -11,7 +11,16 @@ class ServiceLauncherTests(unittest.TestCase):
         text = (ROOT / "run.sh").read_text(encoding="utf-8")
         self.assertIn("--service", text)
         self.assertIn('"$ROOT/scripts/manage-long-running.sh" install', text)
+        self.assertIn('"$ROOT/scripts/manage-long-running.sh" is-installed', text)
+        self.assertIn('"$ROOT/scripts/manage-long-running.sh" restart', text)
         self.assertLess(text.index('if [[ "$SERVICE_MODE" == "1" ]]'), text.index('exec "$ROOT/run-dashboard.sh"'))
+
+    def test_dashboard_launcher_refuses_to_rebuild_over_a_running_backend(self):
+        text = (ROOT / "run-dashboard.sh").read_text(encoding="utf-8")
+        port_check = text.index("socket.create_connection")
+        frontend_build = text.index('"$BASE/scripts/build-frontend.sh"')
+        self.assertLess(port_check, frontend_build)
+        self.assertIn("The frontend was not rebuilt", text)
 
     def test_dashboard_launcher_keeps_public_and_admin_routes_on_one_port(self):
         text = (ROOT / "run-dashboard.sh").read_text(encoding="utf-8")
@@ -58,6 +67,7 @@ class ServiceLauncherTests(unittest.TestCase):
             "niuone-x-watchlist.service",
             "NIUONE_LOCAL_DATA_DIR",
             "DASHBOARD_ENV_FILE",
+            "is-installed",
         ):
             self.assertIn(value, text)
 
@@ -67,6 +77,9 @@ class ServiceLauncherTests(unittest.TestCase):
         runner = (ROOT / "scripts" / "run-windows-service.ps1").read_text(encoding="utf-8")
         self.assertIn("--service", launcher)
         self.assertIn("manage-long-running.ps1", launcher)
+        self.assertIn("-Action IsInstalled", launcher)
+        self.assertIn("NIUONE_MANAGED_SERVICE_CHILD", runner)
+        self.assertIn('"IsInstalled"', manager)
         for task_name in ("NiuOne Dashboard", "NiuOne Cron Scheduler", "NiuOne X Watchlist"):
             self.assertIn(task_name, manager)
         for service_name in ("dashboard", "cron-scheduler", "x-watchlist"):

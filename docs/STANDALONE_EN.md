@@ -254,7 +254,7 @@ git pull --ff-only
 ./run.sh --service --no-browser
 ```
 
-Running `--service` again updates and restarts all three native services while preserving configuration, databases, and logs under `.local-data/`. For a foreground installation, run:
+Running `--service` again updates and restarts all three native services while preserving configuration, databases, and logs under `.local-data/`. When long-running services are already installed, a regular `./run.sh` (or `run.bat` on Windows) invocation also restarts the managed processes so a new frontend cannot be served by an old backend. For a foreground installation without long-running services, run:
 
 ```bash
 git pull --ff-only

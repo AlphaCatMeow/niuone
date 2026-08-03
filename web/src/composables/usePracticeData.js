@@ -187,10 +187,25 @@ async function loadDataReadiness() {
     return true
   } catch (error) {
     if (error?.name !== 'AbortError') {
-      state.dataReadiness = {
-        ...state.dataReadiness,
-        loading: false,
-        error: String(error?.message || error),
+      if (error?.status === 404) {
+        state.dataReadiness = {
+          loading: false,
+          ready: false,
+          data_ready: false,
+          status: 'restart_required',
+          status_label: '需要完整重启服务',
+          blockers: ['dashboard_restart_required'],
+          warnings: [],
+          kline: {},
+          deployment: {},
+          error: '',
+        }
+      } else {
+        state.dataReadiness = {
+          ...state.dataReadiness,
+          loading: false,
+          error: String(error?.message || error),
+        }
       }
       scheduleDataReadinessPoll()
     }

@@ -20,6 +20,9 @@ const manualRunning = computed(() => props.manualCycle.running === true)
 const deploymentBlocked = computed(() => (
   props.dataReadiness?.blockers?.includes('runtime_storage_not_writable') === true
 ))
+const dashboardRestartRequired = computed(() => (
+  props.dataReadiness?.blockers?.includes('dashboard_restart_required') === true
+))
 const initializationDisabled = computed(() => (
   props.dataReadiness?.blockers?.includes('kline_cache_disabled') === true
   || props.dataReadiness?.blockers?.includes('kline_prewarm_disabled') === true
@@ -39,6 +42,7 @@ const readinessBarProgress = computed(() => (
 ))
 const manualButtonText = computed(() => {
   if (manualRunning.value) return props.manualCycle.stage_label || '本轮执行中…'
+  if (dashboardRestartRequired.value) return '完整重启服务后再运行'
   if (deploymentBlocked.value) return '修复运行目录权限后再运行'
   if (initializationDisabled.value) return '启用日 K 缓存与初始化后再运行'
   if (!props.dataReadiness?.data_ready) {
@@ -58,7 +62,7 @@ const manualButtonText = computed(() => {
         <button
           type="button"
           class="practice-manual-cycle-btn"
-          :disabled="manualRunning || deploymentBlocked || initializationDisabled"
+          :disabled="manualRunning || dashboardRestartRequired || deploymentBlocked || initializationDisabled"
           :aria-busy="manualRunning ? 'true' : undefined"
           :title="manualButtonText"
           @click="emit('manual-cycle')"
@@ -91,7 +95,8 @@ const manualButtonText = computed(() => {
       <div v-if="dataReadiness.kline?.requested_count" class="practice-data-progress" aria-hidden="true">
         <span :style="{ width: `${Math.min(100, readinessBarProgress)}%` }"></span>
       </div>
-      <p v-if="dataReadiness.error">就绪状态读取失败：{{ dataReadiness.error }}</p>
+      <p v-if="dashboardRestartRequired">页面已更新，但后台仍在运行旧版本。请完整重启 NiuOne 服务，等待启动完成后刷新页面。</p>
+      <p v-else-if="dataReadiness.error">就绪状态读取失败：{{ dataReadiness.error }}</p>
       <p v-else-if="dataReadiness.status === 'initializing'">首次部署或缓存过期时会在后台准备数据，页面可以继续浏览。</p>
       <p v-else-if="dataReadiness.blockers?.includes('runtime_storage_not_writable')">运行数据目录不可写，请检查目录权限后重启服务。</p>
       <p v-else-if="dataReadiness.blockers?.includes('kline_cache_disabled') || dataReadiness.blockers?.includes('kline_prewarm_disabled')">当前策略需要全市场日 K，请在设置页启用本地日 K 缓存与初始化后重启服务。</p>
@@ -144,6 +149,12 @@ const manualButtonText = computed(() => {
 }
 
 .practice-data-readiness.is-not_ready {
+  border-color: rgba(248, 113, 113, .45);
+  background: rgba(248, 113, 113, .08);
+  color: #fca5a5;
+}
+
+.practice-data-readiness.is-restart_required {
   border-color: rgba(248, 113, 113, .45);
   background: rgba(248, 113, 113, .08);
   color: #fca5a5;

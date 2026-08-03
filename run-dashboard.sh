@@ -38,5 +38,29 @@ export DASHBOARD_PORTFOLIO_STATE="${DASHBOARD_PORTFOLIO_STATE:-$DASHBOARD_HOME/c
 export DASHBOARD_TRADER_SCRIPT="${DASHBOARD_TRADER_SCRIPT:-$BASE/app/entrypoints/niuniu_practice_trader.py}"
 export DASHBOARD_PUBLIC_PROJECTION_ENABLED="${DASHBOARD_PUBLIC_PROJECTION_ENABLED:-1}"
 mkdir -p "$DASHBOARD_HOME/cron/output" "$DASHBOARD_HOME/logs"
+
+if "$PYTHON_BIN" - "$DASHBOARD_HOST" "$DASHBOARD_PORT" <<'PY' >/dev/null 2>&1
+import socket
+import sys
+
+host, port = sys.argv[1].strip(), int(sys.argv[2])
+if host in {"", "0.0.0.0"}:
+    host = "127.0.0.1"
+elif host == "::":
+    host = "::1"
+try:
+    with socket.create_connection((host, port), timeout=0.3):
+        pass
+except OSError:
+    raise SystemExit(1)
+PY
+then
+  echo "Dashboard port $DASHBOARD_HOST:$DASHBOARD_PORT is already in use." >&2
+  echo "If NiuOne service mode is installed, restart it with:" >&2
+  echo "  ./scripts/manage-long-running.sh restart" >&2
+  echo "The frontend was not rebuilt, so the running backend remains version-compatible." >&2
+  exit 1
+fi
+
 "$BASE/scripts/build-frontend.sh"
 exec "$PYTHON_BIN" "$BASE/app/entrypoints/niuone_dashboard.py" --host "$DASHBOARD_HOST" --port "$DASHBOARD_PORT"
