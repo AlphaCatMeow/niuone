@@ -8,3 +8,15 @@
   font: 14px/1.5 Inter, ui-sans-serif, system-ui, sans-serif;
   text-align: center;
 }
+
+html[data-input-modality='pointer'] :where(
+  button,
+  a[href],
+  summary,
+  [role='button'],
+  [role='tab'],
+  [role='switch']
+):focus,
+html[data-input-modality='pointer'] .market-breadth-toggle:focus-within {
+  outline: none !important;
+}
