@@ -112,7 +112,7 @@ Each feature below has its own dark-theme, 1200-pixel-wide animation, using eith
 ## Feature Overview
 
 - **Unified dashboard**: View theme strength, indices, sectors, market sentiment, industry capital flows, Dragon-Tiger data, and historical news in one place.
-- **Theme-strength and strategy research**: Reuse the default 30-second full-market quote sample for intraday theme updates. Built-in suites cover Base, Z-ge, Li Daxiao, Sector Tide, and NiuOne; NiuOne includes cross-session mainline confirmation, emerging/leader/pullback paths, and a twice-confirmed V-reversal probe.
+- **Theme-strength and strategy research**: Reuse the default 30-second full-market quote sample for intraday theme updates. Built-in suites cover Base, Z-ge, Li Daxiao, Sector Tide, and NiuOne; NiuOne includes a daily-interval V-shaped Probe, cross-session mainline confirmation, and Launch/Leading/Resumption paths.
 - **Information aggregation**: Organize A-share auction/midday/close reports, U.S. market summaries, institutional ratings, Twitter/X watchlists, and iWencai Dragon-Tiger data. Limit-up-streak and consecutively listed stocks can receive a structured news precheck.
 - **Intelligent summaries**: Connect compatible large-model services to summarize and structure information from multiple sources.
 - **Custom trading strategies**: Choose a built-in strategy or describe your own candidate-selection, buy, sell, position-sizing, and timing rules in natural language.
@@ -126,7 +126,7 @@ Primary pages and dependencies:
 | Page | Capability | Additional configuration |
 |---|---|---|
 | `/practice` | Simulated account, candidates, market summary, model decisions, equity curve, and trading calendar | Model decisions require `DASHBOARD_DECISION_*` |
-| `/niuone-mainline` | Full-market cross-session mainlines, intraday strength, V-reversal observations, and representative stocks | Uses public market data; news-confirmation model is optional |
+| `/niuone-mainline` | Full-market cross-session mainlines, intraday strength, intraday V-recovery observations, and representative stocks | Uses public market data; news-confirmation model is optional |
 | `/indices`, `/industry-flow` | Indices, sectors, active stocks, industry main-fund flow, market sentiment, and turnover | No key; market sources must be reachable |
 | `/dragon-tiger` | Dated Dragon-Tiger seats, limit-up/consecutive-list signals, and news prechecks | Enable and configure iWencai; news-precheck model is optional |
 | `/market-monitor` | A-share auction/midday/close and overnight U.S. summaries | Keep the scheduler running; model enhancement is optional |

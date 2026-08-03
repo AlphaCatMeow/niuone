@@ -33,8 +33,13 @@ Private runtime directory:
 | `.local-data/runtime/dashboard_admin_token.txt` | Bootstrap administrator key used when `DASHBOARD_ADMIN_PASSWORD` is not configured |
 | `.local-data/runtime/dashboard_users.db` | Local users and authentication data |
 | `.local-data/runtime/push_history.db` | Message history |
-| `.local-data/runtime/niuniu.db` | Simulated-trading page trade and account data |
+| `.local-data/runtime/niuniu.db` | Practice trades, account data, complete observed opportunity sets, five-stage holding paths/exit stages, and durable decision evidence |
+| `.local-data/runtime/cron/output/niuone_forward_evaluation.json` | NiuOne strict-forward aggregates, five-stage opportunity/sizing funnel, holding paths/stage transitions/exit stages, rejection categories, trade-level and entry-date-by-industry cluster-robust win-rate intervals, daily portfolio return/drawdown, performance gate, coverage diagnostics, and shadow groups |
+| `.local-data/runtime/cron/state/niuone_forward_protocol.json` | Frozen code/non-secret runtime-configuration fingerprint and code-free starting-account boundary for the NiuOne strict-forward cohort |
+| `.local-data/runtime/cron/state/niuone_cron_scheduler.json` | Bounded Cron run keys and daily task outcomes used by strict-forward evaluation |
+| `.local-data/runtime/cron/state/b1_schedule_state.json` | Bounded terminal scan/decision outcomes for configured Practice slots |
 | `.local-data/runtime/market_data/tencent_daily_klines.sqlite3` | Full-market daily-K-line cache populated before the open and incrementally filled by intraday scans |
+| `.local-data/runtime/backtesting/` | Server-side progress and result snapshot for each strategy's current backtest; no historical daily-K cache is stored here |
 | `.local-data/runtime/config.yaml` | Model provider, model, and model-key configuration |
 | `.local-data/runtime/cron/state/` | Scheduled-task, X-monitoring, and catch-up-run state |
 | `.local-data/runtime/cron/output/` | Practice-trading candidate-scan cache, simulated-account state, and other non-message runtime caches |
