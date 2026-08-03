@@ -50,6 +50,7 @@ from pathlib import Path
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from core.json_cache import write_json_cache
 from core.model_api import build_model_request, request_model
 from niuone_paths import get_dashboard_env_file, get_dashboard_home
 from market_data.news_precheck import (
@@ -158,6 +159,7 @@ TENCENT_KLINE = "https://ifzq.gtimg.cn/appstock/app/fqkline/get"
 TENCENT_QUOTE_TIMEOUT_SECONDS = 10
 TENCENT_QUOTE_MAX_ATTEMPTS = 3
 TENCENT_QUOTE_BACKOFF_SECONDS = 0.5
+DEFAULT_TENCENT_QUOTE_STAGE_TIMEOUT_SECONDS = 90
 DASHBOARD_HOME = get_dashboard_home(Path(__file__).resolve().parents[1])
 DASHBOARD_ENV_FILE = get_dashboard_env_file(Path(__file__).resolve().parents[1])
 B1_OUTPUT_DIR = DASHBOARD_HOME / "cron" / "output"
@@ -185,6 +187,41 @@ _BLOCK_TRADE_CACHE: dict[tuple[str, str], Any] = {}
 _BLOCK_TRADE_CACHE_LOCK = threading.Lock()
 _NATIVE_JAVASCRIPT_CONTEXT: Any | None = None
 _NATIVE_JAVASCRIPT_CONTEXT_LOCK = threading.Lock()
+
+
+def report_scan_progress(
+    stage: str,
+    *,
+    stage_label: str,
+    completed: int = 0,
+    total: int = 0,
+    **fields: Any,
+) -> None:
+    """Publish bounded scanner progress when launched by the Dashboard."""
+    raw_path = str(os.environ.get("DASHBOARD_B1_PROGRESS_FILE") or "").strip()
+    if not raw_path:
+        return
+    payload = {
+        "job_id": str(os.environ.get("DASHBOARD_B1_JOB_ID") or "").strip(),
+        "stage": str(stage or "running")[:80],
+        "stage_label": str(stage_label or "正在运行选股扫描")[:160],
+        "completed": max(0, int(completed or 0)),
+        "total": max(0, int(total or 0)),
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    for name in (
+        "cache_hits",
+        "network_fallbacks",
+        "worker_count",
+        "source",
+        "error_code",
+    ):
+        if name in fields:
+            payload[name] = fields[name]
+    try:
+        write_json_cache(Path(raw_path).expanduser(), payload)
+    except OSError:
+        pass
 
 
 # ========== helpers ==========
@@ -482,6 +519,21 @@ def tencent_batch_quote(
         f"Tencent quote{scope} failed after {attempts_used}/{attempts} attempts: "
         f"{_tencent_quote_error_label(last_error or RuntimeError())}"
     ) from last_error
+
+
+def bounded_quote_request_timeout(
+    remaining_seconds: float,
+    *,
+    max_attempts: int = TENCENT_QUOTE_MAX_ATTEMPTS,
+    backoff_seconds: float = TENCENT_QUOTE_BACKOFF_SECONDS,
+) -> float:
+    """Keep one retrying quote batch inside the remaining stage budget."""
+    attempts = max(1, int(max_attempts))
+    backoff_budget = max(0.0, float(backoff_seconds)) * sum(
+        2 ** index for index in range(max(0, attempts - 1))
+    )
+    request_budget = max(0.1, float(remaining_seconds) - backoff_budget)
+    return max(0.1, min(TENCENT_QUOTE_TIMEOUT_SECONDS, request_budget / attempts))
 
 
 def build_market_snapshot(
@@ -1483,6 +1535,11 @@ def prewarm_full_market_klines(
     fetcher: Callable[[str, int], list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     """Populate the private SQLite cache for every supported non-ST A share."""
+    resolved_target_date = str(
+        target_date
+        or os.environ.get("DASHBOARD_KLINE_PREWARM_TARGET_DATE")
+        or datetime.now().strftime("%Y-%m-%d")
+    )[:10]
     candidates = load_a_share_code_pool(FULL_SUPPORTED_NON_ST_UNIVERSE)
     symbols = [
         ("sh" if code.startswith(("6", "9")) else "sz") + code
@@ -1498,16 +1555,43 @@ def prewarm_full_market_klines(
             workers = DEFAULT_PREWARM_WORKERS
 
     def progress(completed: int, total: int, failures: int) -> None:
+        report_scan_progress(
+            "kline_prewarm",
+            stage_label="正在初始化全市场日K数据",
+            completed=completed,
+            total=total,
+            network_fallbacks=failures,
+            source="tencent_kline",
+        )
         print(
             f"  ... {completed}/{total} daily K-line series prepared; failures={failures}",
             file=sys.stderr,
         )
 
+    accepted_last_dates: set[str] = set()
+    if dashboard_env_enabled("DASHBOARD_KLINE_PREWARM_RESUME", False):
+        try:
+            from a_share_calendar import trading_day_status
+
+            calendar = trading_day_status(resolved_target_date, allow_refresh=False)
+            accepted_last_dates = {
+                str(calendar.get("date") or "")[:10],
+                str(calendar.get("previous_trading_day") or "")[:10],
+            }
+            accepted_last_dates = {
+                value
+                for value in accepted_last_dates
+                if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value)
+            }
+        except Exception:
+            accepted_last_dates = set()
+
     return prewarm_kline_cache(
         symbols,
         path=kline_cache_path(),
-        target_date=target_date,
+        target_date=resolved_target_date,
         workers=workers,
+        accepted_last_dates=accepted_last_dates,
         fetcher=fetcher,
         progress=progress,
     )
@@ -1515,6 +1599,10 @@ def prewarm_full_market_klines(
 
 def main():
     if kline_prewarm_only_mode():
+        report_scan_progress(
+            "kline_prewarm",
+            stage_label="正在初始化全市场日K数据",
+        )
         print("Pre-market task: warming full-market daily K-line SQLite cache...", file=sys.stderr)
         result = prewarm_full_market_klines()
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -1528,6 +1616,7 @@ def main():
         )
         return
 
+    report_scan_progress("code_pool", stage_label="正在加载A股代码池")
     print("Step 1: Loading A-share code pool...", file=sys.stderr)
     niuone_mainline_only = niuone_mainline_only_mode()
     scorers = strategy_scorers_for_run(niuone_mainline_only=niuone_mainline_only)
@@ -1557,6 +1646,7 @@ def main():
             file=sys.stderr,
         )
 
+    report_scan_progress("quotes", stage_label="正在获取全市场实时行情")
     print("Step 2: Fetching real-time batch quotes...", file=sys.stderr)
     tencent_keys = {}
     all_keys = []
@@ -1569,11 +1659,37 @@ def main():
     quotes = {}
     batch_size = 150
     batch_total = max(1, (len(all_keys) + batch_size - 1) // batch_size)
+    try:
+        quote_stage_timeout = float(
+            dashboard_env_value("DASHBOARD_TENCENT_QUOTE_STAGE_TIMEOUT_SECONDS")
+            or DEFAULT_TENCENT_QUOTE_STAGE_TIMEOUT_SECONDS
+        )
+    except (TypeError, ValueError):
+        quote_stage_timeout = DEFAULT_TENCENT_QUOTE_STAGE_TIMEOUT_SECONDS
+    quote_stage_timeout = max(15.0, min(300.0, quote_stage_timeout))
+    quote_stage_deadline = time.monotonic() + quote_stage_timeout
     for i in range(0, len(all_keys), batch_size):
         batch = all_keys[i:i + batch_size]
         batch_number = i // batch_size + 1
-        q = tencent_batch_quote(batch, batch_label=f"{batch_number}/{batch_total}")
+        remaining_seconds = quote_stage_deadline - time.monotonic()
+        if remaining_seconds <= 0:
+            raise TencentQuoteBatchError(
+                "Tencent quote aggregate deadline exceeded after "
+                f"{batch_number - 1}/{batch_total} batches"
+            )
+        q = tencent_batch_quote(
+            batch,
+            batch_label=f"{batch_number}/{batch_total}",
+            timeout_seconds=bounded_quote_request_timeout(remaining_seconds),
+        )
         quotes.update(q)
+        report_scan_progress(
+            "quotes",
+            stage_label="正在获取全市场实时行情",
+            completed=batch_number,
+            total=batch_total,
+            source="tencent_quote",
+        )
         time.sleep(0.05)
     reference_keys = {tencent_keys[code] for code, _name in reference_candidates}
     reference_quotes = {key: quote for key, quote in quotes.items() if key in reference_keys}
@@ -1634,6 +1750,10 @@ def main():
         file=sys.stderr,
     )
     kline_cache_enabled = dashboard_env_enabled("DASHBOARD_KLINE_CACHE_ENABLED", True)
+    strict_kline_cache = dashboard_env_enabled(
+        "DASHBOARD_B1_REQUIRE_READY_CACHE",
+        False,
+    )
     cached_klines_by_symbol: dict[str, list[dict[str, Any]]] = {}
     pending_kline_cache: dict[str, list[dict[str, Any]]] = {}
     pending_kline_cache_lock = threading.Lock()
@@ -1642,6 +1762,12 @@ def main():
         for code, _name, _quote in [*context_candidates, *to_analyze]
         if code in tencent_keys
     ))
+    report_scan_progress(
+        "cache_check",
+        stage_label="正在检查日K缓存",
+        total=len(needed_kline_symbols),
+        worker_count=scan_workers,
+    )
     scan_as_of_date, scan_previous_trading_day = resolve_quote_trading_dates(
         reference_quotes if niuone_enabled else quotes
     )
@@ -1671,6 +1797,41 @@ def main():
             f"previous={scan_previous_trading_day or 'unknown'}",
             file=sys.stderr,
         )
+        report_scan_progress(
+            "cache_check",
+            stage_label="正在检查日K缓存",
+            completed=len(cached_klines_by_symbol),
+            total=len(needed_kline_symbols),
+            cache_hits=len(cached_klines_by_symbol),
+            network_fallbacks=(
+                0
+                if strict_kline_cache
+                else max(0, len(needed_kline_symbols) - len(cached_klines_by_symbol))
+            ),
+            worker_count=scan_workers,
+        )
+
+    if strict_kline_cache:
+        if not kline_cache_enabled:
+            raise RuntimeError("ready K-line cache is required but local cache is disabled")
+        try:
+            minimum_coverage = float(
+                dashboard_env_value("DASHBOARD_KLINE_READINESS_MIN_COVERAGE_PERCENT")
+                or "90"
+            ) / 100
+        except (TypeError, ValueError):
+            minimum_coverage = 0.9
+        minimum_coverage = max(0.9, min(1.0, minimum_coverage))
+        cache_coverage = (
+            len(cached_klines_by_symbol) / len(needed_kline_symbols)
+            if needed_kline_symbols
+            else 1.0
+        )
+        if cache_coverage < minimum_coverage:
+            raise RuntimeError(
+                "ready K-line cache coverage was lost before scanning: "
+                f"{cache_coverage:.1%} < {minimum_coverage:.1%}"
+            )
 
     def remember_fetched_klines(symbol: str, rows: list[dict[str, Any]]) -> None:
         if not kline_cache_enabled or not rows:
@@ -1710,6 +1871,11 @@ def main():
 
     industry_members: list[dict[str, Any]] = []
     if sector_tide_enabled or niuone_enabled or zettaranc_enabled:
+        report_scan_progress(
+            "industry_context",
+            stage_label="正在准备行业与题材分类",
+            total=len(context_candidates),
+        )
         print("  Resolving candidate industries for strategy scoring...", file=sys.stderr)
         industry_members = [
             {"code": code, "name": name, "quote": q}
@@ -1736,19 +1902,35 @@ def main():
     if sector_tide_enabled or niuone_enabled:
         label = "market/sector tide" if sector_tide_enabled else "strong-stock mainline"
         print(f"  Building shared {label} context...", file=sys.stderr)
+        report_scan_progress(
+            "kline_prepare",
+            stage_label="正在准备全市场日K与题材上下文",
+            completed=0,
+            total=len(industry_members),
+            cache_hits=len(cached_klines_by_symbol),
+            network_fallbacks=(
+                0
+                if strict_kline_cache
+                else max(0, len(needed_kline_symbols) - len(cached_klines_by_symbol))
+            ),
+            worker_count=scan_workers,
+        )
 
         def prepare_context_member(item: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]] | None]:
             code = str(item["code"])
             name = str(item["name"])
             industry = normalize_industry_name(item.get("industry"))
             quote = item.get("quote") if isinstance(item.get("quote"), dict) else {}
+            historical_rows = cached_klines_by_symbol.get(tencent_keys[code])
+            if strict_kline_cache and not historical_rows:
+                return item, None
             rows = prepare_strategy_rows(
                 code,
                 tencent_keys[code],
                 quote=quote,
                 name=name,
                 industry=industry,
-                historical_rows=cached_klines_by_symbol.get(tencent_keys[code]),
+                historical_rows=historical_rows,
                 fetched_callback=remember_fetched_klines,
             )
             return item, rows
@@ -1778,6 +1960,19 @@ def main():
                         "rows": rows,
                     })
                 if (index + 1) % 100 == 0:
+                    report_scan_progress(
+                        "kline_prepare",
+                        stage_label="正在准备全市场日K与题材上下文",
+                        completed=index + 1,
+                        total=len(industry_members),
+                        cache_hits=len(cached_klines_by_symbol),
+                        network_fallbacks=(
+                            0
+                            if strict_kline_cache
+                            else max(0, len(needed_kline_symbols) - len(cached_klines_by_symbol))
+                        ),
+                        worker_count=scan_workers,
+                    )
                     print(
                         f"  ... {index + 1}/{len(industry_members)} cross-sectional members prepared",
                         file=sys.stderr,
@@ -1900,6 +2095,12 @@ def main():
     def analyze_candidate(candidate):
         code, name, q = candidate
         tencent_key = tencent_keys[code]
+        if (
+            strict_kline_cache
+            and code not in prepared_by_code
+            and tencent_key not in cached_klines_by_symbol
+        ):
+            return None
         try:
             multi = analyze_all_strategies(
                 code,
@@ -2129,11 +2330,25 @@ def main():
         }
 
     results = []
+    report_scan_progress(
+        "scoring",
+        stage_label="正在执行本地策略评分",
+        completed=0,
+        total=len(to_analyze),
+        worker_count=scan_workers,
+    )
     with concurrent.futures.ThreadPoolExecutor(max_workers=scan_workers) as pool:
         for completed, item in enumerate(pool.map(analyze_candidate, to_analyze), 1):
             if item is not None:
                 results.append(item)
             if completed % 50 == 0:
+                report_scan_progress(
+                    "scoring",
+                    stage_label="正在执行本地策略评分",
+                    completed=completed,
+                    total=len(to_analyze),
+                    worker_count=scan_workers,
+                )
                 print(f"  ... {completed}/{len(to_analyze)} analyzed", file=sys.stderr)
     flush_fetched_klines()
 
@@ -2146,6 +2361,7 @@ def main():
 
     results.sort(key=sort_key, reverse=True)
     if sector_tide_enabled and sector_tide_context is not None:
+        report_scan_progress("news_precheck", stage_label="正在检查候选股消息面", total=SECTOR_TIDE_NEWS_PRECHECK_LIMIT)
         news_shortlist = [
             item
             for item in results
@@ -2190,6 +2406,7 @@ def main():
             file=sys.stderr,
         )
     elif niuone_enabled and niuone_context is not None:
+        report_scan_progress("news_precheck", stage_label="正在检查候选股消息面", total=SECTOR_TIDE_NEWS_PRECHECK_LIMIT)
         news_shortlist = niuone_news_shortlist(niuone_context)
         news_snapshot = fetch_sector_tide_news_precheck(news_shortlist)
         niuone_context = build_niuone_context(
@@ -2297,10 +2514,18 @@ def main():
             "industry_money_flow": sector_tide_flow_rows,
         }
     json_str = json.dumps(output, ensure_ascii=False, indent=2)
+    report_scan_progress("persisting", stage_label="正在保存本轮候选结果")
     print(json_str)
     if niuone_context is not None:
         write_niuone_mainline_cache(NIUONE_MAINLINE_CACHE, output)
     write_outputs(json_str, generated_at)
+    report_scan_progress(
+        "completed",
+        stage_label="选股扫描已完成",
+        completed=len(results),
+        total=len(to_analyze),
+        worker_count=scan_workers,
+    )
 
 
 if __name__ == "__main__":

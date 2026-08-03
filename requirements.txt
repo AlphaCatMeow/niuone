@@ -1,5 +1,6 @@
-akshare
-PyYAML
-fastapi
-uvicorn
-httpx2>=2.0.0
+akshare==1.18.21
+mini-racer==0.14.1
+PyYAML==6.0.3
+fastapi==0.141.1
+uvicorn==0.52.0
+httpx2==2.9.1

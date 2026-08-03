@@ -119,6 +119,32 @@ class FastApiDashboardTests(unittest.TestCase):
         self.assertEqual(unchanged.status_code, 304)
         self.assertEqual(unchanged.content, b"")
 
+    def test_readiness_routes_distinguish_process_health_from_market_data(self):
+        payload = {
+            "ready": False,
+            "data_ready": False,
+            "status": "initializing",
+            "blockers": ["kline_cache_initializing"],
+            "kline": {"completed_count": 1200, "requested_count": 5000},
+        }
+        with patch.object(
+            self.legacy,
+            "market_data_readiness",
+            return_value=payload,
+        ):
+            health = self.client.get("/healthz")
+            ready = self.client.get("/readyz")
+            api = self.client.get("/api/system/data-readiness")
+            head = self.client.head("/api/system/data-readiness")
+
+        self.assertEqual(health.status_code, 200)
+        self.assertEqual(ready.status_code, 503)
+        self.assertEqual(ready.json()["status"], "initializing")
+        self.assertEqual(api.status_code, 200)
+        self.assertEqual(api.json(), payload)
+        self.assertEqual(head.status_code, 200)
+        self.assertEqual(head.content, b"")
+
     def test_version_route_is_native_and_does_not_check_upstream_for_head(self):
         payload = {
             "current_version": "1.2.3",

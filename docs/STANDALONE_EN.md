@@ -162,6 +162,10 @@ By default, runtime data is stored in:
 | `DASHBOARD_NIUONE_FORWARD_COHORT_START` | `2026-08-04` | Strict-forward cohort start; archive the old protocol lock and restart from a new trading day after a rule change |
 | `DASHBOARD_ACTIVE_STRATEGY` | `niuone` | Active independent strategy; changes apply to the next scan without a restart |
 | `DASHBOARD_PRACTICE_SCHEDULE_TIMES` | `09:25,10:00,10:30,11:00,11:20,13:00,13:30,14:00,14:30,14:50` | Shared schedule for market summaries, screening, and simulated decisions |
+| `DASHBOARD_KLINE_BOOTSTRAP_ENABLED` | `1` | Prepare full-market daily K lines immediately after a first deployment or cache expiry; requires a restart |
+| `DASHBOARD_KLINE_READINESS_MIN_COVERAGE_PERCENT` | `90` | Valid-date daily-K-line coverage required to admit a Practice scan, from 90 through 100; requires a restart |
+| `DASHBOARD_TENCENT_QUOTE_STAGE_TIMEOUT_SECONDS` | `90` | Aggregate budget for the full-market live-quote stage, from 15 through 300 seconds; requires a restart |
+| `DASHBOARD_MANUAL_DATA_INITIALIZATION_TIMEOUT_SECONDS` | `660` | Maximum seconds a manual task waits for daily-K-line initialization; requires a restart |
 | `X_WATCHLIST_ACCOUNTS` | Empty | Comma-separated list of monitored tweet authors |
 | `DASHBOARD_DECISION_INTELLIGENCE_ENABLED` | `1` | Whether to enable the global intelligence bundle for trading decisions |
 | `DASHBOARD_TRADE_DISCIPLINE_TEXT` | Empty | Trading-discipline text for the trading-decision prompt; the built-in default discipline is used when empty |

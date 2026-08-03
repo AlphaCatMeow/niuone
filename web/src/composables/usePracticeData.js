@@ -26,6 +26,17 @@ const state = reactive({
   },
   benchmarks: { items: [] },
   manualCycle: { running: false, stage: 'idle', stage_label: '', error: '' },
+  dataReadiness: {
+    loading: true,
+    ready: false,
+    data_ready: false,
+    status: 'unknown',
+    status_label: '正在检查市场数据',
+    blockers: [],
+    warnings: [],
+    kline: {},
+    deployment: {},
+  },
   marketSummary: { loading: true, available: false, scan_count: 0 },
   marketSummaryGenerating: false,
   fullSnapshotStatus: 'idle',
@@ -35,6 +46,7 @@ let users = 0
 let loadSequence = 0
 let unsubscribeProjection = null
 let manualPollTimer = 0
+let dataReadinessPollTimer = 0
 let marketSummaryPollTimer = 0
 let fullSnapshotRequest = null
 let fullSnapshotLastAttemptAt = 0
@@ -164,6 +176,37 @@ async function loadBenchmarks() {
   }
 }
 
+async function loadDataReadiness() {
+  try {
+    const payload = await fetchJson('/api/system/data-readiness', {
+      key: 'data-readiness',
+      timeoutMessage: '市场数据就绪状态请求超时',
+    })
+    state.dataReadiness = { ...(payload || {}), loading: false }
+    scheduleDataReadinessPoll()
+    return true
+  } catch (error) {
+    if (error?.name !== 'AbortError') {
+      state.dataReadiness = {
+        ...state.dataReadiness,
+        loading: false,
+        error: String(error?.message || error),
+      }
+      scheduleDataReadinessPoll()
+    }
+    return false
+  }
+}
+
+function scheduleDataReadinessPoll() {
+  if (dataReadinessPollTimer || !users) return
+  const delay = state.dataReadiness.ready ? 30_000 : 3_000
+  dataReadinessPollTimer = window.setTimeout(async () => {
+    dataReadinessPollTimer = 0
+    await loadDataReadiness()
+  }, delay)
+}
+
 async function loadMarketSummary() {
   try {
     const payload = await fetchJson('/api/niuniu_practice/market-summary', {
@@ -205,6 +248,7 @@ function scheduleManualCyclePoll() {
       state.manualCycle = await fetchJson('/api/niuniu_practice/manual-cycle', {
         key: 'manual-cycle-status',
       })
+      await loadDataReadiness()
       if (state.manualCycle.running) scheduleManualCyclePoll()
       else if (previousRunning) await loadFastPractice({ background: true })
     } catch (error) {
@@ -394,6 +438,7 @@ function activatePractice() {
   loadBenchmarks()
   loadMarketSummary()
   loadManualCycleStatus()
+  loadDataReadiness()
 }
 
 function deactivatePractice() {
@@ -403,6 +448,8 @@ function deactivatePractice() {
   unsubscribeProjection = null
   window.clearTimeout(manualPollTimer)
   manualPollTimer = 0
+  window.clearTimeout(dataReadinessPollTimer)
+  dataReadinessPollTimer = 0
   window.clearTimeout(marketSummaryPollTimer)
   marketSummaryPollTimer = 0
   loadSequence += 1

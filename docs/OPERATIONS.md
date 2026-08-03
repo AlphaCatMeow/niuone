@@ -71,6 +71,8 @@ http://127.0.0.1:8787/
 
 公网部署继续运行 `./run-dashboard.sh`：FastAPI/Uvicorn 在 `8787` 同时提供 Vue 公开页面、受管理员密码保护的 `/admin` 和全部 API，不存在第二个生产端口。服务端每 15 秒生成内容寻址快照，浏览器只检查轻量版本指针，并仅在区块变化时取数。完整缓存和反向代理策略见 [Dashboard 增量展示与部署](DASHBOARD_V2.md)。
 
+`/healthz` 只表示 Web 进程存活，适合作为容器 liveness；`/readyz` 同时检查运行目录可写和当前策略所需的市场数据，首次启动初始化期间会返回 `503`，就绪后返回 `200`。`/api/system/data-readiness` 始终返回 `200` 和同一份结构化诊断，供页面展示初始化进度、缓存覆盖率、持久化卷与时区提醒。不要把 `/readyz` 用作会在初始化期间反复重启容器的 liveness 探针。
+
 设置页末尾的“关于”分组展示项目作者、GitHub 仓库、Apache License 2.0、当前版本和 Docker Hub 最新发行版本，并可点击“检查更新”跳过服务端缓存、主动重新查询。“开启自动检测新版本”默认启用并在运行时生效，也可在 `dashboard.env` 中设置 `DASHBOARD_AUTO_VERSION_CHECK_ENABLED=0` 关闭。更新弹窗的“此版本不再提醒”仅保存在当前浏览器；手动点击首页版本号仍可复查，且更高版本发布后会重新提醒。
 
 ## 3. 模型配置
@@ -140,7 +142,9 @@ NiuOne 需要大模型驱动完整工作流。X 关注列表监控和美股机�
 
 严格前向 v18 把牛牛新仓容量与组合回测对齐：每个北京时间交易日跨 Practice 决策轮次累计最多首次建仓 2 只。执行层从持久化成交状态重建当天已开仓代码并按代码幂等去重；加仓和其他策略的新仓不占牛牛额度，达到上限后的新标的以 `position_capacity` 拒绝。该数值和计数规则随协议一并冻结。
 
-实战策略没有各自独立的选股定时任务。Dashboard 默认在交易日 09:10 启动全量非 ST 股票日 K 预热，把最近 120 根腾讯前复权日线保存到私有 SQLite；只有成功下载的股票会替换缓存，失败时继续保留旧序列。Dashboard 内置的 B1 调度器在每个计划时间先使用实时指数、行业涨跌、行业主力资金、市场宽度/量能与已有盘面扫描生成统一的“此刻盘面总结与评价”，再启动共享扫描器。盘中扫描批量读取日期有效的本地历史并合并实时行情，只对缺失或日期过期的股票在线回源并增量回填。扫描器读取 `DASHBOARD_ACTIVE_STRATEGY`，只运行当前策略套件的评分器；扫描结束后，定时流程一方面把同一份总结与评价传入模型判断和模拟执行层复核，另一方面在后台启动独立的全市场题材强度研究扫描。后者忽略 `DASHBOARD_ACTIVE_STRATEGY`，只更新题材专用缓存，不参与候选或买卖。
+实战策略没有各自独立的选股定时任务。Dashboard 默认在交易日 09:10 启动全量非 ST 股票日 K 预热，把最近 120 根腾讯前复权日线保存到私有 SQLite；冷部署、卷丢失或日期过期时，不再等待 09:10 窗口，而会在服务启动后立即有界初始化。中断后的同日重试只补缺失股票，成功序列不会被失败结果覆盖。默认覆盖率达到 90% 才允许实战扫描；Dashboard 启动的扫描只读取日期有效的本地历史并合并批量实时行情，不在交互任务内逐股回源。覆盖不足时，手动任务排队等待初始化并在页面展示阶段、完成数和失败数；定时任务明确记为数据未就绪，不会使用不完整数据进入模拟交易。
+
+Dashboard 内置的 B1 调度器在每个计划时间先使用实时指数、行业涨跌、行业主力资金、市场宽度/量能与已有盘面扫描生成统一的“此刻盘面总结与评价”，再启动共享扫描器。腾讯全市场实时报价阶段另有 90 秒默认总预算，避免单个上游慢响应耗尽整个 480 秒扫描预算。扫描器读取 `DASHBOARD_ACTIVE_STRATEGY`，只运行当前策略套件的评分器；扫描结束后，定时流程一方面把同一份总结与评价传入模型判断和模拟执行层复核，另一方面在后台启动独立的全市场题材强度研究扫描。后者忽略 `DASHBOARD_ACTIVE_STRATEGY`，只更新题材专用缓存，不参与候选或买卖。同一运行目录下的多个 Dashboard 实例通过进程租约互斥预热和完整扫描，防止重复扫描与重复交易；手动任务终态会原子持久化，服务重启只把未完成任务标记为中断，不自动重放交易。
 
 实战页不再用 B1 涨跌家数的独立阈值规则生成另一个“盘面评价”。总结产物的 `tone` / `tone_label` 同时作为页面评价和交易上下文风险级别；模型不可用时调用同一模块的本地汇总规则。手动点击“生成此刻盘面总结与评价”或“手动运行选股与交易策略”会刷新该产物；定时运行则复用 `DASHBOARD_PRACTICE_SCHEDULE_TIMES`。生成失败时保留当日上一份有效总结和评价，不用不完整快照覆盖。
 
@@ -150,12 +154,18 @@ NiuOne 需要大模型驱动完整工作流。X 关注列表监控和美股机�
 | `DASHBOARD_B1_SCHEDULE_ENABLED` | `1` | 是否启动 Dashboard 内置选股调度线程 | 需要重启 Dashboard |
 | `DASHBOARD_PRACTICE_SCHEDULE_TIMES` | `09:25,10:00,10:30,11:00,11:20,13:00,13:30,14:00,14:30,14:50` | 实战盘面总结评价、当前策略选股及买卖决策时间点 | 运行时热应用；旧键 `DASHBOARD_B1_SCHEDULE_TIMES` 仅作兼容读取 |
 | `DASHBOARD_B1_SCHEDULE_CATCHUP_MINUTES` | `35` | Dashboard 短暂离线后的漏触发补跑窗口 | 需要重启 Dashboard |
+| `DASHBOARD_B1_SCAN_TIMEOUT_SECONDS` | `480` | 一轮完整选股进程的硬超时；超时时返回当前阶段而非统一错误 | 需要重启 Dashboard |
+| `DASHBOARD_TENCENT_QUOTE_STAGE_TIMEOUT_SECONDS` | `90` | 腾讯全市场批量实时报价阶段的总预算，允许 15～300 秒 | 需要重启 Dashboard |
 | `DASHBOARD_KLINE_CACHE_ENABLED` | `1` | 盘中扫描是否优先读取并增量回填本地日 K SQLite | 需要重启 Dashboard |
 | `DASHBOARD_KLINE_PREWARM_ENABLED` | `1` | 是否启动盘前全市场日 K 预热线程 | 需要重启 Dashboard |
 | `DASHBOARD_KLINE_PREWARM_TIME` | `09:10` | A 股交易日盘前预热时间 | 需要重启 Dashboard |
 | `DASHBOARD_KLINE_PREWARM_WORKERS` | `12` | 盘前下载并发数，服务端硬上限为 16 | 需要重启 Dashboard |
 | `DASHBOARD_KLINE_PREWARM_TIMEOUT_SECONDS` | `600` | 单次盘前预热总超时 | 需要重启 Dashboard |
 | `DASHBOARD_KLINE_PREWARM_CATCHUP_MINUTES` | `15` | Dashboard 短暂离线后的预热补跑窗口 | 需要重启 Dashboard |
+| `DASHBOARD_KLINE_BOOTSTRAP_ENABLED` | `1` | 冷启动或缓存过期时是否立即初始化，不受盘前窗口限制 | 需要重启 Dashboard |
+| `DASHBOARD_KLINE_BOOTSTRAP_MAX_ATTEMPTS` | `3` | 每个日期的自动初始化最大尝试次数 | 需要重启 Dashboard |
+| `DASHBOARD_KLINE_READINESS_MIN_COVERAGE_PERCENT` | `90` | 实战扫描放行所需的日期有效日 K 覆盖率，允许 90～100 | 需要重启 Dashboard |
+| `DASHBOARD_MANUAL_DATA_INITIALIZATION_TIMEOUT_SECONDS` | `660` | 手动任务排队等待市场数据就绪的总时限 | 需要重启 Dashboard |
 | `DASHBOARD_B3_EXIT_TIME` | `09:37` | 开盘自动离场检查 | 后续 Cron 周期读取 |
 | `DASHBOARD_TIME_EXIT_TIME` | `14:45` | 尾盘自动离场和时间窗检查 | 后续 Cron 周期读取 |
 | `DASHBOARD_NIUONE_FORWARD_PREFLIGHT_CRON` | `5 9 * * 1-5` | 在首轮实战决策前冻结或校验严格前向协议 | Scheduler 启动时立即运行，之后在周一至周五按 Cron 复检 |

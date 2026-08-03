@@ -1423,6 +1423,327 @@ console.log(JSON.stringify({
             for name, value in originals.items():
                 setattr(dashboard, name, value)
 
+    def test_cold_deployment_bootstrap_is_due_outside_regular_window(self):
+        originals = {
+            'KLINE_PREWARM_ENABLED': dashboard.KLINE_PREWARM_ENABLED,
+            'KLINE_BOOTSTRAP_ENABLED': dashboard.KLINE_BOOTSTRAP_ENABLED,
+            'KLINE_PREWARM_LAST_ATTEMPT_TS': dashboard.KLINE_PREWARM_LAST_ATTEMPT_TS,
+            'KLINE_PREWARM_ATTEMPTS_BY_DATE': dashboard.KLINE_PREWARM_ATTEMPTS_BY_DATE,
+            'KLINE_PREWARM_LOCK': dashboard.KLINE_PREWARM_LOCK,
+            'market_data_readiness': dashboard.market_data_readiness,
+        }
+        try:
+            dashboard.KLINE_PREWARM_ENABLED = True
+            dashboard.KLINE_BOOTSTRAP_ENABLED = True
+            dashboard.KLINE_PREWARM_LAST_ATTEMPT_TS = 0
+            dashboard.KLINE_PREWARM_ATTEMPTS_BY_DATE = {}
+            dashboard.KLINE_PREWARM_LOCK = threading.Lock()
+            dashboard.market_data_readiness = lambda _now=None: {'data_ready': False}
+
+            self.assertTrue(
+                dashboard.kline_bootstrap_due(datetime(2026, 7, 29, 16, 30))
+            )
+            dashboard.KLINE_PREWARM_ATTEMPTS_BY_DATE['2026-07-29'] = (
+                dashboard.KLINE_BOOTSTRAP_MAX_ATTEMPTS
+            )
+            self.assertFalse(
+                dashboard.kline_bootstrap_due(datetime(2026, 7, 29, 16, 30))
+            )
+        finally:
+            for name, value in originals.items():
+                setattr(dashboard, name, value)
+
+    def test_scan_gate_starts_initialization_without_running_scanner(self):
+        calls = []
+        originals = {
+            'practice_scan_requires_full_kline_cache': dashboard.practice_scan_requires_full_kline_cache,
+            'market_data_readiness': dashboard.market_data_readiness,
+            'start_kline_prewarm': dashboard.start_kline_prewarm,
+            '_trigger_b1_scan_unlocked': dashboard._trigger_b1_scan_unlocked,
+        }
+        try:
+            dashboard.practice_scan_requires_full_kline_cache = lambda: True
+            dashboard.market_data_readiness = lambda: {
+                'ready': False,
+                'data_ready': False,
+                'requires_full_kline_cache': True,
+                'blockers': ['kline_cache_missing'],
+            }
+            dashboard.start_kline_prewarm = lambda *args, **kwargs: (
+                calls.append(('prewarm', args, kwargs)) or True
+            )
+            dashboard._trigger_b1_scan_unlocked = lambda *_args, **_kwargs: (
+                calls.append(('scan',)) or {}
+            )
+
+            result = dashboard.trigger_b1_scan(force=True)
+        finally:
+            for name, value in originals.items():
+                setattr(dashboard, name, value)
+
+        self.assertEqual(result['error_code'], 'kline_cache_missing')
+        self.assertTrue(result['initializing'])
+        self.assertEqual([call[0] for call in calls], ['prewarm'])
+
+    def test_scan_gate_blocks_unwritable_runtime_without_starting_prewarm(self):
+        calls = []
+        originals = {
+            'market_data_readiness': dashboard.market_data_readiness,
+            'start_kline_prewarm': dashboard.start_kline_prewarm,
+            '_trigger_b1_scan_unlocked': dashboard._trigger_b1_scan_unlocked,
+        }
+        try:
+            dashboard.market_data_readiness = lambda: {
+                'ready': False,
+                'data_ready': True,
+                'requires_full_kline_cache': True,
+                'blockers': ['runtime_storage_not_writable'],
+            }
+            dashboard.start_kline_prewarm = lambda *args, **kwargs: calls.append('prewarm')
+            dashboard._trigger_b1_scan_unlocked = lambda *_args, **_kwargs: calls.append('scan')
+
+            result = dashboard.trigger_b1_scan(force=True)
+        finally:
+            for name, value in originals.items():
+                setattr(dashboard, name, value)
+
+        self.assertEqual(result['error_code'], 'runtime_storage_not_writable')
+        self.assertEqual(result['stage'], 'deployment_check')
+        self.assertEqual(calls, [])
+
+    def test_ready_trading_scan_forces_strict_local_kline_cache(self):
+        calls = []
+        originals = {
+            'market_data_readiness': dashboard.market_data_readiness,
+            '_trigger_b1_scan_unlocked': dashboard._trigger_b1_scan_unlocked,
+            'B1_FULL_SCAN_LOCK': dashboard.B1_FULL_SCAN_LOCK,
+        }
+        try:
+            dashboard.market_data_readiness = lambda: {
+                'ready': True,
+                'data_ready': True,
+                'requires_full_kline_cache': True,
+                'blockers': [],
+            }
+            dashboard._trigger_b1_scan_unlocked = lambda *_args, **kwargs: (
+                calls.append(kwargs) or {'count': 0}
+            )
+            dashboard.B1_FULL_SCAN_LOCK = threading.Lock()
+
+            result = dashboard.trigger_b1_scan(force=True)
+        finally:
+            for name, value in originals.items():
+                setattr(dashboard, name, value)
+
+        self.assertEqual(result['count'], 0)
+        self.assertTrue(calls[0]['require_ready_cache'])
+
+    def test_manual_cycle_waits_for_initialization_then_scans(self):
+        readiness = iter([
+            {
+                'ready': False,
+                'data_ready': False,
+                'requires_full_kline_cache': True,
+                'kline': {'status': 'missing'},
+            },
+            {
+                'ready': True,
+                'data_ready': True,
+                'requires_full_kline_cache': True,
+                'kline': {
+                    'status': 'completed',
+                    'completed_count': 5000,
+                    'requested_count': 5000,
+                    'fresh_count': 5000,
+                    'failure_count': 0,
+                },
+            },
+        ])
+        calls = []
+        originals = {
+            'practice_scan_requires_full_kline_cache': dashboard.practice_scan_requires_full_kline_cache,
+            'market_data_readiness': dashboard.market_data_readiness,
+            'start_kline_prewarm': dashboard.start_kline_prewarm,
+            'time_sleep': dashboard.time.sleep,
+            'PRACTICE_MANUAL_CYCLE_STATE': dashboard.PRACTICE_MANUAL_CYCLE_STATE,
+        }
+        try:
+            dashboard.practice_scan_requires_full_kline_cache = lambda: True
+            dashboard.market_data_readiness = lambda: next(readiness)
+            dashboard.start_kline_prewarm = lambda *args, **kwargs: (
+                calls.append((args, kwargs)) or True
+            )
+            dashboard.time.sleep = lambda _seconds: None
+            dashboard.PRACTICE_MANUAL_CYCLE_STATE = {
+                'running': True,
+                'stage': 'starting',
+                'job_id': 'manual-test',
+            }
+
+            dashboard._wait_for_manual_cycle_market_data()
+            status = dashboard.practice_manual_cycle_status()
+        finally:
+            dashboard.practice_scan_requires_full_kline_cache = originals[
+                'practice_scan_requires_full_kline_cache'
+            ]
+            dashboard.market_data_readiness = originals['market_data_readiness']
+            dashboard.start_kline_prewarm = originals['start_kline_prewarm']
+            dashboard.time.sleep = originals['time_sleep']
+            dashboard.PRACTICE_MANUAL_CYCLE_STATE = originals[
+                'PRACTICE_MANUAL_CYCLE_STATE'
+            ]
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(status['completed'], 5000)
+        self.assertEqual(status['progress_pct'], 100.0)
+
+    def test_manual_cycle_running_state_recovers_as_interrupted(self):
+        original_state = dashboard.PRACTICE_MANUAL_CYCLE_STATE
+        try:
+            dashboard.PRACTICE_MANUAL_CYCLE_STATE = {'running': False, 'stage': 'idle'}
+            dashboard.write_json_cache(
+                dashboard.practice_manual_cycle_state_file(),
+                {
+                    'job_id': 'manual-before-restart',
+                    'running': True,
+                    'stage': 'trading',
+                    'stage_label': '正在执行买卖策略',
+                },
+            )
+
+            restored = dashboard.restore_practice_manual_cycle_state()
+        finally:
+            dashboard.PRACTICE_MANUAL_CYCLE_STATE = original_state
+
+        self.assertFalse(restored['running'])
+        self.assertEqual(restored['stage'], 'interrupted')
+        self.assertEqual(restored['error_code'], 'service_restarted')
+        self.assertIn('不会自动重放', restored['error'])
+
+    def test_manual_cycle_status_refreshes_from_shared_persistent_state(self):
+        original_state = dashboard.PRACTICE_MANUAL_CYCLE_STATE
+        try:
+            dashboard.PRACTICE_MANUAL_CYCLE_STATE = {
+                'running': False,
+                'stage': 'idle',
+                'updated_at': '',
+            }
+            dashboard.write_json_cache(
+                dashboard.practice_manual_cycle_state_file(),
+                {
+                    'job_id': 'manual-other-instance',
+                    'running': True,
+                    'stage': 'scoring',
+                    'stage_label': '正在执行本地策略评分',
+                    'updated_at': '2026-08-03 10:00:00',
+                },
+            )
+
+            status = dashboard.practice_manual_cycle_status()
+        finally:
+            dashboard.PRACTICE_MANUAL_CYCLE_STATE = original_state
+
+        self.assertEqual(status['job_id'], 'manual-other-instance')
+        self.assertTrue(status['running'])
+        self.assertEqual(status['stage'], 'scoring')
+
+    def test_manual_cycle_cross_process_lease_blocks_duplicate(self):
+        original_lock = dashboard.PRACTICE_MANUAL_CYCLE_LOCK
+        original_state = dashboard.PRACTICE_MANUAL_CYCLE_STATE
+        test_lock = threading.Lock()
+        lease = dashboard.FileLease(
+            dashboard.CRON_STATE_DIR / 'practice_manual_cycle.lock',
+            stale_after_seconds=60,
+        )
+        try:
+            dashboard.PRACTICE_MANUAL_CYCLE_LOCK = test_lock
+            dashboard.PRACTICE_MANUAL_CYCLE_STATE = {
+                'running': False,
+                'stage': 'idle',
+                'updated_at': '',
+            }
+            self.assertTrue(lease.acquire())
+
+            result = dashboard.start_practice_manual_cycle()
+        finally:
+            lease.release()
+            dashboard.PRACTICE_MANUAL_CYCLE_LOCK = original_lock
+            dashboard.PRACTICE_MANUAL_CYCLE_STATE = original_state
+
+        self.assertFalse(result['accepted'])
+        self.assertTrue(result['busy'])
+        self.assertEqual(
+            result['error_code'],
+            'manual_cycle_in_progress_other_process',
+        )
+        self.assertFalse(test_lock.locked())
+
+    def test_scan_timeout_reports_last_published_stage(self):
+        original_run = subprocess.run
+        original_progress_file = os.environ.get('DASHBOARD_B1_PROGRESS_FILE')
+        progress_path = self.tmp_path / 'scan-progress.json'
+
+        def timeout_runner(_args, **kwargs):
+            dashboard.write_json_cache(
+                Path(kwargs['env']['DASHBOARD_B1_PROGRESS_FILE']),
+                {
+                    'job_id': kwargs['env']['DASHBOARD_B1_JOB_ID'],
+                    'stage': 'quotes',
+                    'stage_label': '正在获取全市场实时行情',
+                    'completed': 7,
+                    'total': 35,
+                },
+            )
+            raise subprocess.TimeoutExpired(
+                cmd='scanner',
+                timeout=dashboard.B1_SCAN_TIMEOUT_SECONDS,
+                stderr='Step 2: Fetching real-time batch quotes...',
+            )
+
+        try:
+            os.environ['DASHBOARD_B1_PROGRESS_FILE'] = str(progress_path)
+            subprocess.run = timeout_runner
+            result = dashboard._trigger_b1_scan_unlocked(job_id='manual-timeout')
+        finally:
+            subprocess.run = original_run
+            if original_progress_file is None:
+                os.environ.pop('DASHBOARD_B1_PROGRESS_FILE', None)
+            else:
+                os.environ['DASHBOARD_B1_PROGRESS_FILE'] = original_progress_file
+
+        self.assertEqual(result['stage'], 'quotes')
+        self.assertEqual(result['error_code'], 'quote_source_timeout')
+        self.assertIn('正在获取全市场实时行情超时', result['error'])
+
+    def test_scan_process_failure_reports_last_published_stage(self):
+        original_run = subprocess.run
+
+        def failed_runner(_args, **kwargs):
+            dashboard.write_json_cache(
+                Path(kwargs['env']['DASHBOARD_B1_PROGRESS_FILE']),
+                {
+                    'job_id': kwargs['env']['DASHBOARD_B1_JOB_ID'],
+                    'stage': 'kline_prepare',
+                    'stage_label': '正在准备全市场日K与题材上下文',
+                },
+            )
+            return subprocess.CompletedProcess(
+                args=[],
+                returncode=1,
+                stdout='',
+                stderr='RuntimeError: upstream unavailable',
+            )
+
+        try:
+            subprocess.run = failed_runner
+            result = dashboard._trigger_b1_scan_unlocked(job_id='manual-failure')
+        finally:
+            subprocess.run = original_run
+
+        self.assertEqual(result['stage'], 'kline_prepare')
+        self.assertEqual(result['error_code'], 'kline_prepare_failed')
+        self.assertIn('upstream unavailable', result['error'])
+
     def test_manual_practice_cycle_stays_locked_until_trade_decision_finishes(self):
         scan_started = threading.Event()
         allow_scan_finish = threading.Event()
@@ -1595,12 +1916,20 @@ console.log(JSON.stringify({
             dashboard._trigger_b1_scan_unlocked = fake_scan
             dashboard.B1_FULL_SCAN_LOCK = threading.Lock()
             worker = threading.Thread(
-                target=lambda: results.append(dashboard.trigger_b1_scan(force=True, decision_mode='none')),
+                target=lambda: results.append(dashboard.trigger_b1_scan(
+                    force=True,
+                    decision_mode='none',
+                    require_ready=False,
+                )),
             )
             worker.start()
             self.assertTrue(scan_started.wait(1))
 
-            duplicate = dashboard.trigger_b1_scan(force=True, decision_mode='none')
+            duplicate = dashboard.trigger_b1_scan(
+                force=True,
+                decision_mode='none',
+                require_ready=False,
+            )
             self.assertTrue(duplicate['busy'])
             self.assertTrue(duplicate['running'])
             self.assertIn('已有选股扫描正在运行', duplicate['error'])
@@ -1620,6 +1949,7 @@ console.log(JSON.stringify({
         original_b1_cache_file = dashboard.B1_CACHE_FILE
         original_subprocess_run = subprocess.run
         dashboard.B1_CACHE_FILE = self.tmp_path / 'b1_screen_latest.json'
+        child_environments = []
         display_candidate = {'code': '600001', 'actionable': False}
         scanner_payload = {
             'items': [display_candidate],
@@ -1629,12 +1959,16 @@ console.log(JSON.stringify({
             'total_analyzed': 1,
         }
         try:
-            subprocess.run = lambda *_args, **_kwargs: subprocess.CompletedProcess(
-                args=[],
-                returncode=0,
-                stdout=json.dumps(scanner_payload),
-                stderr='',
-            )
+            def successful_runner(*_args, **kwargs):
+                child_environments.append(kwargs['env'])
+                return subprocess.CompletedProcess(
+                    args=[],
+                    returncode=0,
+                    stdout=json.dumps(scanner_payload),
+                    stderr='',
+                )
+
+            subprocess.run = successful_runner
 
             result = dashboard._trigger_b1_scan_unlocked(
                 force=True,
@@ -1648,6 +1982,10 @@ console.log(JSON.stringify({
             self.assertEqual(cached['trade_items'], [])
             self.assertEqual(cached['trade_count'], 0)
             self.assertEqual(result['schedule_run_kind'], 'manual')
+            self.assertEqual(
+                child_environments[0]['DASHBOARD_B1_REQUIRE_READY_CACHE'],
+                '1',
+            )
             self.assertRegex(
                 result['schedule_triggered_at'],
                 r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$',
@@ -4718,6 +5056,10 @@ process.stdout.write(JSON.stringify({{
         self.assertIn("if (retryAction === 'manual-cycle') await runManualCycle()", PRACTICE_COMPONENTS)
         self.assertIn("title: '手动运行选股与交易策略'", PRACTICE_COMPONENTS)
         self.assertIn("submitLabel: '验证并运行'", PRACTICE_COMPONENTS)
+        self.assertIn("/api/system/data-readiness", PRACTICE_DATA)
+        self.assertIn(':data-readiness="state.dataReadiness"', PRACTICE_COMPONENTS)
+        self.assertIn('class="practice-data-readiness"', PRACTICE_COMPONENTS)
+        self.assertIn('初始化完成后运行选股与交易策略', PRACTICE_COMPONENTS)
 
     def test_manual_market_summary_snapshot_force_refreshes_live_channels(self):
         original_runner = dashboard.run_dashboard_helper

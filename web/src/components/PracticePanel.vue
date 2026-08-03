@@ -97,6 +97,7 @@ onBeforeUnmount(deactivatePractice)
     <PracticeAccountOverview
       :practice="state.practice"
       :manual-cycle="state.manualCycle"
+      :data-readiness="state.dataReadiness"
       :market-summary="state.marketSummary"
       :market-summary-generating="state.marketSummaryGenerating"
       :strategy-meta="strategyMeta"

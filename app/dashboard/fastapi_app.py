@@ -159,6 +159,7 @@ def create_app(
             with closing(legacy.push_history.connect()):
                 pass
             legacy.get_or_create_admin_token()
+            legacy.restore_practice_manual_cycle_state()
             legacy.start_b1_scheduler()
             legacy.start_kline_prewarm_scheduler()
             legacy.start_pending_decision_executor()

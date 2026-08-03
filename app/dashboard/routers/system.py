@@ -67,6 +67,33 @@ def create_system_router(
             cache_control="no-store",
         )
 
+    @router.api_route("/readyz", methods=["GET", "HEAD"])
+    async def ready(request: Request) -> Response:
+        limited = enforce_public_limit(request)
+        if limited is not None:
+            return limited
+        payload = await run_in_threadpool(services.market_data_readiness)
+        return json_response(
+            request,
+            payload,
+            cache_control="no-store",
+            status_code=200 if payload.get("ready") else 503,
+        )
+
+    @router.api_route("/api/system/data-readiness", methods=["GET", "HEAD"])
+    async def data_readiness(request: Request) -> Response:
+        limited = await enforce_api_limits(request)
+        if limited is not None:
+            return limited
+        if request.method == "HEAD":
+            return Response(
+                status_code=200,
+                media_type="application/json",
+                headers={"Cache-Control": "no-store"},
+            )
+        payload = await run_in_threadpool(services.market_data_readiness)
+        return json_response(request, payload, cache_control="no-store")
+
     @router.api_route("/api/version", methods=["GET", "HEAD"])
     async def version_status(request: Request) -> Response:
         limited = await enforce_api_limits(request)

@@ -128,6 +128,84 @@ class TencentKlineCacheTests(unittest.TestCase):
             )
         )
 
+        readiness = cache.kline_cache_readiness(
+            accepted_last_dates={"2026-07-28"},
+            path=self.path,
+            minimum_coverage=0.60,
+        )
+        self.assertTrue(readiness["ready"])
+        self.assertEqual(readiness["requested_count"], 3)
+        self.assertEqual(readiness["completed_count"], 3)
+        self.assertEqual(readiness["fresh_count"], 2)
+        self.assertEqual(readiness["coverage"], 0.6667)
+
+    def test_resume_fetches_only_missing_or_stale_symbols(self):
+        cache.store_kline_series(
+            {"sh600001": sample_rows("2026-07-28")},
+            path=self.path,
+        )
+        calls = []
+
+        def fetcher(symbol, _count):
+            calls.append(symbol)
+            return sample_rows("2026-07-28")
+
+        result = cache.prewarm_kline_cache(
+            ["sh600001", "sz000001"],
+            path=self.path,
+            target_date="2026-07-29",
+            accepted_last_dates={"2026-07-28"},
+            workers=2,
+            max_attempts=1,
+            fetcher=fetcher,
+        )
+
+        self.assertEqual(calls, ["sz000001"])
+        self.assertEqual(result["requested_count"], 2)
+        self.assertEqual(result["reused_count"], 1)
+        self.assertEqual(result["success_count"], 2)
+
+    def test_aggregate_failure_is_visible_without_deleting_cache(self):
+        cache.prewarm_kline_cache(
+            ["sh600001"],
+            path=self.path,
+            target_date="2026-07-29",
+            workers=1,
+            max_attempts=1,
+            fetcher=lambda *_args: sample_rows(),
+        )
+
+        cache.mark_prewarm_run_failed(
+            "2026-07-29",
+            "aggregate_timeout",
+            path=self.path,
+        )
+        readiness = cache.kline_cache_readiness(
+            accepted_last_dates={"2026-07-28"},
+            path=self.path,
+        )
+
+        self.assertTrue(readiness["ready"])
+        self.assertEqual(readiness["status"], "error")
+        self.assertEqual(readiness["error_code"], "")
+        self.assertEqual(readiness["fresh_count"], 1)
+
+    def test_aggregate_failure_is_recorded_before_any_series_exists(self):
+        cache.mark_prewarm_run_failed(
+            "2026-07-29",
+            "prewarm_process_failed",
+            path=self.path,
+        )
+
+        readiness = cache.kline_cache_readiness(
+            accepted_last_dates={"2026-07-28"},
+            path=self.path,
+        )
+
+        self.assertFalse(readiness["ready"])
+        self.assertEqual(readiness["status"], "error")
+        self.assertEqual(readiness["error_code"], "prewarm_process_failed")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -162,6 +162,10 @@ NiuOne 需要接入大模型后才能驱动完整工作流。没有模型配置�
 | `DASHBOARD_NIUONE_FORWARD_COHORT_START` | `2026-08-04` | 严格前向队列起始日；修改规则时归档旧协议锁并从新交易日重新累计 |
 | `DASHBOARD_ACTIVE_STRATEGY` | `niuone` | 当前独立策略；保存后下一轮扫描热生效 |
 | `DASHBOARD_PRACTICE_SCHEDULE_TIMES` | `09:25,10:00,10:30,11:00,11:20,13:00,13:30,14:00,14:30,14:50` | 盘面总结、选股和模拟决策的共享时间点 |
+| `DASHBOARD_KLINE_BOOTSTRAP_ENABLED` | `1` | 首次部署或缓存过期后立即准备全市场日 K；重启生效 |
+| `DASHBOARD_KLINE_READINESS_MIN_COVERAGE_PERCENT` | `90` | 实战扫描放行所需的日期有效日 K 覆盖率；允许 90～100，重启生效 |
+| `DASHBOARD_TENCENT_QUOTE_STAGE_TIMEOUT_SECONDS` | `90` | 全市场实时行情阶段总预算；允许 15～300 秒，重启生效 |
+| `DASHBOARD_MANUAL_DATA_INITIALIZATION_TIMEOUT_SECONDS` | `660` | 手动任务等待日 K 初始化完成的最长秒数；重启生效 |
 | `X_WATCHLIST_ACCOUNTS` | 空 | 推文监控作者列表，使用英文逗号分隔 |
 | `DASHBOARD_DECISION_INTELLIGENCE_ENABLED` | `1` | 买卖决策是否启用全局情报包 |
 | `DASHBOARD_TRADE_DISCIPLINE_TEXT` | 空 | 买卖决策 prompt 的交易纪律文本；为空使用内置默认纪律 |

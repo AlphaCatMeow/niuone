@@ -460,10 +460,11 @@ git pull --ff-only
 
 ```bash
 curl -s -o /dev/null -w 'HEALTH HTTP:%{http_code} TOTAL:%{time_total}\n' http://127.0.0.1:8787/healthz
+curl -s -o /dev/null -w 'READY HTTP:%{http_code} TOTAL:%{time_total}\n' http://127.0.0.1:8787/readyz
 curl -s -o /dev/null -w 'SNAPSHOT HTTP:%{http_code} TOTAL:%{time_total}\n' http://127.0.0.1:8787/api/v2/public/latest
 ```
 
-预期均返回 `HTTP:200`。
+`healthz` 和公开快照应返回 `HTTP:200`。首次部署会立即初始化牛牛策略所需的全市场日 K；这段时间 `readyz` 返回 `HTTP:503` 是正常状态，就绪后会变为 `HTTP:200`。实战页会显示完成数、覆盖率和部署提醒。
 
 开发验证：
 
@@ -494,6 +495,10 @@ curl -s -o /dev/null -w 'SNAPSHOT HTTP:%{http_code} TOTAL:%{time_total}\n' http:
 ### 页面可访问，但部分内容没有生成
 
 检查设置页中的数据源、模型服务、功能开关和任务时间，并确认相关外部服务可访问。更多排查方法见 [部署、验证和回滚手册](docs/OPERATIONS.md)。
+
+### 手动选股总是在 480 秒后超时
+
+精确的 480 秒表示完整扫描触发了服务端硬超时，通常不是浏览器问题。先打开实战页的数据准备卡片，或请求 `/api/system/data-readiness`：首次部署应等待日 K 覆盖率达到安全阈值；若初始化失败，检查腾讯行情连通性、运行目录写权限以及 Docker `/data` 持久化卷。新版会在启动后立即补齐缓存，手动任务展示当前阶段，行情、日 K、评分等阶段超时会返回不同错误码；不建议仅把 480 秒调大来掩盖冷启动或上游故障。
 
 ## 文档
 

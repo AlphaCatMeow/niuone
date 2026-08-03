@@ -388,6 +388,24 @@ class MultiStrategyRuleTests(unittest.TestCase):
 
         self.assertEqual(calls, [2])
 
+    def test_quote_request_timeout_is_bounded_by_remaining_stage_budget(self):
+        self.assertEqual(
+            screen.bounded_quote_request_timeout(
+                90,
+                max_attempts=3,
+                backoff_seconds=0.5,
+            ),
+            10,
+        )
+        self.assertAlmostEqual(
+            screen.bounded_quote_request_timeout(
+                6,
+                max_attempts=3,
+                backoff_seconds=0.5,
+            ),
+            1.5,
+        )
+
     def test_sector_tide_loads_only_exact_previous_trading_day_snapshot(self):
         calls = {}
 

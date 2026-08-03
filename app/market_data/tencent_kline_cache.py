@@ -26,7 +26,7 @@ except ImportError:  # pragma: no cover - legacy top-level import path
     from core.paths import get_dashboard_home
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 DEFAULT_KLINE_COUNT = 120
 DEFAULT_PREWARM_WORKERS = 12
 DEFAULT_HTTP_TIMEOUT_SECONDS = 15.0
@@ -86,20 +86,53 @@ def _open_database(path: Path) -> sqlite3.Connection:
             started_at TEXT NOT NULL,
             finished_at TEXT NOT NULL DEFAULT '',
             requested_count INTEGER NOT NULL DEFAULT 0,
+            completed_count INTEGER NOT NULL DEFAULT 0,
             success_count INTEGER NOT NULL DEFAULT 0,
             failure_count INTEGER NOT NULL DEFAULT 0,
             status TEXT NOT NULL,
             duration_seconds REAL NOT NULL DEFAULT 0,
-            error_summary TEXT NOT NULL DEFAULT ''
+            error_summary TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT ''
         );
         """
     )
-    connection.execute(
-        "INSERT INTO schema_meta(key, value) VALUES('schema_version', ?) "
-        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        (str(SCHEMA_VERSION),),
-    )
-    connection.commit()
+    prewarm_columns = {
+        str(row["name"] or "")
+        for row in connection.execute("PRAGMA table_info(prewarm_runs)")
+    }
+    schema_row = connection.execute(
+        "SELECT value FROM schema_meta WHERE key='schema_version'"
+    ).fetchone()
+    if (
+        "completed_count" not in prewarm_columns
+        or "updated_at" not in prewarm_columns
+        or not schema_row
+        or str(schema_row["value"] or "") != str(SCHEMA_VERSION)
+    ):
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            prewarm_columns = {
+                str(row["name"] or "")
+                for row in connection.execute("PRAGMA table_info(prewarm_runs)")
+            }
+            if "completed_count" not in prewarm_columns:
+                connection.execute(
+                    "ALTER TABLE prewarm_runs ADD COLUMN completed_count INTEGER NOT NULL DEFAULT 0"
+                )
+            if "updated_at" not in prewarm_columns:
+                connection.execute(
+                    "ALTER TABLE prewarm_runs ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''"
+                )
+            connection.execute(
+                "INSERT INTO schema_meta(key, value) VALUES('schema_version', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (str(SCHEMA_VERSION),),
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            connection.close()
+            raise
     return connection
 
 
@@ -396,6 +429,141 @@ def prewarm_completed_for_date(
     return requested > 0 and success / requested >= max(0.0, min(1.0, minimum_coverage))
 
 
+def kline_cache_readiness(
+    *,
+    accepted_last_dates: set[str] | None = None,
+    path: Path | None = None,
+    minimum_coverage: float = 0.90,
+    min_rows: int = 30,
+) -> dict[str, Any]:
+    """Return bounded cache and prewarm progress metadata for readiness gates."""
+    cache_path = Path(path or kline_cache_path())
+    accepted = {
+        str(value)[:10]
+        for value in (accepted_last_dates or set())
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(value)[:10])
+    }
+    base = {
+        "ready": False,
+        "cache_exists": cache_path.exists(),
+        "accepted_last_dates": sorted(accepted),
+        "cached_count": 0,
+        "fresh_count": 0,
+        "requested_count": 0,
+        "completed_count": 0,
+        "success_count": 0,
+        "failure_count": 0,
+        "coverage": 0.0,
+        "status": "missing",
+        "target_date": "",
+        "started_at": "",
+        "finished_at": "",
+        "updated_at": "",
+        "duration_seconds": 0.0,
+        "error_code": "kline_cache_missing",
+    }
+    if not cache_path.exists():
+        return base
+    try:
+        connection = _open_database(cache_path)
+        try:
+            cached_count = int(connection.execute(
+                "SELECT count(*) FROM kline_series WHERE row_count >= ?",
+                (max(1, int(min_rows or 1)),),
+            ).fetchone()[0] or 0)
+            if accepted:
+                placeholders = ",".join("?" for _ in accepted)
+                fresh_count = int(connection.execute(
+                    "SELECT count(*) FROM kline_series "
+                    f"WHERE row_count >= ? AND last_trade_date IN ({placeholders})",
+                    (max(1, int(min_rows or 1)), *sorted(accepted)),
+                ).fetchone()[0] or 0)
+            else:
+                fresh_count = cached_count
+            run = connection.execute(
+                "SELECT target_date, started_at, finished_at, requested_count, "
+                "completed_count, success_count, failure_count, status, "
+                "duration_seconds, error_summary, updated_at "
+                "FROM prewarm_runs ORDER BY target_date DESC, started_at DESC LIMIT 1"
+            ).fetchone()
+        finally:
+            connection.close()
+    except (OSError, sqlite3.Error) as exc:
+        return {
+            **base,
+            "cache_exists": True,
+            "status": "error",
+            "error_code": f"kline_cache_{type(exc).__name__.lower()}",
+        }
+
+    requested_count = int(run["requested_count"] or 0) if run else 0
+    completed_count = int(run["completed_count"] or 0) if run else 0
+    success_count = int(run["success_count"] or 0) if run else 0
+    failure_count = int(run["failure_count"] or 0) if run else 0
+    denominator = requested_count or cached_count
+    coverage = fresh_count / denominator if denominator > 0 else 0.0
+    ready = denominator > 0 and coverage >= max(0.0, min(1.0, minimum_coverage))
+    status = str(run["status"] or "unknown") if run else "untracked"
+    if ready:
+        error_code = ""
+    elif status == "running":
+        error_code = "kline_cache_initializing"
+    elif status == "error":
+        error_code = str(run["error_summary"] or "kline_prewarm_failed")[:80]
+    else:
+        error_code = "kline_cache_incomplete"
+    return {
+        **base,
+        "ready": ready,
+        "cache_exists": True,
+        "cached_count": cached_count,
+        "fresh_count": fresh_count,
+        "requested_count": requested_count,
+        "completed_count": completed_count,
+        "success_count": success_count,
+        "failure_count": failure_count,
+        "coverage": round(coverage, 4),
+        "status": status,
+        "target_date": str(run["target_date"] or "") if run else "",
+        "started_at": str(run["started_at"] or "") if run else "",
+        "finished_at": str(run["finished_at"] or "") if run else "",
+        "updated_at": str(run["updated_at"] or "") if run else "",
+        "duration_seconds": float(run["duration_seconds"] or 0.0) if run else 0.0,
+        "error_code": error_code,
+    }
+
+
+def mark_prewarm_run_failed(
+    target_date: str,
+    error_code: str,
+    *,
+    path: Path | None = None,
+) -> None:
+    """Persist a terminal aggregate failure without deleting usable K-line rows."""
+    cache_path = Path(path or kline_cache_path())
+    now_text = _now_text()
+    connection = _open_database(cache_path)
+    try:
+        with connection:
+            connection.execute(
+                "INSERT INTO prewarm_runs("
+                "target_date, started_at, finished_at, status, error_summary, updated_at"
+                ") VALUES(?, ?, ?, 'error', ?, ?) "
+                "ON CONFLICT(target_date) DO UPDATE SET "
+                "status='error', finished_at=excluded.finished_at, "
+                "updated_at=excluded.updated_at, error_summary=excluded.error_summary",
+                (
+                    str(target_date)[:10],
+                    now_text,
+                    now_text,
+                    re.sub(r"[^a-zA-Z0-9_.-]", "", str(error_code or "prewarm_failed"))[:80],
+                    now_text,
+                ),
+            )
+    finally:
+        connection.close()
+
+
 def prewarm_kline_cache(
     symbols: Iterable[str],
     *,
@@ -404,6 +572,7 @@ def prewarm_kline_cache(
     workers: int = DEFAULT_PREWARM_WORKERS,
     count: int = DEFAULT_KLINE_COUNT,
     max_attempts: int = 2,
+    accepted_last_dates: set[str] | None = None,
     fetcher: Callable[[str, int], list[dict[str, Any]]] | None = None,
     progress: Callable[[int, int, int], None] | None = None,
 ) -> dict[str, Any]:
@@ -418,26 +587,49 @@ def prewarm_kline_cache(
     started_at = _now_text()
     started = time.monotonic()
     active_fetcher = fetcher or fetch_tencent_daily_klines
-    worker_count = max(1, min(16, int(workers or DEFAULT_PREWARM_WORKERS), len(unique) or 1))
+    accepted = {
+        str(value)[:10]
+        for value in (accepted_last_dates or set())
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(value)[:10])
+    }
+    fresh_symbols = set(
+        load_kline_series_map(
+            unique,
+            path=cache_path,
+            accepted_last_dates=accepted,
+            min_rows=30,
+            count=count,
+        )
+    ) if accepted and cache_path.exists() else set()
+    pending_symbols = [symbol for symbol in unique if symbol not in fresh_symbols]
+    worker_count = max(
+        1,
+        min(16, int(workers or DEFAULT_PREWARM_WORKERS), len(pending_symbols) or 1),
+    )
+    completed = len(fresh_symbols)
+    successes = len(fresh_symbols)
     connection = _open_database(cache_path)
     try:
         with connection:
             connection.execute(
                 """
                 INSERT INTO prewarm_runs(
-                    target_date, started_at, requested_count, status
-                ) VALUES(?, ?, ?, 'running')
+                    target_date, started_at, requested_count, completed_count,
+                    success_count, status, updated_at
+                ) VALUES(?, ?, ?, ?, ?, 'running', ?)
                 ON CONFLICT(target_date) DO UPDATE SET
                     started_at=excluded.started_at,
                     finished_at='',
                     requested_count=excluded.requested_count,
-                    success_count=0,
+                    completed_count=excluded.completed_count,
+                    success_count=excluded.success_count,
                     failure_count=0,
                     status='running',
                     duration_seconds=0,
-                    error_summary=''
+                    error_summary='',
+                    updated_at=excluded.updated_at
                 """,
-                (run_date, started_at, len(unique)),
+                (run_date, started_at, len(unique), completed, successes, started_at),
             )
     finally:
         connection.close()
@@ -456,12 +648,23 @@ def prewarm_kline_cache(
                 time.sleep(0.15 * (attempt + 1))
         return symbol, [], last_error
 
-    successes = 0
     failures: dict[str, str] = {}
     pending: dict[str, list[dict[str, Any]]] = {}
-    completed = 0
+
+    def persist_progress() -> None:
+        progress_connection = _open_database(cache_path)
+        try:
+            with progress_connection:
+                progress_connection.execute(
+                    "UPDATE prewarm_runs SET completed_count=?, success_count=?, "
+                    "failure_count=?, updated_at=? WHERE target_date=?",
+                    (completed, successes, len(failures), _now_text(), run_date),
+                )
+        finally:
+            progress_connection.close()
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as pool:
-        futures = [pool.submit(fetch_one, symbol) for symbol in unique]
+        futures = [pool.submit(fetch_one, symbol) for symbol in pending_symbols]
         for future in concurrent.futures.as_completed(futures):
             symbol, rows, error = future.result()
             completed += 1
@@ -472,10 +675,12 @@ def prewarm_kline_cache(
             if len(pending) >= 100:
                 successes += store_kline_series(pending, path=cache_path, fetched_at=started_at)
                 pending.clear()
+                persist_progress()
             if progress and (completed % 100 == 0 or completed == len(unique)):
                 progress(completed, len(unique), len(failures))
     if pending:
         successes += store_kline_series(pending, path=cache_path, fetched_at=started_at)
+    persist_progress()
     record_kline_failures(failures, path=cache_path, attempted_at=started_at)
 
     duration = round(time.monotonic() - started, 3)
@@ -486,11 +691,14 @@ def prewarm_kline_cache(
             connection.execute(
                 """
                 UPDATE prewarm_runs
-                SET finished_at=?, success_count=?, failure_count=?, status='completed',
-                    duration_seconds=?, error_summary=?
+                SET finished_at=?, completed_count=?, success_count=?, failure_count=?,
+                    status='completed', duration_seconds=?, error_summary=?, updated_at=?
                 WHERE target_date=?
                 """,
-                (_now_text(), successes, len(failures), duration, error_summary, run_date),
+                (
+                    _now_text(), completed, successes, len(failures), duration,
+                    error_summary, _now_text(), run_date,
+                ),
             )
     finally:
         connection.close()
@@ -499,6 +707,8 @@ def prewarm_kline_cache(
         "requested_count": len(unique),
         "success_count": successes,
         "failure_count": len(failures),
+        "completed_count": completed,
+        "reused_count": len(fresh_symbols),
         "workers": worker_count,
         "duration_seconds": duration,
         "cache_path": str(cache_path),
@@ -512,9 +722,11 @@ __all__ = [
     "DEFAULT_PREWARM_WORKERS",
     "fetch_tencent_daily_klines",
     "kline_cache_path",
+    "kline_cache_readiness",
     "load_cached_kline_symbols",
     "load_kline_series_map",
     "merge_live_quote",
+    "mark_prewarm_run_failed",
     "normalize_kline_rows",
     "prewarm_completed_for_date",
     "prewarm_kline_cache",

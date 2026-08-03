@@ -459,10 +459,11 @@ After starting the service, run these health checks:
 
 ```bash
 curl -s -o /dev/null -w 'HEALTH HTTP:%{http_code} TOTAL:%{time_total}\n' http://127.0.0.1:8787/healthz
+curl -s -o /dev/null -w 'READY HTTP:%{http_code} TOTAL:%{time_total}\n' http://127.0.0.1:8787/readyz
 curl -s -o /dev/null -w 'SNAPSHOT HTTP:%{http_code} TOTAL:%{time_total}\n' http://127.0.0.1:8787/api/v2/public/latest
 ```
 
-Both are expected to return `HTTP:200`.
+`healthz` and the public snapshot should return `HTTP:200`. On a first deployment, NiuOne immediately initializes the full-market daily-K-line data required by the NiuOne strategy. A `503` from `readyz` is expected during this interval and changes to `200` when initialization is complete. The Practice page displays counts, coverage, and deployment notices.
 
 Development validation:
 
@@ -493,6 +494,10 @@ Specify another port:
 ### The Page Is Accessible, but Some Content Is Missing
 
 Check the data sources, model services, feature switches, and task times on the settings page, and confirm that the relevant external services are reachable. For additional troubleshooting, see the [Deployment, Validation, and Rollback Manual](docs/OPERATIONS_EN.md).
+
+### A Manual Candidate Scan Always Times Out After 480 Seconds
+
+Exactly 480 seconds means that the full scanner reached its server-side hard timeout; it is usually not a browser problem. Check the data-preparation card on the Practice page or request `/api/system/data-readiness`. A first deployment must reach the safe daily-K-line coverage threshold. If initialization fails, verify Tencent market-data connectivity, runtime-directory write access, and the Docker `/data` persistent volume. The current service initializes the cache immediately after startup, exposes the active task stage, and returns distinct timeout codes for quote, daily-K-line, scoring, and other stages. Increasing 480 seconds alone is not a substitute for fixing cold-start or upstream failures.
 
 ## Documentation
 
