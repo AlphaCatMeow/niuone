@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -69,7 +70,12 @@ from strategies.scoring.common import (  # noqa: E402
 from strategies.scoring.niuone import (  # noqa: E402
     _apply_theme_attributions,
     _apply_markup_momentum_probe,
+    _cohort_alignment_score,
+    _cohort_alignment_score_reference,
     _daily_v_reversal_metrics,
+    _peer_resonance_score,
+    _peer_resonance_score_reference,
+    _theme_peer_statistics,
 )
 from strategies.selection import candidate_is_trade_ready, select_trade_candidates  # noqa: E402
 from trading.fees import (  # noqa: E402
@@ -849,6 +855,220 @@ class NiuOneStrategyTests(unittest.TestCase):
             float(attributions[1]["attribution_weight"]),
             places=5,
         )
+
+    def test_theme_peer_summaries_match_reference_leave_one_out_scores(self):
+        members = [
+            {
+                "code": "600001", "ret5": 3.0, "ret20": -1.5,
+                "strong": True, "live_change_available": True,
+                "change_pct": 2.0,
+            },
+            {
+                "code": "600002", "ret5": 0.0, "ret20": -1.5,
+                "strong": False, "live_change_available": True,
+                "change_pct": -0.4,
+            },
+            {
+                "code": "600003", "ret5": -2.0, "ret20": 4.0,
+                "strong": True, "live_change_available": False,
+                "change_pct": 8.0,
+            },
+            {
+                "code": "600004", "ret5": -2.0, "ret20": 0.0,
+                "strong": False, "live_change_available": True,
+                "change_pct": 0.0,
+            },
+            {
+                "code": "600005", "ret5": 1.25, "ret20": 4.0,
+                "strong": True, "live_change_available": True,
+                "change_pct": 1.1,
+            },
+        ]
+        summary = _theme_peer_statistics(members)
+
+        for member in members:
+            with self.subTest(code=member["code"]):
+                self.assertAlmostEqual(
+                    _cohort_alignment_score(
+                        member,
+                        members,
+                        peer_statistics=summary,
+                    ),
+                    _cohort_alignment_score_reference(member, members),
+                    places=12,
+                )
+                self.assertAlmostEqual(
+                    _peer_resonance_score(
+                        member,
+                        members,
+                        market_breadth_pct=43.25,
+                        peer_statistics=summary,
+                    ),
+                    _peer_resonance_score_reference(
+                        member,
+                        members,
+                        market_breadth_pct=43.25,
+                    ),
+                    places=12,
+                )
+
+    def test_theme_peer_summaries_preserve_single_and_duplicate_code_edges(self):
+        single = [{
+            "code": "600001", "ret5": 1.0, "ret20": 2.0,
+            "strong": True, "live_change_available": True,
+            "change_pct": 1.0,
+        }]
+        single_summary = _theme_peer_statistics(single)
+        self.assertEqual(
+            _cohort_alignment_score(
+                single[0], single, peer_statistics=single_summary,
+            ),
+            50.0,
+        )
+        self.assertEqual(
+            _peer_resonance_score(
+                single[0], single, market_breadth_pct=50.0,
+                peer_statistics=single_summary,
+            ),
+            0.0,
+        )
+
+        duplicate_codes = [
+            {
+                "code": "600001", "ret5": 1.0, "ret20": 2.0,
+                "strong": True, "live_change_available": True,
+                "change_pct": 1.0,
+            },
+            {
+                "code": "600001", "ret5": -3.0, "ret20": -4.0,
+                "strong": False, "live_change_available": True,
+                "change_pct": -2.0,
+            },
+            {
+                "code": "600002", "ret5": 0.5, "ret20": -1.0,
+                "strong": False, "live_change_available": False,
+                "change_pct": 0.0,
+            },
+        ]
+        duplicate_summary = _theme_peer_statistics(duplicate_codes)
+        for member in duplicate_codes:
+            self.assertAlmostEqual(
+                _cohort_alignment_score(
+                    member,
+                    duplicate_codes,
+                    peer_statistics=duplicate_summary,
+                ),
+                _cohort_alignment_score_reference(member, duplicate_codes),
+                places=12,
+            )
+            self.assertAlmostEqual(
+                _peer_resonance_score(
+                    member,
+                    duplicate_codes,
+                    market_breadth_pct=50.0,
+                    peer_statistics=duplicate_summary,
+                ),
+                _peer_resonance_score_reference(
+                    member,
+                    duplicate_codes,
+                    market_breadth_pct=50.0,
+                ),
+                places=12,
+            )
+
+    def test_wide_theme_peer_scores_reuse_summary_without_member_scans(self):
+        class NoIterationList(list):
+            def __iter__(self):
+                raise AssertionError("cached peer scoring rescanned the theme")
+
+        members = [
+            {
+                "code": f"{index:06d}",
+                "ret5": (index % 11 - 5) * 0.25,
+                "ret20": (index % 17 - 8) * 0.4,
+                "strong": index % 3 == 0,
+                "live_change_available": index % 5 != 0,
+                "change_pct": (index % 9 - 4) * 0.3,
+            }
+            for index in range(1_351)
+        ]
+        summary = _theme_peer_statistics(members)
+        guarded_members = NoIterationList(members)
+
+        for member in members:
+            _cohort_alignment_score(
+                member,
+                guarded_members,
+                peer_statistics=summary,
+            )
+            _peer_resonance_score(
+                member,
+                guarded_members,
+                market_breadth_pct=48.0,
+                peer_statistics=summary,
+            )
+
+    def test_niuone_context_builds_one_peer_summary_per_theme(self):
+        prepared = self._prepared_market()
+        for item in prepared:
+            item["themes"] = ["全市场宽题材"]
+
+        with patch(
+            "strategies.scoring.niuone._theme_peer_statistics",
+            wraps=_theme_peer_statistics,
+        ) as build_summary:
+            context = build_niuone_context(
+                prepared,
+                theme_basis="eastmoney_concept",
+            )
+
+        self.assertEqual(context["theme_count"], 1)
+        self.assertEqual(build_summary.call_count, 1)
+
+    def test_optimized_peer_summaries_preserve_complete_context_output(self):
+        prepared = self._prepared_market()
+        for index, item in enumerate(prepared):
+            item["themes"] = ["全市场宽题材", f"分支题材{index % 3}"]
+        market_snapshot = {
+            "up": 9,
+            "down": 7,
+            "median_change_pct": 0.25,
+            "limit_up": 1,
+            "limit_down": 0,
+        }
+        optimized = build_niuone_context(
+            prepared,
+            market_snapshot=market_snapshot,
+            theme_basis="eastmoney_concept",
+            as_of_date="2026-08-04",
+        )
+
+        with (
+            patch(
+                "strategies.scoring.niuone._cohort_alignment_score",
+                side_effect=lambda member, theme_members, **_kwargs: (
+                    _cohort_alignment_score_reference(member, theme_members)
+                ),
+            ),
+            patch(
+                "strategies.scoring.niuone._peer_resonance_score",
+                side_effect=lambda member, theme_members, **kwargs: (
+                    _peer_resonance_score_reference(
+                        member,
+                        theme_members,
+                        market_breadth_pct=kwargs["market_breadth_pct"],
+                    )
+                ),
+            ),
+        ):
+            reference = build_niuone_context(
+                prepared,
+                market_snapshot=market_snapshot,
+                theme_basis="eastmoney_concept",
+                as_of_date="2026-08-04",
+            )
+
+        self.assertEqual(optimized, reference)
 
     def test_weak_multi_concept_candidates_keep_unattributed_mass(self):
         profiles = _apply_theme_attributions(

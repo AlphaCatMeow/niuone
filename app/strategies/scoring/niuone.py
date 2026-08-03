@@ -6,7 +6,8 @@ import re
 import statistics
 from bisect import bisect_left, bisect_right
 from collections import defaultdict
-from typing import Any, Mapping
+from dataclasses import dataclass
+from typing import Any, Mapping, Sequence
 
 from ..niuone_risk import (
     NIUONE_ABSOLUTE_POSITION_CAP_PCT,
@@ -450,7 +451,7 @@ def _theme_excess_return_factor(
 
 
 def _median_excluding(
-    sorted_values: list[float],
+    sorted_values: Sequence[float],
     excluded_value: float,
 ) -> float | None:
     """Return a median after removing one exact member value without copying."""
@@ -726,17 +727,85 @@ def _apply_theme_attributions(
     )
 
 
-def _cohort_alignment_score(
+@dataclass(frozen=True)
+class _ThemePeerStatistics:
+    """Precomputed theme totals for exact leave-one-stock-out metrics."""
+
+    member_count: int
+    nonnegative_ret5_count: int
+    nonnegative_ret20_count: int
+    strong_count: int
+    quoted_count: int
+    quoted_up_count: int
+    sorted_ret5: tuple[float, ...]
+    sorted_ret20: tuple[float, ...]
+    fast_member_ids: frozenset[int]
+
+
+def _theme_peer_statistics(
+    theme_members: Sequence[Mapping[str, Any]],
+) -> _ThemePeerStatistics:
+    """Build one reusable peer summary instead of rescanning for every member."""
+    ret5_values: list[float] = []
+    ret20_values: list[float] = []
+    nonnegative_ret5_count = 0
+    nonnegative_ret20_count = 0
+    strong_count = 0
+    quoted_count = 0
+    quoted_up_count = 0
+    code_counts: dict[str, int] = defaultdict(int)
+    for member in theme_members:
+        code = str(member.get("code") or "")
+        code_counts[code] += 1
+        ret5 = float(member.get("ret5") or 0.0)
+        ret20 = float(member.get("ret20") or 0.0)
+        ret5_values.append(ret5)
+        ret20_values.append(ret20)
+        nonnegative_ret5_count += int(ret5 >= 0)
+        nonnegative_ret20_count += int(ret20 >= 0)
+        strong_count += int(member.get("strong") is True)
+        if member.get("live_change_available"):
+            quoted_count += 1
+            quoted_up_count += int(
+                float(member.get("change_pct") or 0.0) > 0
+            )
+    return _ThemePeerStatistics(
+        member_count=len(theme_members),
+        nonnegative_ret5_count=nonnegative_ret5_count,
+        nonnegative_ret20_count=nonnegative_ret20_count,
+        strong_count=strong_count,
+        quoted_count=quoted_count,
+        quoted_up_count=quoted_up_count,
+        sorted_ret5=tuple(sorted(ret5_values)),
+        sorted_ret20=tuple(sorted(ret20_values)),
+        # Production themes contain one row per stock. Preserve the historical
+        # "exclude every row with this code" behavior for malformed duplicate
+        # inputs by falling back to the reference scan in that rare case.
+        fast_member_ids=frozenset(
+            id(member)
+            for member in theme_members
+            if code_counts[str(member.get("code") or "")] == 1
+        ),
+    )
+
+
+def _peer_members_reference(
     member: Mapping[str, Any],
-    theme_members: list[dict[str, Any]],
-) -> float:
-    """Measure whether the stock is moving with the concept's other members."""
+    theme_members: Sequence[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
     code = str(member.get("code") or "")
-    peers = [
+    return [
         peer
         for peer in theme_members
         if str(peer.get("code") or "") != code
     ]
+
+
+def _cohort_alignment_score_reference(
+    member: Mapping[str, Any],
+    theme_members: Sequence[Mapping[str, Any]],
+) -> float:
+    peers = _peer_members_reference(member, theme_members)
     if not peers:
         return 50.0
 
@@ -760,19 +829,56 @@ def _cohort_alignment_score(
     return _clamp(directional_score * 0.65 + peer_strength_score * 0.35)
 
 
-def _peer_resonance_score(
+def _cohort_alignment_score(
     member: Mapping[str, Any],
-    theme_members: list[dict[str, Any]],
+    theme_members: Sequence[Mapping[str, Any]],
+    *,
+    peer_statistics: _ThemePeerStatistics | None = None,
+) -> float:
+    """Measure peer alignment from one theme-level leave-one-out summary."""
+    summary = peer_statistics or _theme_peer_statistics(theme_members)
+    if id(member) not in summary.fast_member_ids:
+        return _cohort_alignment_score_reference(member, theme_members)
+    peer_count = summary.member_count - 1
+    if peer_count <= 0:
+        return 50.0
+
+    stock_ret5 = float(member.get("ret5") or 0.0)
+    stock_ret20 = float(member.get("ret20") or 0.0)
+    peer_nonnegative_ret5 = (
+        summary.nonnegative_ret5_count - int(stock_ret5 >= 0)
+    )
+    peer_nonnegative_ret20 = (
+        summary.nonnegative_ret20_count - int(stock_ret20 >= 0)
+    )
+    ret5_direction_matches = (
+        peer_nonnegative_ret5
+        if stock_ret5 >= 0
+        else peer_count - peer_nonnegative_ret5
+    )
+    ret20_direction_matches = (
+        peer_nonnegative_ret20
+        if stock_ret20 >= 0
+        else peer_count - peer_nonnegative_ret20
+    )
+    directional_score = (
+        (ret5_direction_matches + ret20_direction_matches)
+        / (2 * peer_count)
+        * 100.0
+    )
+    peer_strength_score = (
+        summary.strong_count - int(member.get("strong") is True)
+    ) / peer_count * 100.0
+    return _clamp(directional_score * 0.65 + peer_strength_score * 0.35)
+
+
+def _peer_resonance_score_reference(
+    member: Mapping[str, Any],
+    theme_members: Sequence[Mapping[str, Any]],
     *,
     market_breadth_pct: float,
 ) -> float:
-    """Score independent peer support after excluding the focal stock."""
-    code = str(member.get("code") or "")
-    peers = [
-        peer
-        for peer in theme_members
-        if str(peer.get("code") or "") != code
-    ]
+    peers = _peer_members_reference(member, theme_members)
     if not peers:
         return 0.0
     strong_pct = sum(peer.get("strong") is True for peer in peers) / len(peers) * 100.0
@@ -793,6 +899,64 @@ def _peer_resonance_score(
     ret20_score = _clamp(50.0 + statistics.median(
         float(peer.get("ret20") or 0.0) for peer in peers
     ) * 2.5)
+    return _clamp(
+        strong_pct * 0.35
+        + excess_breadth_score * 0.25
+        + ret5_score * 0.25
+        + ret20_score * 0.15
+    )
+
+
+def _peer_resonance_score(
+    member: Mapping[str, Any],
+    theme_members: Sequence[Mapping[str, Any]],
+    *,
+    market_breadth_pct: float,
+    peer_statistics: _ThemePeerStatistics | None = None,
+) -> float:
+    """Score independent peer support without rebuilding peer arrays."""
+    summary = peer_statistics or _theme_peer_statistics(theme_members)
+    if id(member) not in summary.fast_member_ids:
+        return _peer_resonance_score_reference(
+            member,
+            theme_members,
+            market_breadth_pct=market_breadth_pct,
+        )
+    peer_count = summary.member_count - 1
+    if peer_count <= 0:
+        return 0.0
+    strong_pct = (
+        summary.strong_count - int(member.get("strong") is True)
+    ) / peer_count * 100.0
+    member_quoted = bool(member.get("live_change_available"))
+    quoted_count = summary.quoted_count - int(member_quoted)
+    quoted_up_count = summary.quoted_up_count - int(
+        member_quoted and float(member.get("change_pct") or 0.0) > 0
+    )
+    peer_up_pct = (
+        quoted_up_count / quoted_count * 100.0
+        if quoted_count > 0
+        else market_breadth_pct
+    )
+    excess_breadth_score = _clamp(
+        50.0 + (peer_up_pct - market_breadth_pct) * 1.5
+    )
+    peer_ret5_median = _median_excluding(
+        summary.sorted_ret5,
+        float(member.get("ret5") or 0.0),
+    )
+    peer_ret20_median = _median_excluding(
+        summary.sorted_ret20,
+        float(member.get("ret20") or 0.0),
+    )
+    if peer_ret5_median is None or peer_ret20_median is None:
+        return _peer_resonance_score_reference(
+            member,
+            theme_members,
+            market_breadth_pct=market_breadth_pct,
+        )
+    ret5_score = _clamp(50.0 + peer_ret5_median * 5.0)
+    ret20_score = _clamp(50.0 + peer_ret20_median * 2.5)
     return _clamp(
         strong_pct * 0.35
         + excess_breadth_score * 0.25
@@ -1379,6 +1543,7 @@ def build_niuone_context(
     attribution_inputs: dict[str, list[dict[str, Any]]] = defaultdict(list)
     market_breadth_pct = float(market.get("breadth_score") or 50.0)
     for theme_name, theme_members in grouped.items():
+        peer_statistics = _theme_peer_statistics(theme_members)
         theme_return_factor = _theme_excess_return_factor(
             theme_members,
             market_returns=market_returns,
@@ -1430,7 +1595,11 @@ def build_niuone_context(
                     2,
                 ) if today_rank is not None else 0.0,
                 "cohort_alignment_score": round(
-                    _cohort_alignment_score(member, theme_members),
+                    _cohort_alignment_score(
+                        member,
+                        theme_members,
+                        peer_statistics=peer_statistics,
+                    ),
                     2,
                 ),
                 "peer_resonance_score": round(
@@ -1438,6 +1607,7 @@ def build_niuone_context(
                         member,
                         theme_members,
                         market_breadth_pct=market_breadth_pct,
+                        peer_statistics=peer_statistics,
                     ),
                     2,
                 ),
