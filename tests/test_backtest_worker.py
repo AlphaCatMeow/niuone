@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,7 +12,35 @@ from app.backtesting.worker import run_worker
 from app.core.json_cache import read_json_cache, write_json_cache
 
 
+ROOT = Path(__file__).resolve().parents[1]
+
+
 class BacktestWorkerTests(unittest.TestCase):
+    def test_supported_entrypoint_initializes_legacy_import_paths(self):
+        environment = os.environ.copy()
+        environment.pop("PYTHONPATH", None)
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import runpy; "
+                    "runpy.run_module('app.entrypoints.backtest_worker', "
+                    "run_name='backtest_worker_import_probe'); "
+                    "from app.screening.multi_strategy import "
+                    "load_a_share_code_pool; "
+                    "assert callable(load_a_share_code_pool)"
+                ),
+            ],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
     def test_worker_writes_progress_and_result_through_private_files(self):
         with tempfile.TemporaryDirectory(prefix="niuone-backtest-worker-") as tmp:
             root = Path(tmp)
@@ -72,7 +103,9 @@ class BacktestWorkerTests(unittest.TestCase):
                     cache_dir=root / "cache",
                 )
             error = read_json_cache(root / "error.json")["error"]
+            error_type = read_json_cache(root / "error.json")["error_type"]
             self.assertEqual(exit_code, 1)
+            self.assertEqual(error_type, "RuntimeError")
             self.assertIn("<url>", error)
             self.assertNotIn("secret.example", error)
 

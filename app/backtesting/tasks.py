@@ -92,6 +92,17 @@ class _BacktestCancelled(RuntimeError):
     """Stop a worker cooperatively without converting cancellation to failure."""
 
 
+def _missing_requested_module(exc: ImportError, module_name: str) -> bool:
+    """Distinguish a missing compatibility path from an internal import bug."""
+    if not isinstance(exc, ModuleNotFoundError):
+        return False
+    parts = module_name.split(".")
+    requested_names = {
+        ".".join(parts[:index]) for index in range(1, len(parts) + 1)
+    }
+    return str(exc.name or "") in requested_names
+
+
 def default_backtest_state_dir() -> Path:
     """Return the private runtime directory for durable backtest task state."""
     return get_dashboard_home(PROJECT_ROOT) / "backtesting"
@@ -238,7 +249,9 @@ def load_strategy_universe(
             selected_stock_universe,
             stock_in_universe,
         )
-    except ImportError:  # pragma: no cover - legacy top-level import path
+    except ImportError as exc:  # pragma: no cover - legacy top-level import path
+        if not _missing_requested_module(exc, "app.screening.stock_universe"):
+            raise
         from screening.stock_universe import (
             FULL_SUPPORTED_NON_ST_UNIVERSE,
             STOCK_UNIVERSE_ENV,
@@ -262,10 +275,20 @@ def load_strategy_universe(
             return tuple(pool_loader(scope))
         try:
             from app.screening.multi_strategy import load_a_share_code_pool
-        except ImportError:
+        except ImportError as exc:
+            if not _missing_requested_module(
+                exc,
+                "app.screening.multi_strategy",
+            ):
+                raise
             try:  # pragma: no cover - active production compatibility path
                 from screening.multi_strategy import load_a_share_code_pool
             except ImportError as exc:
+                if not _missing_requested_module(
+                    exc,
+                    "screening.multi_strategy",
+                ):
+                    raise
                 raise BacktestTaskError(
                     "A 股列表接口不可用，暂时无法构建回测候选范围"
                 ) from exc
@@ -536,6 +559,19 @@ def run_strategy_backtest_request(
 def _safe_error(exc: Exception) -> str:
     text = re.sub(r"https?://\S+", "<url>", str(exc or "")).strip()
     return f"{type(exc).__name__}: {text[:400]}" if text else type(exc).__name__
+
+
+def _worker_error_message(payload: Mapping[str, Any], returncode: int) -> str:
+    error_text = str(payload.get("error") or "").strip()
+    error_type = str(payload.get("error_type") or "").strip()
+    if not error_text:
+        return f"回测子进程异常退出（{returncode}）"
+    duplicated_prefix = f"{error_type}: " if error_type else ""
+    if error_type == "BacktestTaskError" and error_text.startswith(
+        duplicated_prefix
+    ):
+        return error_text[len(duplicated_prefix):]
+    return error_text
 
 
 class BacktestTaskManager:
@@ -838,7 +874,7 @@ class BacktestTaskManager:
             if process.returncode != 0:
                 error = read_json_cache(error_path) or {}
                 raise BacktestTaskError(
-                    str(error.get("error") or f"回测子进程异常退出（{process.returncode}）")
+                    _worker_error_message(error, int(process.returncode or 1))
                 )
             payload = read_json_cache(result_path)
             result = payload.get("result") if isinstance(payload, dict) else None

@@ -70,7 +70,10 @@ def run_worker(
         write_json_cache(result_path, {"result": result})
         return 0
     except Exception as exc:
-        write_json_cache(error_path, {"error": _safe_error(exc)})
+        write_json_cache(error_path, {
+            "error_type": type(exc).__name__,
+            "error": _safe_error(exc),
+        })
         return 1
 
 

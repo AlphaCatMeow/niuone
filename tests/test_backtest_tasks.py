@@ -11,6 +11,8 @@ from unittest.mock import Mock, patch
 
 from app.backtesting.tasks import (
     _selector_for_request,
+    _missing_requested_module,
+    _worker_error_message,
     BACKTEST_STATE_SCHEMA_VERSION,
     BacktestTaskError,
     BacktestTaskManager,
@@ -23,6 +25,41 @@ from app.backtesting.tasks import (
 
 
 class BacktestTaskTests(unittest.TestCase):
+    def test_worker_error_message_removes_duplicate_task_prefix(self):
+        self.assertEqual(
+            _worker_error_message(
+                {
+                    "error_type": "BacktestTaskError",
+                    "error": "BacktestTaskError: 候选范围构建失败",
+                },
+                1,
+            ),
+            "候选范围构建失败",
+        )
+        self.assertEqual(
+            _worker_error_message(
+                {
+                    "error_type": "ModuleNotFoundError",
+                    "error": "ModuleNotFoundError: No module named 'core'",
+                },
+                1,
+            ),
+            "ModuleNotFoundError: No module named 'core'",
+        )
+
+    def test_compatibility_fallback_does_not_hide_internal_import_errors(self):
+        missing_app = ModuleNotFoundError("missing app", name="app")
+        missing_dependency = ModuleNotFoundError("missing core", name="core")
+
+        self.assertTrue(_missing_requested_module(
+            missing_app,
+            "app.screening.multi_strategy",
+        ))
+        self.assertFalse(_missing_requested_module(
+            missing_dependency,
+            "app.screening.multi_strategy",
+        ))
+
     def test_niuone_backtest_caps_reversal_without_capping_mature_paths(self):
         eligible = tuple(f"sh{600000 + index:06d}" for index in range(8))
         selector = _selector_for_request(
