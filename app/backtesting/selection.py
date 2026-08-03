@@ -20,17 +20,21 @@ from typing import Any, Protocol
 
 try:
     from app.strategies.scoring import (
+        NIUONE_MIN_ROWS,
         STRATEGY_SCORERS,
         build_niuone_context,
         build_sector_tide_context,
         enrich_rows,
+        invoke_strategy_scorer,
     )
 except ImportError:  # pragma: no cover - legacy top-level import path
     from strategies.scoring import (
+        NIUONE_MIN_ROWS,
         STRATEGY_SCORERS,
         build_niuone_context,
         build_sector_tide_context,
         enrich_rows,
+        invoke_strategy_scorer,
     )
 
 try:
@@ -51,6 +55,7 @@ except ImportError:  # pragma: no cover - legacy top-level import path
 
 TRADING_DAYS_PER_YEAR = 252
 BUILTIN_STRATEGY_HISTORY_LIMIT = 120
+NIUONE_CONTEXT_WARMUP_SESSIONS = 60
 DIAGNOSTIC_SCORE_THRESHOLD_OFFSETS = (-1.0, -0.5, -0.25, 0.0, 0.25, 0.5, 1.0)
 
 
@@ -895,7 +900,18 @@ def _first_selector_session(
     if not signal_start_date or warmup is None:
         return 0
     signal_index = bisect_left(trading_dates, signal_start_date)
-    return max(0, signal_index - max(0, int(warmup)))
+    first_session = max(0, signal_index - max(0, int(warmup)))
+    earliest_state_session = getattr(
+        selector,
+        "backtest_earliest_state_session",
+        None,
+    )
+    if earliest_state_session is not None:
+        first_session = min(
+            first_session,
+            max(0, int(earliest_state_session)),
+        )
+    return first_session
 
 
 def build_selection_replay_tape(
@@ -2522,16 +2538,102 @@ def run_selection_backtest(
     )
 
 
+class _StrategyRowsView(Sequence[Mapping[str, Any]]):
+    """Read-only tail window with an optional one-row metadata overlay."""
+
+    __slots__ = ("_values", "_start", "_stop", "_overlay_index", "_overlay")
+
+    def __init__(
+        self,
+        values: Sequence[Mapping[str, Any]],
+        *,
+        start: int = 0,
+        stop: int | None = None,
+        overlay_index: int | None = None,
+        overlay: Mapping[str, Any] | None = None,
+    ) -> None:
+        resolved_stop = len(values) if stop is None else int(stop)
+        self._values = values
+        self._start = max(0, min(len(values), int(start)))
+        self._stop = max(self._start, min(len(values), resolved_stop))
+        self._overlay_index = overlay_index
+        self._overlay = overlay
+
+    def __len__(self) -> int:
+        return self._stop - self._start
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            start, stop, step = index.indices(len(self))
+            if step == 1:
+                return type(self)(
+                    self._values,
+                    start=self._start + start,
+                    stop=self._start + stop,
+                    overlay_index=self._overlay_index,
+                    overlay=self._overlay,
+                )
+            return tuple(self[position] for position in range(start, stop, step))
+        resolved = int(index)
+        if resolved < 0:
+            resolved += len(self)
+        if resolved < 0 or resolved >= len(self):
+            raise IndexError(index)
+        absolute = self._start + resolved
+        if absolute == self._overlay_index and self._overlay is not None:
+            return self._overlay
+        return self._values[absolute]
+
+    def __iter__(self):
+        for absolute in range(self._start, self._stop):
+            if absolute == self._overlay_index and self._overlay is not None:
+                yield self._overlay
+            else:
+                yield self._values[absolute]
+
+    def with_latest(self, values: Mapping[str, Any]) -> _StrategyRowsView:
+        if not self:
+            return self
+        latest = dict(self[-1])
+        latest.update(values)
+        return type(self)(
+            self._values,
+            start=self._start,
+            stop=self._stop,
+            overlay_index=self._stop - 1,
+            overlay=MappingProxyType(latest),
+        )
+
+
+def _strategy_rows_with_latest_values(
+    rows: Sequence[Mapping[str, Any]],
+    values: Mapping[str, Any],
+) -> Sequence[Mapping[str, Any]]:
+    if not rows:
+        return rows
+    if isinstance(rows, _StrategyRowsView):
+        return rows.with_latest(values)
+    copied = list(rows)
+    latest = dict(copied[-1])
+    latest.update(values)
+    copied[-1] = latest
+    return copied
+
+
 def _strategy_rows_at_close(
     context: SelectionContext,
     symbol: str,
     *,
     history_limit: int | None,
-) -> list[Mapping[str, Any]]:
+) -> Sequence[Mapping[str, Any]]:
     prepared = context.strategy_history(symbol)
     if prepared:
-        visible = prepared[-history_limit:] if history_limit is not None else prepared[:]
-        return visible if isinstance(visible, list) else list(visible)
+        if history_limit is not None:
+            return _StrategyRowsView(
+                prepared,
+                start=max(0, len(prepared) - history_limit),
+            )
+        return list(prepared)
     rows: list[dict[str, Any]] = [
         bar.as_strategy_row() for bar in context.history(symbol)
     ]
@@ -2577,10 +2679,19 @@ class RegisteredScorerSelector:
         self.max_signals_per_strategy_per_session = MappingProxyType(strategy_limits)
         self.context_provider = context_provider
         self.uses_prepared_strategy_rows = True
-        # Cross-sectional providers carry prior market/theme state, so they must
-        # still observe the full warmup range. Stateless scorers can start at
-        # the first requested signal date without changing results.
-        self.backtest_warmup_sessions = None if context_provider is not None else 0
+        # Technical indicators retain the full downloaded history. Stateful
+        # providers may declare a smaller bounded replay window for their own
+        # market/theme state; unknown providers keep the legacy full warmup.
+        self.backtest_warmup_sessions = (
+            getattr(context_provider, "backtest_warmup_sessions", None)
+            if context_provider is not None
+            else 0
+        )
+        self.backtest_earliest_state_session = (
+            getattr(context_provider, "backtest_earliest_state_session", None)
+            if context_provider is not None
+            else None
+        )
         self._trusted_scorers = scorers is None
         self._history_limit = (
             BUILTIN_STRATEGY_HISTORY_LIMIT if self._trusted_scorers else None
@@ -3060,19 +3171,21 @@ class RegisteredScorerSelector:
             )
             if len(rows) < 2:
                 continue
-            latest = dict(rows[-1])
-            rows[-1] = latest
-            latest["symbol_code"] = symbol[-6:]
-            latest["stock_name"] = current_bar.name
-            latest["industry"] = current_bar.industry
-            latest["quote_amount"] = current_bar.amount
-            latest["quote_turnover"] = current_bar.turnover
+            rows = _strategy_rows_with_latest_values(rows, {
+                "symbol_code": symbol[-6:],
+                "stock_name": current_bar.name,
+                "industry": current_bar.industry,
+                "quote_amount": current_bar.amount,
+                "quote_turnover": current_bar.turnover,
+            })
+            shared_inputs: dict[Callable[..., Any], Any] = {}
             for strategy_id, scorer in self.scorers.items():
                 isolated = rows if self._trusted_scorers else [dict(row) for row in rows]
-                scored = (
-                    scorer(isolated, shared_context)
-                    if getattr(scorer, "requires_context", False)
-                    else scorer(isolated)
+                scored = invoke_strategy_scorer(
+                    scorer,
+                    isolated,
+                    shared_context,
+                    shared_inputs=shared_inputs,
                 )
                 if isinstance(scored, Mapping):
                     self._latest_scored_by_symbol_strategy[(symbol, strategy_id)] = (
@@ -3128,8 +3241,89 @@ class RegisteredScorerSelector:
         return selections
 
 
+_NIUONE_PREVIOUS_THEME_FIELDS = (
+    "score",
+    "raw_state",
+    "state",
+    "niuone_lifecycle_stage",
+    "confirmation_count",
+    "intraday_confirmation_count",
+    "state_streak",
+    "as_of_date",
+    "cross_day_persistent",
+    "cross_day_confirmed",
+    "mainline_confirmed",
+    "core_stock_codes",
+    "confirmation_component",
+)
+_NIUONE_PREVIOUS_ATTRIBUTION_FIELDS = (
+    "theme",
+    "historical_prior_score",
+    "attribution_score",
+    "observation_count",
+    "wave_count",
+)
+
+
+def _compact_niuone_previous_context(
+    context: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Keep only fields read by the next historical NiuOne close."""
+    market = context.get("market") if isinstance(context.get("market"), Mapping) else {}
+    raw_themes = (
+        context.get("themes")
+        if isinstance(context.get("themes"), Mapping)
+        else {}
+    )
+    raw_stocks = (
+        context.get("stocks")
+        if isinstance(context.get("stocks"), Mapping)
+        else {}
+    )
+    themes = {
+        str(theme): {
+            field_name: values[field_name]
+            for field_name in _NIUONE_PREVIOUS_THEME_FIELDS
+            if field_name in values
+        }
+        for theme, values in raw_themes.items()
+        if isinstance(values, Mapping)
+    }
+    stocks: dict[str, dict[str, Any]] = {}
+    for code, values in raw_stocks.items():
+        if not isinstance(values, Mapping):
+            continue
+        attributions = [
+            {
+                field_name: item[field_name]
+                for field_name in _NIUONE_PREVIOUS_ATTRIBUTION_FIELDS
+                if field_name in item
+            }
+            for item in (values.get("theme_attributions") or ())
+            if isinstance(item, Mapping)
+        ]
+        if attributions:
+            stocks[str(code)] = {"theme_attributions": attributions}
+    return {
+        "version": context.get("version"),
+        "as_of_date": str(context.get("as_of_date") or "")[:10],
+        "market": {
+            field_name: market[field_name]
+            for field_name in ("raw_state", "state", "confirmation_count")
+            if field_name in market
+        },
+        "themes": themes,
+        "stocks": stocks,
+    }
+
+
 class NiuOneHistoricalContextProvider:
     """Rebuild NiuOne's cross-sectional context at each historical close."""
+
+    backtest_warmup_sessions = NIUONE_CONTEXT_WARMUP_SESSIONS
+    # Before this zero-based session index build_niuone_context cannot emit a
+    # member, so skipping those closes is exactly equivalent to replaying them.
+    backtest_earliest_state_session = NIUONE_MIN_ROWS - 1
 
     def __init__(self, *, flow_provider: HistoricalFlowProvider | None = None) -> None:
         self.flow_provider = flow_provider
@@ -3194,14 +3388,12 @@ class NiuOneHistoricalContextProvider:
             )
             if not rows:
                 continue
-            latest = dict(rows[-1])
-            rows[-1] = latest
             previous_close = rows[-2].get("close") if len(rows) >= 2 else None
             change_pct = (
                 (current_bar.close / float(previous_close) - 1.0) * 100.0
                 if previous_close is not None and float(previous_close) > 0 else 0.0
             )
-            latest.update({
+            rows = _strategy_rows_with_latest_values(rows, {
                 "symbol_code": symbol[-6:],
                 "stock_name": current_bar.name,
                 "industry": current_bar.industry,
@@ -3209,6 +3401,7 @@ class NiuOneHistoricalContextProvider:
                 "quote_turnover": current_bar.turnover,
                 "change_pct": change_pct,
             })
+            latest = rows[-1]
             prepared_items.append({
                 "code": symbol[-6:],
                 "name": current_bar.name,
@@ -3241,7 +3434,7 @@ class NiuOneHistoricalContextProvider:
             for theme, values in themes.items()
             if isinstance(values, Mapping)
         })
-        self._previous_context = dict(built)
+        self._previous_context = _compact_niuone_previous_context(built)
         self._previous_trading_day = context.date
         return built
 
@@ -3273,8 +3466,6 @@ class SectorTideHistoricalContextProvider:
             )
             if not rows:
                 continue
-            latest = dict(rows[-1])
-            rows[-1] = latest
             previous_close = rows[-2].get("close") if len(rows) >= 2 else None
             change_pct = (
                 (current_bar.close / float(previous_close) - 1.0) * 100.0
@@ -3290,7 +3481,7 @@ class SectorTideHistoricalContextProvider:
                 limit_up_count += 1
             if limit_down is not None and current_bar.close <= limit_down + 1e-9:
                 limit_down_count += 1
-            latest.update({
+            rows = _strategy_rows_with_latest_values(rows, {
                 "symbol_code": symbol[-6:],
                 "stock_name": current_bar.name,
                 "industry": current_bar.industry,

@@ -21,7 +21,10 @@ os.environ["DASHBOARD_HOME"] = _TEST_HOME.name
 
 import niuniu_practice_trader as trader  # noqa: E402
 import backtesting.niuone_exits as backtest_niuone_exits  # noqa: E402
-from backtesting.selection import SelectionCostModel  # noqa: E402
+from backtesting.selection import (  # noqa: E402
+    SelectionCostModel,
+    _compact_niuone_previous_context,
+)
 from strategies.exits import (  # noqa: E402
     NIUONE_BREAK_EVEN_AFTER_PARTIAL,
     NIUONE_CLIMAX_RUNNER_ENABLED,
@@ -61,6 +64,7 @@ from strategies.scoring import (  # noqa: E402
     enrich_rows,
     score_niu_emerging,
     score_niu_leader,
+    score_niu_pullback,
     score_niu_reversal_probe,
 )
 from strategies.scoring.common import with_strategy_profile  # noqa: E402
@@ -75,6 +79,7 @@ from strategies.scoring.niuone import (  # noqa: E402
     _daily_v_reversal_metrics,
     _peer_resonance_score,
     _peer_resonance_score_reference,
+    _shared_entry_metrics,
     _theme_peer_statistics,
 )
 from strategies.selection import candidate_is_trade_ready, select_trade_candidates  # noqa: E402
@@ -1069,6 +1074,108 @@ class NiuOneStrategyTests(unittest.TestCase):
             )
 
         self.assertEqual(optimized, reference)
+
+    def test_shared_niuone_entry_metrics_preserve_all_four_scorer_outputs(self):
+        prepared = self._prepared_market()
+        context = build_niuone_context(
+            prepared,
+            as_of_date="2026-08-04",
+        )
+        rows = prepared[0]["rows"]
+        scorers = (
+            score_niu_leader,
+            score_niu_pullback,
+            score_niu_emerging,
+            score_niu_reversal_probe,
+        )
+        baseline = [scorer(rows, context) for scorer in scorers]
+        shared = _shared_entry_metrics(rows)
+        optimized = [
+            scorer(rows, context, shared_metrics=shared)
+            for scorer in scorers
+        ]
+
+        self.assertIsNotNone(shared)
+        self.assertEqual(optimized, baseline)
+
+    def test_multi_strategy_engine_builds_niuone_shared_metrics_once(self):
+        prepared = self._prepared_market()
+        context = build_niuone_context(prepared, as_of_date="2026-08-04")
+        rows = prepared[0]["rows"]
+        scorers = {
+            "niu_leader": score_niu_leader,
+            "niu_pullback": score_niu_pullback,
+            "niu_emerging": score_niu_emerging,
+            "niu_reversal_probe": score_niu_reversal_probe,
+        }
+        expected = {
+            strategy_id: scorer(rows, context)
+            for strategy_id, scorer in scorers.items()
+        }
+        calls = 0
+
+        def counted_builder(values):
+            nonlocal calls
+            calls += 1
+            return _shared_entry_metrics(values)
+
+        original_builders = {
+            scorer: scorer.shared_input_builder
+            for scorer in scorers.values()
+        }
+        try:
+            for scorer in scorers.values():
+                scorer.shared_input_builder = counted_builder
+            result = analyze_enriched_rows(rows, scorers, context)
+        finally:
+            for scorer, builder in original_builders.items():
+                scorer.shared_input_builder = builder
+
+        self.assertIsNotNone(result)
+        self.assertEqual(calls, 1)
+        self.assertEqual(result["strategies"], expected)
+
+    def test_compact_previous_context_preserves_next_close_output(self):
+        prepared = self._prepared_market()
+        market_snapshot = {
+            "up": 120,
+            "down": 30,
+            "median_change_pct": 0.8,
+            "limit_up": 12,
+            "limit_down": 1,
+            "core_index_count": 3,
+            "index_below_ma20_count": 0,
+        }
+        first = build_niuone_context(
+            prepared,
+            market_snapshot=market_snapshot,
+            as_of_date="2026-08-03",
+        )
+        full = build_niuone_context(
+            prepared,
+            market_snapshot=market_snapshot,
+            previous_context=first,
+            as_of_date="2026-08-04",
+            previous_trading_day="2026-08-03",
+        )
+        compact_state = _compact_niuone_previous_context(first)
+        compact = build_niuone_context(
+            prepared,
+            market_snapshot=market_snapshot,
+            previous_context=compact_state,
+            as_of_date="2026-08-04",
+            previous_trading_day="2026-08-03",
+        )
+
+        self.assertNotIn(
+            "strong_stocks",
+            compact_state["themes"]["半导体"],
+        )
+        self.assertNotIn(
+            "theme_profiles",
+            compact_state["stocks"]["600000"],
+        )
+        self.assertEqual(compact, full)
 
     def test_weak_multi_concept_candidates_keep_unattributed_mass(self):
         profiles = _apply_theme_attributions(

@@ -2533,6 +2533,143 @@ class StrategySelectionBacktestingTests(unittest.TestCase):
         self.assertEqual(normalization_progress, [(0, 1), (1, 1)])
         self.assertEqual(preparation_progress, [(0, 1), (1, 1)])
 
+    def test_registered_selector_reuses_declared_scorer_input_once_per_stock(self):
+        builder_calls = []
+        observed_inputs = []
+
+        def builder(rows):
+            builder_calls.append(rows[-1]["date"])
+            return {"date": rows[-1]["date"]}
+
+        def scorer(rows, *, prepared):
+            observed_inputs.append(prepared)
+            return {
+                "score": 9.0,
+                "entry_threshold": 8.0,
+                "hard_blockers": [],
+                "actionable": True,
+            }
+
+        scorer.shared_input_builder = builder
+        scorer.shared_input_keyword = "prepared"
+        result = run_selection_backtest(
+            {"600000": [
+                daily_bar("2026-01-05", 10.0),
+                daily_bar("2026-01-06", 10.1),
+                daily_bar("2026-01-07", 10.2),
+            ]},
+            RegisteredScorerSelector(
+                ["shared_a", "shared_b"],
+                scorers={"shared_a": scorer, "shared_b": scorer},
+            ),
+            config=SelectionBacktestConfig(
+                holding_sessions=(1,),
+                signal_start_date="2026-01-06",
+                signal_end_date="2026-01-06",
+                price_limit_resolver=None,
+            ),
+        )
+
+        self.assertEqual(builder_calls, ["2026-01-06"])
+        self.assertEqual(len(observed_inputs), 2)
+        self.assertIs(observed_inputs[0], observed_inputs[1])
+        self.assertEqual(result.statistics["signal_count"], 1)
+
+    def test_prepared_strategy_tail_is_a_read_only_overlay_view(self):
+        prepared = tuple(
+            {"date": f"session-{index}", "close": float(index)}
+            for index in range(200)
+        )
+        context = selection_module.SelectionContext(
+            date="session-199",
+            session_index=199,
+            bars={},
+            histories={},
+            strategy_rows={"600000": prepared},
+        )
+
+        rows = selection_module._strategy_rows_at_close(
+            context,
+            "600000",
+            history_limit=120,
+        )
+        overlaid = selection_module._strategy_rows_with_latest_values(
+            rows,
+            {"symbol_code": "600000"},
+        )
+
+        self.assertIsInstance(rows, selection_module._StrategyRowsView)
+        self.assertIsInstance(rows[-20:-1], selection_module._StrategyRowsView)
+        self.assertEqual(len(rows), 120)
+        self.assertIs(rows[0], prepared[80])
+        self.assertNotIn("symbol_code", prepared[-1])
+        self.assertEqual(overlaid[-1]["symbol_code"], "600000")
+        with self.assertRaises(TypeError):
+            rows[-1] = {}
+
+    def test_niuone_bounded_state_warmup_matches_full_valid_replay(self):
+        start = date(2026, 1, 1)
+        dates = [
+            (start + timedelta(days=index)).isoformat()
+            for index in range(110)
+        ]
+        bars = {
+            f"60000{member}": [
+                daily_bar(
+                    trading_date,
+                    10.0 + index * (0.03 + member * 0.002),
+                    10.02 + index * (0.03 + member * 0.002),
+                    high=10.08 + index * (0.03 + member * 0.002),
+                    low=9.96 + index * (0.03 + member * 0.002),
+                    volume=1_000 + index * 10,
+                    amount=1_000_000_000 + member * 100_000_000,
+                    industry="半导体",
+                    themes=["半导体"],
+                    name=f"测试{member}",
+                )
+                for index, trading_date in enumerate(dates)
+            ]
+            for member in range(4)
+        }
+
+        class CountingProvider(NiuOneHistoricalContextProvider):
+            def __init__(self):
+                super().__init__()
+                self.calls = 0
+
+            def __call__(self, context):
+                self.calls += 1
+                return super().__call__(context)
+
+        class FullWarmupProvider(CountingProvider):
+            backtest_warmup_sessions = None
+
+        def run(provider):
+            result = run_selection_backtest(
+                bars,
+                RegisteredScorerSelector(
+                    ["niu_leader", "niu_pullback", "niu_emerging", "niu_reversal_probe"],
+                    context_provider=provider,
+                    eligible_symbols=bars,
+                ),
+                config=SelectionBacktestConfig(
+                    holding_sessions=(1,),
+                    signal_start_date=dates[100],
+                    signal_end_date=dates[100],
+                    price_limit_resolver=None,
+                ),
+            )
+            return result.to_dict()
+
+        bounded_provider = CountingProvider()
+        full_provider = FullWarmupProvider()
+        bounded = run(bounded_provider)
+        full = run(full_provider)
+
+        self.assertEqual(bounded, full)
+        self.assertEqual(bounded_provider.calls, 61)
+        self.assertEqual(full_provider.calls, 101)
+
     def test_stateful_context_warms_up_without_running_discarded_scorers(self):
         dates = [f"2026-01-0{index}" for index in range(1, 5)]
         bars = {"600000": [

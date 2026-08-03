@@ -7,6 +7,7 @@ import statistics
 from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
 from ..niuone_risk import (
@@ -178,7 +179,7 @@ def _percentile_from_sorted(value: float, clean: list[float]) -> float:
 
 
 def _return_pct(
-    rows: list[dict[str, Any]],
+    rows: Sequence[Mapping[str, Any]],
     lookback: int,
     *,
     current_close: float | None = None,
@@ -193,7 +194,7 @@ def _return_pct(
 
 
 def _daily_return_path(
-    rows: list[dict[str, Any]],
+    rows: Sequence[Mapping[str, Any]],
     *,
     current_close: float | None = None,
 ) -> dict[str, float]:
@@ -222,7 +223,10 @@ def _daily_return_path(
 NIUONE_ATR_LOOKBACK = 14
 
 
-def _atr(rows: list[dict[str, Any]], lookback: int = NIUONE_ATR_LOOKBACK) -> float | None:
+def _atr(
+    rows: Sequence[Mapping[str, Any]],
+    lookback: int = NIUONE_ATR_LOOKBACK,
+) -> float | None:
     ranges: list[float] = []
     for index in range(max(1, len(rows) - lookback), len(rows)):
         high = safe_float(rows[index].get("high"))
@@ -234,7 +238,7 @@ def _atr(rows: list[dict[str, Any]], lookback: int = NIUONE_ATR_LOOKBACK) -> flo
 
 
 def _daily_v_reversal_metrics(
-    rows: list[dict[str, Any]],
+    rows: Sequence[Mapping[str, Any]],
     *,
     current_close: float | None = None,
 ) -> dict[str, Any]:
@@ -340,7 +344,13 @@ def _daily_v_reversal_metrics(
 
 
 def _member_metrics(item: dict[str, Any]) -> dict[str, Any] | None:
-    rows = item.get("rows") if isinstance(item.get("rows"), list) else []
+    raw_rows = item.get("rows")
+    rows = (
+        raw_rows
+        if isinstance(raw_rows, Sequence)
+        and not isinstance(raw_rows, (str, bytes, bytearray))
+        else ()
+    )
     if len(rows) < NIUONE_MIN_ROWS:
         return None
     latest = rows[-1]
@@ -1448,7 +1458,13 @@ def build_niuone_context(
     insufficient_history_count = 0
     invalid_metrics_count = 0
     for item in prepared_items:
-        rows = item.get("rows") if isinstance(item.get("rows"), list) else []
+        raw_rows = item.get("rows")
+        rows = (
+            raw_rows
+            if isinstance(raw_rows, Sequence)
+            and not isinstance(raw_rows, (str, bytes, bytearray))
+            else ()
+        )
         if len(rows) < NIUONE_MIN_ROWS:
             insufficient_history_count += 1
             continue
@@ -2377,14 +2393,137 @@ def _action_theme_profile(
     return routed[0]
 
 
+def _shared_entry_metrics(
+    rows: Sequence[Mapping[str, Any]],
+) -> Mapping[str, Any] | None:
+    """Compute price/indicator inputs shared by all four NiuOne actions."""
+    if len(rows) < NIUONE_MIN_ROWS:
+        return None
+    latest = rows[-1]
+    close = safe_float(latest.get("quote_price"))
+    if close is None or close <= 0:
+        close = safe_float(latest.get("close"))
+    ema20 = safe_float(latest.get("ema20"))
+    ema50 = safe_float(latest.get("ema50"))
+    atr = _atr(rows)
+    if (
+        close is None
+        or close <= 0
+        or ema20 is None
+        or ema50 is None
+        or atr is None
+        or atr <= 0
+    ):
+        return None
+    prior_ema20 = safe_float(rows[-2].get("ema20"))
+    prior_close = safe_float(rows[-2].get("close")) or close
+    prior_highs = [safe_float(row.get("high")) for row in rows[-21:-1]]
+    highs = [value for value in prior_highs if value is not None and value > 0]
+    breakout_level = max(highs) if highs else None
+    current_volume = safe_float(latest.get("volume")) or 0.0
+    prior_volumes = [safe_float(row.get("volume")) for row in rows[-21:-1]]
+    volumes = [value for value in prior_volumes if value is not None and value > 0]
+    volume_ratio = current_volume / _mean(volumes) if volumes else 1.0
+    live_change = safe_float(latest.get("quote_change_pct"))
+    change_pct = (
+        live_change
+        if live_change is not None
+        else (safe_float(latest.get("change_pct")) or 0.0)
+    )
+    breakout = bool(
+        breakout_level is not None
+        and close >= breakout_level * 1.002
+        and 1.15 <= volume_ratio <= 2.5
+    )
+    recent_lows = [safe_float(row.get("low")) for row in rows[-4:]]
+    lows = [value for value in recent_lows if value is not None and value > 0]
+    pullback = bool(
+        lows
+        and min(lows) <= ema20 * 1.02
+        and close >= ema20
+        and volume_ratio <= 1.15
+        and change_pct >= -0.8
+    )
+    reclaim = bool(
+        prior_close <= ema20 * 1.01
+        and close > ema20
+        and change_pct > 0
+        and volume_ratio >= 1.0
+    )
+    trend_aligned = bool(
+        close >= ema20 >= ema50
+        and (prior_ema20 is None or ema20 >= prior_ema20)
+    )
+    previous_close = safe_float(rows[-2].get("close"))
+    reclaim_previous_close = bool(
+        previous_close is not None
+        and previous_close > 0
+        and close > previous_close
+        and change_pct > 0
+    )
+    structure_low = min(lows) if lows else close - atr * 1.5
+    stop_distance = structural_stop_distance_pct(close, structure_low)
+    stop_atr = (close - structure_low) / atr
+    gap_buffer = downside_gap_buffer_pct(rows, atr=atr, close=close)
+    effective_distance = effective_loss_distance_pct(
+        close,
+        structure_low,
+        gap_buffer_pct=gap_buffer,
+        execution_buffer_pct=SECTOR_TIDE_EXECUTION_BUFFER_PCT,
+    )
+    extension_atr = (close - ema20) / atr
+    breakout_extension_atr = (
+        max(0.0, (close - breakout_level) / atr)
+        if breakout_level is not None
+        else None
+    )
+    breakout_stop_price = (
+        breakout_level - atr * 0.5
+        if breakout_level is not None and breakout_level - atr * 0.5 > 0
+        else None
+    )
+    return MappingProxyType({
+        "close": close,
+        "ema20": ema20,
+        "ema50": ema50,
+        "atr": atr,
+        "atr_period": NIUONE_ATR_LOOKBACK,
+        "atr20": atr,
+        "distance_pct": (close / ema20 - 1) * 100,
+        "extension_atr": extension_atr,
+        "breakout_level": breakout_level,
+        "breakout_extension_atr": breakout_extension_atr,
+        "breakout_stop_price": breakout_stop_price,
+        "volume_ratio": volume_ratio,
+        "change_pct": change_pct,
+        "breakout": breakout,
+        "pullback": pullback,
+        "reclaim": reclaim,
+        "row_intraday_low": safe_float(latest.get("low")),
+        "reclaim_previous_close": reclaim_previous_close,
+        **_daily_v_reversal_metrics(rows, current_close=close),
+        "trend_aligned": trend_aligned,
+        "stop_price": structure_low,
+        "stop_distance_pct": stop_distance,
+        "stop_atr": stop_atr,
+        "gap_buffer_pct": gap_buffer,
+        "effective_loss_distance_pct": effective_distance,
+    })
+
+
 def _entry_metrics(
-    rows: list[dict[str, Any]],
+    rows: Sequence[Mapping[str, Any]],
     context: dict[str, Any],
     strategy_name: str,
+    *,
+    shared_metrics: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     if len(rows) < NIUONE_MIN_ROWS or not isinstance(context, dict):
         return None
     latest = rows[-1]
+    common = shared_metrics if shared_metrics is not None else _shared_entry_metrics(rows)
+    if not isinstance(common, Mapping):
+        return None
     code = _stock_code(latest.get("symbol_code"))
     source_stock = (context.get("stocks") or {}).get(code)
     routed = (
@@ -2412,36 +2551,9 @@ def _entry_metrics(
     market = context.get("market") if isinstance(context.get("market"), dict) else {}
     if not isinstance(theme, dict) or not isinstance(stock, dict):
         return None
-    close = safe_float(latest.get("quote_price"))
-    if close is None or close <= 0:
-        close = safe_float(latest.get("close"))
-    ema20 = safe_float(latest.get("ema20"))
-    ema50 = safe_float(latest.get("ema50"))
-    atr = _atr(rows)
-    if close is None or close <= 0 or ema20 is None or ema50 is None or atr is None or atr <= 0:
-        return None
-    prior_ema20 = safe_float(rows[-2].get("ema20"))
-    prior_close = safe_float(rows[-2].get("close")) or close
-    prior_highs = [safe_float(row.get("high")) for row in rows[-21:-1]]
-    highs = [value for value in prior_highs if value is not None and value > 0]
-    breakout_level = max(highs) if highs else None
-    current_volume = safe_float(latest.get("volume")) or 0.0
-    prior_volumes = [safe_float(row.get("volume")) for row in rows[-21:-1]]
-    volumes = [value for value in prior_volumes if value is not None and value > 0]
-    volume_ratio = current_volume / _mean(volumes) if volumes else 1.0
-    live_change = safe_float(latest.get("quote_change_pct"))
-    change_pct = live_change if live_change is not None else (safe_float(latest.get("change_pct")) or 0.0)
-    breakout = bool(
-        breakout_level is not None
-        and close >= breakout_level * 1.002
-        and 1.15 <= volume_ratio <= 2.5
-    )
-    recent_lows = [safe_float(row.get("low")) for row in rows[-4:]]
-    lows = [value for value in recent_lows if value is not None and value > 0]
-    pullback = bool(lows and min(lows) <= ema20 * 1.02 and close >= ema20 and volume_ratio <= 1.15 and change_pct >= -0.8)
-    reclaim = bool(prior_close <= ema20 * 1.01 and close > ema20 and change_pct > 0 and volume_ratio >= 1.0)
-    trend_aligned = bool(close >= ema20 >= ema50 and (prior_ema20 is None or ema20 >= prior_ema20))
-    intraday_low = safe_float(latest.get("low"))
+    close = float(common["close"])
+    atr = float(common["atr"])
+    intraday_low = safe_float(common.get("row_intraday_low"))
     if intraday_low is None or intraday_low <= 0:
         intraday_low = safe_float(stock.get("intraday_low"))
     rebound_from_low_pct = (
@@ -2449,41 +2561,18 @@ def _entry_metrics(
         if intraday_low is not None and intraday_low > 0
         else 0.0
     )
-    previous_close = safe_float(rows[-2].get("close")) if len(rows) >= 2 else None
-    reclaim_previous_close = bool(
-        previous_close is not None
-        and previous_close > 0
-        and close > previous_close
-        and change_pct > 0
-    )
-    daily_v = _daily_v_reversal_metrics(rows, current_close=close)
-    structure_low = min(lows) if lows else close - atr * 1.5
-    stop_distance = structural_stop_distance_pct(close, structure_low)
-    stop_atr = (close - structure_low) / atr
     regime = str(market.get("risk_state") or market.get("state") or "defensive")
     structural_limits = niuone_structural_stop_limits(regime)
-    risk_ok = niuone_structure_risk_ok(stop_distance, stop_atr, regime)
-    gap_buffer = downside_gap_buffer_pct(rows, atr=atr, close=close)
-    effective_distance = effective_loss_distance_pct(
-        close,
-        structure_low,
-        gap_buffer_pct=gap_buffer,
-        execution_buffer_pct=SECTOR_TIDE_EXECUTION_BUFFER_PCT,
-    )
-    extension_atr = (close - ema20) / atr
-    breakout_extension_atr = (
-        max(0.0, (close - breakout_level) / atr)
-        if breakout_level is not None
-        else None
-    )
-    breakout_stop_price = (
-        breakout_level - atr * 0.5
-        if breakout_level is not None and breakout_level - atr * 0.5 > 0
-        else None
+    risk_ok = niuone_structure_risk_ok(
+        float(common["stop_distance_pct"]),
+        float(common["stop_atr"]),
+        regime,
     )
     score_before_external = (float(theme["score"]) * 0.55 + float(stock["strong_score"]) * 0.45) / 10
     raw_external = float(stock.get("dragon_tiger_adjustment") or 0.0) + float(stock.get("news_adjustment") or 0.0)
-    positive_suppressed = bool(raw_external > 0 and extension_atr > 1.5)
+    positive_suppressed = bool(
+        raw_external > 0 and float(common["extension_atr"]) > 1.5
+    )
     external = 0.0 if positive_suppressed else _clamp(raw_external, -0.6, 0.4)
     return {
         "code": code,
@@ -2494,35 +2583,15 @@ def _entry_metrics(
         "mainline": context.get("mainline") if isinstance(context.get("mainline"), dict) else {},
         "dragon_tiger": context.get("dragon_tiger") if isinstance(context.get("dragon_tiger"), dict) else {},
         "news": context.get("news") if isinstance(context.get("news"), dict) else {},
-        "close": close,
-        "ema20": ema20,
-        "ema50": ema50,
-        "atr": atr,
-        "atr_period": NIUONE_ATR_LOOKBACK,
-        # Compatibility alias retained for historical candidate and position data.
-        "atr20": atr,
-        "distance_pct": (close / ema20 - 1) * 100,
-        "extension_atr": extension_atr,
-        "breakout_level": breakout_level,
-        "breakout_extension_atr": breakout_extension_atr,
-        "breakout_stop_price": breakout_stop_price,
-        "volume_ratio": volume_ratio,
-        "change_pct": change_pct,
-        "breakout": breakout,
-        "pullback": pullback,
-        "reclaim": reclaim,
+        **{
+            key: value
+            for key, value in common.items()
+            if key != "row_intraday_low"
+        },
         "intraday_low": intraday_low,
         "rebound_from_low_pct": rebound_from_low_pct,
-        "reclaim_previous_close": reclaim_previous_close,
-        **daily_v,
-        "trend_aligned": trend_aligned,
-        "stop_price": structure_low,
-        "stop_distance_pct": stop_distance,
-        "stop_atr": stop_atr,
         "max_stop_distance_pct": structural_limits["max_stop_distance_pct"],
         "max_stop_atr": structural_limits["max_stop_atr"],
-        "gap_buffer_pct": gap_buffer,
-        "effective_loss_distance_pct": effective_distance,
         "risk_ok": risk_ok,
         "score_before_external_context": score_before_external,
         "raw_external_context_adjustment": raw_external,
@@ -2992,8 +3061,18 @@ def _reversal_strategy_score(metrics: dict[str, Any]) -> float:
     return _clamp(base_score + external, 0.0, 10.0)
 
 
-def score_niu_leader(rows: list[dict[str, Any]], context: dict[str, Any]) -> dict[str, Any] | None:
-    metrics = _entry_metrics(rows, context, "niu_leader")
+def score_niu_leader(
+    rows: Sequence[Mapping[str, Any]],
+    context: dict[str, Any],
+    *,
+    shared_metrics: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    metrics = _entry_metrics(
+        rows,
+        context,
+        "niu_leader",
+        shared_metrics=shared_metrics,
+    )
     if metrics is None:
         return None
     risks = _common_risks(metrics, strategy_name="niu_leader")
@@ -3015,8 +3094,18 @@ def score_niu_leader(rows: list[dict[str, Any]], context: dict[str, Any]) -> dic
     return with_strategy_profile("niu_leader", _payload("niu_leader", metrics, verdict=verdict, risk_flags=risks))
 
 
-def score_niu_pullback(rows: list[dict[str, Any]], context: dict[str, Any]) -> dict[str, Any] | None:
-    metrics = _entry_metrics(rows, context, "niu_pullback")
+def score_niu_pullback(
+    rows: Sequence[Mapping[str, Any]],
+    context: dict[str, Any],
+    *,
+    shared_metrics: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    metrics = _entry_metrics(
+        rows,
+        context,
+        "niu_pullback",
+        shared_metrics=shared_metrics,
+    )
     if metrics is None:
         return None
     risks = _common_risks(metrics, strategy_name="niu_pullback")
@@ -3032,8 +3121,18 @@ def score_niu_pullback(rows: list[dict[str, Any]], context: dict[str, Any]) -> d
     return with_strategy_profile("niu_pullback", _payload("niu_pullback", metrics, verdict=verdict, risk_flags=risks))
 
 
-def score_niu_emerging(rows: list[dict[str, Any]], context: dict[str, Any]) -> dict[str, Any] | None:
-    metrics = _entry_metrics(rows, context, "niu_emerging")
+def score_niu_emerging(
+    rows: Sequence[Mapping[str, Any]],
+    context: dict[str, Any],
+    *,
+    shared_metrics: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    metrics = _entry_metrics(
+        rows,
+        context,
+        "niu_emerging",
+        shared_metrics=shared_metrics,
+    )
     if metrics is None:
         return None
     risks = _common_risks(metrics, strategy_name="niu_emerging")
@@ -3063,8 +3162,18 @@ def score_niu_emerging(rows: list[dict[str, Any]], context: dict[str, Any]) -> d
     )
 
 
-def score_niu_reversal_probe(rows: list[dict[str, Any]], context: dict[str, Any]) -> dict[str, Any] | None:
-    metrics = _entry_metrics(rows, context, "niu_reversal_probe")
+def score_niu_reversal_probe(
+    rows: Sequence[Mapping[str, Any]],
+    context: dict[str, Any],
+    *,
+    shared_metrics: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    metrics = _entry_metrics(
+        rows,
+        context,
+        "niu_reversal_probe",
+        shared_metrics=shared_metrics,
+    )
     if metrics is None:
         return None
     metrics = dict(metrics)
@@ -3089,3 +3198,11 @@ score_niu_leader.requires_context = True  # type: ignore[attr-defined]
 score_niu_pullback.requires_context = True  # type: ignore[attr-defined]
 score_niu_emerging.requires_context = True  # type: ignore[attr-defined]
 score_niu_reversal_probe.requires_context = True  # type: ignore[attr-defined]
+for _niuone_scorer in (
+    score_niu_leader,
+    score_niu_pullback,
+    score_niu_emerging,
+    score_niu_reversal_probe,
+):
+    _niuone_scorer.shared_input_builder = _shared_entry_metrics  # type: ignore[attr-defined]
+    _niuone_scorer.shared_input_keyword = "shared_metrics"  # type: ignore[attr-defined]

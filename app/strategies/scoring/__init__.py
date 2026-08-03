@@ -40,6 +40,7 @@ from .common import (
 )
 from .li_daxiao import score_li_daxiao_bottom
 from .niuone import (
+    NIUONE_MIN_ROWS,
     NIUONE_STRATEGY_IDS,
     build_niuone_context,
     score_niu_emerging,
@@ -47,7 +48,7 @@ from .niuone import (
     score_niu_pullback,
     score_niu_reversal_probe,
 )
-from .engine import StrategyScorer, analyze_enriched_rows
+from .engine import StrategyScorer, analyze_enriched_rows, invoke_strategy_scorer
 from .sector_tide import (
     SECTOR_TIDE_STRATEGY_IDS,
     build_sector_tide_context,
@@ -101,12 +102,14 @@ __all__ = [
     "LI_DAXIAO_MAX_TURNOVER",
     "LI_DAXIAO_MIN_AMOUNT",
     "NIUONE_STRATEGY_IDS",
+    "NIUONE_MIN_ROWS",
     "STRATEGY_SCORERS",
     "SECTOR_TIDE_STRATEGY_IDS",
     "ZETTARANC_INDUSTRY_FLOW_MAX_BONUS",
     "ZETTARANC_STRATEGY_IDS",
     "StrategyScorer",
     "analyze_enriched_rows",
+    "invoke_strategy_scorer",
     "build_sector_tide_context",
     "build_niuone_context",
     "candle_amplitude_pct",
