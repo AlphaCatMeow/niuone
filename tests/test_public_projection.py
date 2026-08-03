@@ -15,7 +15,15 @@ class PublicProjectionTests(unittest.TestCase):
                 "cash": 400_000,
                 "total_equity": 1_030_000,
                 "last_error": "/private/runtime/state.json: provider token=secret",
-                "positions": [{"code": "600000", "name": "浦发银行", "qty": 100, "secret_note": "private"}],
+                "positions": [{
+                    "code": "600000",
+                    "name": "浦发银行",
+                    "qty": 100,
+                    "industry": "通信设备",
+                    "entry_theme": "数字货币",
+                    "active_theme": "eSIM",
+                    "secret_note": "private",
+                }],
                 "equity_history": [{"time": "2026-07-21 10:00:00", "equity": 1_030_000, "internal_id": 7}],
             },
             messages={
@@ -43,6 +51,14 @@ class PublicProjectionTests(unittest.TestCase):
                     "code": "600000",
                     "best_strategy": "trend_pullback",
                     "best_score": 8.5,
+                    "industry": "通信设备",
+                    "signal_theme": "数字货币",
+                    "signal_theme_attribution_score": 84.0,
+                    "signal_theme_attribution_weight": 0.68,
+                    "signal_theme_historical_prior_score": 81.0,
+                    "signal_theme_cohort_alignment_score": 88.0,
+                    "theme_attribution_confident": True,
+                    "theme_attribution_gap": 12.0,
                     "score_before_industry_flow": 8.0,
                     "industry_flow_rank": 2,
                     "industry_flow_adjustment": 0.55,
@@ -89,6 +105,14 @@ class PublicProjectionTests(unittest.TestCase):
         self.assertNotIn("generated_at", sections["metadata"])
         self.assertNotIn("last_error", sections["metadata"])
         self.assertNotIn("secret_note", sections["account"]["positions"][0])
+        self.assertEqual(
+            sections["account"]["positions"][0]["entry_theme"],
+            "数字货币",
+        )
+        self.assertEqual(
+            sections["account"]["positions"][0]["active_theme"],
+            "eSIM",
+        )
         self.assertNotIn("internal_id", sections["history"]["intraday"][0])
         self.assertNotIn("dashboard_home", sections["messages"])
         self.assertNotIn("db_path", sections["messages"])
@@ -99,6 +123,20 @@ class PublicProjectionTests(unittest.TestCase):
         self.assertTrue(sections["candidates"]["refresh_required"])
         self.assertEqual(sections["candidates"]["status_message"], "等待牛牛战法重新扫描")
         self.assertEqual(sections["candidates"]["items"][0]["best_score"], 8.5)
+        self.assertEqual(
+            sections["candidates"]["items"][0]["industry"],
+            "通信设备",
+        )
+        self.assertEqual(
+            sections["candidates"]["items"][0]["signal_theme"],
+            "数字货币",
+        )
+        self.assertEqual(
+            sections["candidates"]["items"][0][
+                "signal_theme_attribution_weight"
+            ],
+            0.68,
+        )
         self.assertEqual(sections["candidates"]["items"][0]["industry_flow_rank"], 2)
         self.assertEqual(sections["candidates"]["items"][0]["industry_flow_adjustment"], 0.55)
         self.assertEqual(sections["candidates"]["items"][0]["reversal_basis"], "daily_v")

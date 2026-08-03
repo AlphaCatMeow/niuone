@@ -57,6 +57,11 @@ def complete_context(**overrides):
         "entry_schedule_triggered_at": "2026-08-04 09:25:00",
         "entry_execution_mode": "deferred",
         "entry_industry": "半导体",
+        "entry_theme": "半导体",
+        "entry_theme_basis": "eastmoney_concept",
+        "entry_theme_attribution_score": 82.0,
+        "entry_theme_attribution_weight": 1.0,
+        "entry_theme_historical_prior_score": 80.0,
         "entry_model_requested_shares": 100,
         "entry_executed_shares": 100,
         "entry_maximum_permitted_shares": 200,
@@ -561,7 +566,7 @@ class NiuOneForwardEvaluationTests(unittest.TestCase):
         )
         self.assertEqual(
             identity["protocol"]["performance_cluster_unit"],
-            "entry_date_x_entry_industry",
+            "entry_date_x_entry_theme",
         )
         self.assertEqual(
             identity["protocol"]["minimum_unique_performance_clusters"],
@@ -1786,7 +1791,7 @@ class NiuOneForwardEvaluationTests(unittest.TestCase):
         rows = []
         for index in range(30):
             code = f"{index:06d}"
-            context = complete_context(entry_industry=f"行业-{index:02d}")
+            context = complete_context(entry_theme=f"题材-{index:02d}")
             rows.extend([
                 trade(
                     "2026-08-04 10:00:00", "BUY", code, 100, 1000,
@@ -1878,7 +1883,7 @@ class NiuOneForwardEvaluationTests(unittest.TestCase):
         ]
         for index, industry in enumerate(industries):
             code = f"cluster-mix-{index:02d}"
-            context = complete_context(entry_industry=industry)
+            context = complete_context(entry_theme=industry)
             rows.extend([
                 trade(
                     "2026-08-04 10:00:00",
@@ -1931,7 +1936,7 @@ class NiuOneForwardEvaluationTests(unittest.TestCase):
                     before_qty=0,
                     after_qty=100,
                     context=complete_context(
-                        entry_industry=industry,
+                        entry_theme=industry,
                         entry_signal_generated_at="2026-08-03 10:00:01",
                         entry_schedule_slot="2026-08-03 10:00",
                         entry_schedule_triggered_at="2026-08-03 10:00:00",
@@ -1946,7 +1951,7 @@ class NiuOneForwardEvaluationTests(unittest.TestCase):
                     before_qty=100,
                     after_qty=0,
                     context=complete_context(
-                        entry_industry=industry,
+                        entry_theme=industry,
                         entry_signal_generated_at="2026-08-03 10:00:01",
                         entry_schedule_slot="2026-08-03 10:00",
                         entry_schedule_triggered_at="2026-08-03 10:00:00",
@@ -2313,6 +2318,73 @@ class NiuOneForwardEvaluationTests(unittest.TestCase):
             1,
         )
 
+    def test_missing_entry_theme_blocks_theme_cluster_attribution(self):
+        rows = [
+            trade(
+                "2026-08-04 10:00:00",
+                "BUY",
+                "missing-theme",
+                100,
+                1000,
+                before_qty=0,
+                after_qty=100,
+                context=complete_context(entry_theme=""),
+            ),
+            trade(
+                "2026-08-05 10:00:00",
+                "SELL",
+                "missing-theme",
+                100,
+                1010,
+                before_qty=100,
+                after_qty=0,
+            ),
+        ]
+
+        report = evaluate_niuone_forward(rows, as_of="2026-08-06")
+
+        self.assertEqual(
+            report["coverage"]["missing_entry_attribution_fields"],
+            {"entry_theme": 1},
+        )
+        self.assertEqual(
+            report["groups"]["entry_theme"]["missing"]
+            ["completed_trade_count"],
+            1,
+        )
+
+    def test_out_of_range_theme_attribution_is_incomplete(self):
+        rows = [
+            trade(
+                "2026-08-04 10:00:00",
+                "BUY",
+                "invalid-theme-attribution",
+                100,
+                1000,
+                before_qty=0,
+                after_qty=100,
+                context=complete_context(
+                    entry_theme_attribution_score=101.0,
+                ),
+            ),
+            trade(
+                "2026-08-05 10:00:00",
+                "SELL",
+                "invalid-theme-attribution",
+                100,
+                1010,
+                before_qty=100,
+                after_qty=0,
+            ),
+        ]
+
+        report = evaluate_niuone_forward(rows, as_of="2026-08-06")
+
+        self.assertEqual(
+            report["coverage"]["missing_entry_attribution_fields"],
+            {"entry_theme_attribution_score": 1},
+        )
+
     def test_state_overlay_rows_cannot_replace_durable_payload_evidence(self):
         rows = _mark_non_durable_overlay([
             trade(
@@ -2545,7 +2617,7 @@ class NiuOneForwardEvaluationTests(unittest.TestCase):
 
         self.assertEqual(report["overall"]["completed_trade_count"], 1)
         self.assertEqual(report["coverage"]["duplicate_trade_count"], 2)
-        self.assertEqual(report["protocol"]["version"], "niuone-strict-forward-v26")
+        self.assertEqual(report["protocol"]["version"], "niuone-strict-forward-v27")
         self.assertEqual(
             report["protocol"][
                 "niuone_markup_upgrade_absolute_position_cap_pct"

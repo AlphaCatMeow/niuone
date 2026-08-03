@@ -14,7 +14,7 @@ from typing import Any
 from app.dashboard.niuone_mainline import build_niuone_mainline_view
 
 
-PUBLIC_SCHEMA_VERSION = 4
+PUBLIC_SCHEMA_VERSION = 5
 
 ACCOUNT_FIELDS = (
     "initial_cash",
@@ -48,6 +48,8 @@ POSITION_FIELDS = (
     "strategy_mark_id",
     "strategy_mark_label",
     "industry",
+    "entry_theme",
+    "active_theme",
 )
 EQUITY_FIELDS = ("time", "equity", "cash", "market_value", "pnl", "pnl_pct")
 TRADE_FIELDS = (
@@ -84,6 +86,13 @@ CANDIDATE_FIELDS = (
     "amount_yi",
     "industry",
     "sector",
+    "signal_theme",
+    "signal_theme_attribution_score",
+    "signal_theme_attribution_weight",
+    "signal_theme_historical_prior_score",
+    "signal_theme_cohort_alignment_score",
+    "theme_attribution_confident",
+    "theme_attribution_gap",
     "board",
     "board_label",
     "reason",

@@ -1765,7 +1765,28 @@ def refresh_b1_candidate_cache_from_current_pool() -> dict[str, Any]:
             )
             if not multi:
                 continue
-            best = multi["strategies"].get(multi["best_strategy"], {})
+            best_strategy = str(multi["best_strategy"] or "")
+            best = multi["strategies"].get(best_strategy, {})
+            niuone_best = best_strategy in scanner.NIUONE_STRATEGY_IDS
+            factual_industry = scanner.normalize_industry_name(
+                best.get("classification_industry")
+                or old.get("industry")
+                or old.get("sector")
+            )
+            signal_theme = (
+                scanner.normalize_industry_name(
+                    best.get("signal_theme") or best.get("industry")
+                )
+                if niuone_best
+                else ""
+            )
+            candidate_industry = (
+                factual_industry
+                if niuone_best
+                else scanner.normalize_industry_name(
+                    best.get("industry") or factual_industry
+                )
+            )
             item = {
                 **old,
                 "code": code,
@@ -1787,7 +1808,7 @@ def refresh_b1_candidate_cache_from_current_pool() -> dict[str, Any]:
                 "j_recovering": best.get("j_recovering", False),
                 "j_oversold": best.get("j_oversold", False),
                 "risk_flags": best.get("risk_flags", []),
-                "best_strategy": multi["best_strategy"],
+                "best_strategy": best_strategy,
                 "best_score": multi["best_score"],
                 "best_decision_score": multi.get("best_decision_score", multi["best_score"]),
                 "best_verdict": multi["best_verdict"],
@@ -1798,8 +1819,33 @@ def refresh_b1_candidate_cache_from_current_pool() -> dict[str, Any]:
                 "time_stop": best.get("time_stop"),
                 "actionable": best.get("actionable"),
                 "hard_blockers": best.get("hard_blockers", []),
-                "industry": best.get("industry") or old.get("industry") or old.get("sector") or "",
-                "sector": best.get("industry") or old.get("sector") or old.get("industry") or "",
+                "industry": candidate_industry,
+                "sector": candidate_industry,
+                "signal_theme": signal_theme,
+                "theme_memberships": list(
+                    best.get("theme_memberships") or []
+                ),
+                "theme_attributions": list(
+                    best.get("theme_attributions") or []
+                ),
+                "signal_theme_attribution_score": best.get(
+                    "signal_theme_attribution_score"
+                ),
+                "signal_theme_attribution_weight": best.get(
+                    "signal_theme_attribution_weight"
+                ),
+                "signal_theme_historical_prior_score": best.get(
+                    "signal_theme_historical_prior_score"
+                ),
+                "signal_theme_cohort_alignment_score": best.get(
+                    "signal_theme_cohort_alignment_score"
+                ),
+                "theme_attribution_confident": best.get(
+                    "theme_attribution_confident"
+                ),
+                "theme_attribution_gap": best.get(
+                    "theme_attribution_gap"
+                ),
                 "market_regime": best.get("market_regime"),
                 "market_score": best.get("market_score"),
                 "market_hard_stop": best.get("market_hard_stop"),

@@ -2123,7 +2123,27 @@ def main():
         if multi is None:
             return None
         # Backward compat fields
-        best = multi["strategies"].get(multi["best_strategy"], {})
+        best_strategy = str(multi["best_strategy"] or "")
+        best = multi["strategies"].get(best_strategy, {})
+        niuone_best = best_strategy in NIUONE_STRATEGY_IDS
+        factual_industry = normalize_industry_name(
+            best.get("classification_industry")
+            or industry_by_code.get(code, "")
+        )
+        signal_theme = (
+            normalize_industry_name(
+                best.get("signal_theme") or best.get("industry")
+            )
+            if niuone_best
+            else ""
+        )
+        candidate_industry = (
+            factual_industry
+            if niuone_best
+            else normalize_industry_name(
+                best.get("industry") or factual_industry
+            )
+        )
         return {
             "code": code,
             "name": name,
@@ -2133,8 +2153,27 @@ def main():
             "amount": q.get("amount"),
             "amount_yi": round(q.get("amount", 0) / 1e8, 1) if q.get("amount") else None,
             "turnover": q.get("turnover"),
-            "industry": best.get("industry") or industry_by_code.get(code, ""),
-            "sector": best.get("industry") or industry_by_code.get(code, ""),
+            "industry": candidate_industry,
+            "sector": candidate_industry,
+            "signal_theme": signal_theme,
+            "theme_memberships": list(best.get("theme_memberships") or []),
+            "theme_attributions": list(best.get("theme_attributions") or []),
+            "signal_theme_attribution_score": best.get(
+                "signal_theme_attribution_score"
+            ),
+            "signal_theme_attribution_weight": best.get(
+                "signal_theme_attribution_weight"
+            ),
+            "signal_theme_historical_prior_score": best.get(
+                "signal_theme_historical_prior_score"
+            ),
+            "signal_theme_cohort_alignment_score": best.get(
+                "signal_theme_cohort_alignment_score"
+            ),
+            "theme_attribution_confident": best.get(
+                "theme_attribution_confident"
+            ),
+            "theme_attribution_gap": best.get("theme_attribution_gap"),
             # backward compat (the practice candidates panel expects these)
             "score": best.get("score", 0),
             "score_total": best.get("score_total", 10),
@@ -2150,7 +2189,7 @@ def main():
             "risk_flags": best.get("risk_flags", []),
             "change_pct": q.get("change_pct"),
             # multi-strategy fields
-            "best_strategy": multi["best_strategy"],
+            "best_strategy": best_strategy,
             "best_score": multi["best_score"],
             "best_decision_score": multi.get("best_decision_score", multi["best_score"]),
             "best_verdict": multi["best_verdict"],

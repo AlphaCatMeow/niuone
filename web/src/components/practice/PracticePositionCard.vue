@@ -68,6 +68,20 @@ const buyReasonText = computed(() => String(props.position.entry_reason || props
       <div class="position-metric"><div class="position-label">仓位占比</div><div class="position-value">{{ positionText }}</div></div>
       <div class="position-metric"><div class="position-label">可卖/持有</div><div class="position-value" style="color:#94a3b8">{{ position.available_qty ?? 0 }} / {{ position.qty ?? 0 }}</div></div>
     </div>
+    <div v-if="position.entry_theme || position.active_theme" class="position-reason-block">
+      <div class="position-reason-row">
+        <span class="position-reason-label">入场题材</span>
+        <span class="position-reason-text">{{ position.entry_theme || '--' }}</span>
+      </div>
+      <div class="position-reason-row">
+        <span class="position-reason-label">当前题材</span>
+        <span class="position-reason-text">{{ position.active_theme || position.entry_theme || '--' }}</span>
+      </div>
+      <div v-if="position.industry" class="position-reason-row">
+        <span class="position-reason-label">所属行业</span>
+        <span class="position-reason-text">{{ position.industry }}</span>
+      </div>
+    </div>
     <div v-if="position.bought_today && (buyStrategyLabels.length || buyReasonText)" class="position-reason-block">
       <div v-if="buyStrategyLabels.length" class="position-reason-row">
         <span class="position-reason-label">买入策略</span>

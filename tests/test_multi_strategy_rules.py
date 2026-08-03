@@ -942,7 +942,12 @@ class MultiStrategyRuleTests(unittest.TestCase):
         self.assertEqual(len(block_calls), 1)
 
     def test_eastmoney_board_annotation_adds_industry_and_concepts(self):
-        candidates = [{"code": "000977", "name": "浪潮信息"}]
+        candidates = [{
+            "code": "000977",
+            "name": "浪潮信息",
+            "best_strategy": "niu_leader",
+            "signal_theme": "存储芯片",
+        }]
         original_loader = screen.load_bulk_stock_board_map
         original_save = screen.save_stock_industry_cache
         try:
@@ -962,6 +967,7 @@ class MultiStrategyRuleTests(unittest.TestCase):
         self.assertEqual(candidates[0]["industry"], "计算机设备")
         self.assertEqual(candidates[0]["sector"], "计算机设备")
         self.assertEqual(candidates[0]["themes"], ["存储芯片", "先进封装"])
+        self.assertEqual(candidates[0]["signal_theme"], "存储芯片")
 
     def test_annotate_candidate_industries_adds_sector_alias_once(self):
         display = [{"code": "600001", "name": "测试A"}]

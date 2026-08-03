@@ -67,6 +67,11 @@ NIUONE_DAILY_V_MAX_RIGHT_DAYS = 15
 NIUONE_DAILY_V_MIN_DECLINE_PCT = 8.0
 NIUONE_DAILY_V_MIN_REBOUND_PCT = 6.0
 NIUONE_DAILY_V_MIN_RISING_RATIO = 2 / 3
+NIUONE_THEME_ATTRIBUTION_CURRENT_WEIGHT = 0.75
+NIUONE_THEME_ATTRIBUTION_HISTORY_WEIGHT = 0.25
+NIUONE_THEME_ATTRIBUTION_HISTORY_DECAY = 0.75
+NIUONE_THEME_ATTRIBUTION_CONFIDENCE_SCORE = 60.0
+NIUONE_THEME_ATTRIBUTION_CONFIDENCE_GAP = 5.0
 
 
 def _mean(values: list[float], default: float = 0.0) -> float:
@@ -319,6 +324,154 @@ def _member_metrics(item: dict[str, Any]) -> dict[str, Any] | None:
         "rebound_from_low_pct": rebound_from_low_pct,
         "reclaim_previous_close": bool(previous_close and close > previous_close),
     }
+
+
+def _previous_theme_attributions(
+    stock: Mapping[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    if not isinstance(stock, Mapping):
+        return {}
+    raw = stock.get("theme_attributions")
+    if not isinstance(raw, list):
+        return {}
+    result: dict[str, dict[str, Any]] = {}
+    for item in raw:
+        if not isinstance(item, Mapping):
+            continue
+        theme = _industry_name(item.get("theme") or item.get("industry"))
+        if theme:
+            result[theme] = dict(item)
+    return result
+
+
+def _apply_theme_attributions(
+    profiles: list[dict[str, Any]],
+    *,
+    previous_stock: Mapping[str, Any] | None,
+    same_trading_day: bool,
+) -> list[dict[str, Any]]:
+    """Attach bounded current and historical evidence to each concept branch.
+
+    Classification membership is only the candidate set.  Attribution combines
+    current cohort evidence with a causal prior carried by earlier snapshots,
+    then normalizes the weights so one stock contributes at most one unit of
+    narrative credit across all of its concepts.
+    """
+    previous = _previous_theme_attributions(previous_stock)
+    scored: list[dict[str, Any]] = []
+    for source in profiles:
+        profile = dict(source)
+        theme = _industry_name(profile.get("industry"))
+        prior = previous.get(theme, {})
+        current_score = _clamp(
+            float(profile.get("theme_score") or 0.0) * 0.35
+            + float(profile.get("theme_rank") or 0.0) * 0.30
+            + float(profile.get("cohort_alignment_score") or 50.0) * 0.25
+            + float(profile.get("today_rank_score") or 0.0) * 0.10
+        )
+        prior_score = safe_float(
+            prior.get("historical_prior_score")
+            if prior.get("historical_prior_score") is not None
+            else prior.get("attribution_score")
+        )
+        if prior_score is None:
+            historical_score = current_score
+        elif same_trading_day:
+            historical_score = prior_score
+        else:
+            historical_score = _clamp(
+                prior_score * NIUONE_THEME_ATTRIBUTION_HISTORY_DECAY
+                + current_score * (1.0 - NIUONE_THEME_ATTRIBUTION_HISTORY_DECAY)
+            )
+        attribution_score = _clamp(
+            current_score * NIUONE_THEME_ATTRIBUTION_CURRENT_WEIGHT
+            + historical_score * NIUONE_THEME_ATTRIBUTION_HISTORY_WEIGHT
+        )
+        observation_count = max(0, int(prior.get("observation_count") or 0))
+        wave_count = max(0, int(prior.get("wave_count") or 0))
+        if not same_trading_day:
+            observation_count += 1
+            if (
+                str(profile.get("theme_state") or "")
+                in {"emerging", "mainline", "diverging"}
+                and profile.get("strong") is True
+            ):
+                wave_count += 1
+        profile.update({
+            "current_attribution_score": round(current_score, 2),
+            "historical_prior_score": round(historical_score, 2),
+            "attribution_score": round(attribution_score, 2),
+            "attribution_observation_count": observation_count,
+            "attribution_wave_count": wave_count,
+        })
+        scored.append(profile)
+
+    total = sum(max(0.0, float(item["attribution_score"])) for item in scored)
+    if total <= 0 and scored:
+        raw_weights = [1.0 / len(scored)] * len(scored)
+    elif total > 0:
+        raw_weights = [
+            max(0.0, float(item["attribution_score"])) / total
+            for item in scored
+        ]
+    else:
+        raw_weights = []
+    weight_scale = 1_000_000
+    weight_units = [int(weight * weight_scale) for weight in raw_weights]
+    remainder = max(0, weight_scale - sum(weight_units))
+    remainder_order = sorted(
+        range(len(raw_weights)),
+        key=lambda index: (
+            -(raw_weights[index] * weight_scale - weight_units[index]),
+            index,
+        ),
+    )
+    for index in remainder_order[:remainder]:
+        weight_units[index] += 1
+    for item, units in zip(scored, weight_units):
+        item["attribution_weight"] = units / weight_scale
+    return sorted(
+        scored,
+        key=lambda item: (
+            -float(item.get("attribution_score") or 0.0),
+            -float(item.get("theme_rank") or 0.0),
+            str(item.get("industry") or ""),
+        ),
+    )
+
+
+def _cohort_alignment_score(
+    member: Mapping[str, Any],
+    theme_members: list[dict[str, Any]],
+) -> float:
+    """Measure whether the stock is moving with the concept's other members."""
+    code = str(member.get("code") or "")
+    peers = [
+        peer
+        for peer in theme_members
+        if str(peer.get("code") or "") != code
+    ]
+    if not peers:
+        return 50.0
+
+    stock_ret5 = float(member.get("ret5") or 0.0)
+    stock_ret20 = float(member.get("ret20") or 0.0)
+
+    def same_direction(left: float, right: float) -> bool:
+        return (left >= 0 and right >= 0) or (left < 0 and right < 0)
+
+    direction_matches = [
+        (
+            int(same_direction(stock_ret5, float(peer.get("ret5") or 0.0)))
+            + int(same_direction(stock_ret20, float(peer.get("ret20") or 0.0)))
+        ) / 2.0
+        for peer in peers
+    ]
+    directional_score = _mean(direction_matches) * 100.0
+    peer_strength_score = (
+        sum(peer.get("strong") is True for peer in peers) / len(peers) * 100.0
+    )
+    return _clamp(directional_score * 0.65 + peer_strength_score * 0.35)
 
 
 def _today_theme_metrics(theme_members: list[dict[str, Any]]) -> dict[str, Any]:
@@ -982,9 +1135,14 @@ def build_niuone_context(
             role = "leader" if rank_index == 1 and member["strong"] else ("core" if member["strong"] else "follower")
             stock_profiles[code].append({
                 "industry": industry,
+                "classification_industry": str(member.get("industry") or ""),
                 "theme_basis": resolved_theme_basis,
                 "theme_state": state,
                 "theme_score": round(score, 2),
+                "cohort_alignment_score": round(
+                    _cohort_alignment_score(member, theme_members),
+                    2,
+                ),
                 "strong_score": round(float(member["strong_score"]), 2),
                 "strong": bool(member["strong"]),
                 "role": role,
@@ -1035,12 +1193,32 @@ def build_niuone_context(
         "fading": 0,
     }
     stocks: dict[str, dict[str, Any]] = {}
+    previous_stocks = (
+        previous_context.get("stocks")
+        if isinstance(previous_context.get("stocks"), Mapping)
+        else {}
+    )
+    same_trading_day = bool(
+        as_of_date
+        and previous_context_date
+        and as_of_date == previous_context_date
+    )
     for code, profiles in stock_profiles.items():
-        ordered_profiles = sorted(
+        attributed_profiles = _apply_theme_attributions(
             profiles,
+            previous_stock=(
+                previous_stocks.get(code)
+                if isinstance(previous_stocks.get(code), Mapping)
+                else None
+            ),
+            same_trading_day=same_trading_day,
+        )
+        ordered_profiles = sorted(
+            attributed_profiles,
             key=lambda profile: (
                 -state_priority.get(str(profile.get("theme_state") or ""), -1),
                 -float(profile.get("theme_score") or 0.0),
+                -float(profile.get("attribution_score") or 0.0),
                 -float(profile.get("strong_score") or 0.0),
                 -float(profile.get("theme_rank") or 0.0),
                 str(profile.get("industry") or ""),
@@ -1052,6 +1230,62 @@ def build_niuone_context(
             for profile in ordered_profiles
             if str(profile.get("industry") or "")
         ]
+        attribution_ordered = sorted(
+            attributed_profiles,
+            key=lambda profile: (
+                -float(profile.get("attribution_score") or 0.0),
+                -float(profile.get("theme_rank") or 0.0),
+                str(profile.get("industry") or ""),
+            ),
+        )
+        leading_attribution = attribution_ordered[0]
+        second_attribution_score = (
+            float(attribution_ordered[1].get("attribution_score") or 0.0)
+            if len(attribution_ordered) > 1
+            else None
+        )
+        attribution_gap = (
+            float(leading_attribution.get("attribution_score") or 0.0)
+            - second_attribution_score
+            if second_attribution_score is not None
+            else None
+        )
+        selected["dominant_theme"] = str(
+            leading_attribution.get("industry") or ""
+        )
+        selected["theme_attribution_confident"] = bool(
+            len(attribution_ordered) == 1
+            or (
+                float(leading_attribution.get("attribution_score") or 0.0)
+                >= NIUONE_THEME_ATTRIBUTION_CONFIDENCE_SCORE
+                and attribution_gap is not None
+                and attribution_gap
+                >= NIUONE_THEME_ATTRIBUTION_CONFIDENCE_GAP
+            )
+        )
+        selected["theme_attribution_gap"] = safe_round(
+            attribution_gap,
+            2,
+        )
+        selected["theme_attributions"] = [
+            {
+                "theme": str(profile.get("industry") or ""),
+                "current_score": profile.get("current_attribution_score"),
+                "historical_prior_score": profile.get(
+                    "historical_prior_score"
+                ),
+                "attribution_score": profile.get("attribution_score"),
+                "attribution_weight": profile.get("attribution_weight"),
+                "cohort_alignment_score": profile.get(
+                    "cohort_alignment_score"
+                ),
+                "observation_count": profile.get(
+                    "attribution_observation_count"
+                ),
+                "wave_count": profile.get("attribution_wave_count"),
+            }
+            for profile in attribution_ordered
+        ]
         # A stock may lead one concept while being only a follower in another.
         # Keep the compact per-theme routing fields so every NiuOne action can
         # choose a lifecycle-compatible branch instead of inheriting one global
@@ -1062,7 +1296,12 @@ def build_niuone_context(
                 key: profile.get(key)
                 for key in (
                     "industry",
+                    "classification_industry",
                     "theme_basis",
+                    "theme_state",
+                    "theme_score",
+                    "strong",
+                    "strong_score",
                     "role",
                     "leader_rank",
                     "leader_tier",
@@ -1073,6 +1312,13 @@ def build_niuone_context(
                     "theme_rank",
                     "theme_ret5_rank",
                     "theme_ret20_rank",
+                    "cohort_alignment_score",
+                    "current_attribution_score",
+                    "historical_prior_score",
+                    "attribution_score",
+                    "attribution_weight",
+                    "attribution_observation_count",
+                    "attribution_wave_count",
                 )
             }
             for profile in ordered_profiles
@@ -1159,7 +1405,7 @@ def build_niuone_context(
             "description": "未归入已知数据质量分类",
         })
     return {
-        "version": 7,
+        "version": 8,
         "strategy": "niuone",
         "theme_basis": resolved_theme_basis,
         "as_of_date": as_of_date,
@@ -1260,6 +1506,7 @@ def _action_theme_profile(
     }
     routed.sort(
         key=lambda item: (
+            -float(item[0].get("attribution_score") or 0.0),
             -int(item[0].get("leader_tier") is True),
             -float(item[0].get("theme_rank") or 0.0),
             -state_priority.get(str(item[1].get("state") or ""), -1),
@@ -1519,11 +1766,55 @@ def _payload(
         absolute_cap_pct=absolute_cap,
     )
     news_precheck = stock.get("news_precheck") if isinstance(stock.get("news_precheck"), dict) else {}
+    theme_attributions = [
+        dict(item)
+        for item in (stock.get("theme_attributions") or [])
+        if isinstance(item, Mapping)
+    ]
+    selected_attribution = next(
+        (
+            item
+            for item in theme_attributions
+            if _industry_name(item.get("theme")) == metrics["industry"]
+        ),
+        {},
+    )
     return {
         "score": metrics.get("strategy_score", metrics["composite_score"]),
         "score_total": 10,
         "verdict": verdict,
+        # ``industry`` remains a compatibility alias for direct scorer and
+        # backtest callers. Production candidate rows split the factual
+        # Eastmoney f100 industry from this action-selected concept.
         "industry": metrics["industry"],
+        "classification_industry": str(
+            stock.get("classification_industry") or ""
+        ),
+        "signal_theme": metrics["industry"],
+        "theme_memberships": list(stock.get("theme_memberships") or []),
+        "theme_attributions": theme_attributions,
+        "signal_theme_attribution_score": selected_attribution.get(
+            "attribution_score",
+            stock.get("attribution_score"),
+        ),
+        "signal_theme_attribution_weight": selected_attribution.get(
+            "attribution_weight",
+            stock.get("attribution_weight"),
+        ),
+        "signal_theme_historical_prior_score": selected_attribution.get(
+            "historical_prior_score",
+            stock.get("historical_prior_score"),
+        ),
+        "signal_theme_cohort_alignment_score": selected_attribution.get(
+            "cohort_alignment_score",
+            stock.get("cohort_alignment_score"),
+        ),
+        "theme_attribution_confident": bool(
+            stock.get("theme_attribution_confident")
+            and _industry_name(stock.get("dominant_theme"))
+            == metrics["industry"]
+        ),
+        "theme_attribution_gap": stock.get("theme_attribution_gap"),
         "theme_basis": str(theme.get("theme_basis") or "industry_proxy"),
         "mainline_state": theme.get("state"),
         "niuone_lifecycle_stage": theme.get("niuone_lifecycle_stage"),

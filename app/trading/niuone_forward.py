@@ -55,8 +55,8 @@ DEFAULT_HISTORICAL_REFERENCE_WIN_RATE_PCT = 59.71
 DEFAULT_WIN_RATE_CONFIDENCE_LEVEL = 0.95
 DEFAULT_MAX_PORTFOLIO_DRAWDOWN_PCT = 6.0
 DEFAULT_MIN_RETURN_TO_DRAWDOWN_RATIO = 1.0
-FORWARD_PROTOCOL_VERSION = "niuone-strict-forward-v26"
-FORWARD_PERFORMANCE_CLUSTER_UNIT = "entry_date_x_entry_industry"
+FORWARD_PROTOCOL_VERSION = "niuone-strict-forward-v27"
+FORWARD_PERFORMANCE_CLUSTER_UNIT = "entry_date_x_entry_theme"
 FORWARD_SHADOW_CANDIDATES = {
     "execution_gap": "round13_execution_gap_le_1pct",
 }
@@ -75,6 +75,11 @@ FORWARD_REQUIRED_ENTRY_CONTEXT_FIELDS = (
     "entry_schedule_triggered_at",
     "entry_execution_mode",
     "entry_industry",
+    "entry_theme",
+    "entry_theme_basis",
+    "entry_theme_attribution_score",
+    "entry_theme_attribution_weight",
+    "entry_theme_historical_prior_score",
     "entry_model_requested_shares",
     "entry_executed_shares",
     "entry_maximum_permitted_shares",
@@ -1399,6 +1404,26 @@ def _entry_attribution_gaps(row: Mapping[str, Any]) -> tuple[str, ...]:
         gaps.append("entry_mainline_state")
     if not str(context.get("entry_industry") or "").strip():
         gaps.append("entry_industry")
+    if not str(context.get("entry_theme") or "").strip():
+        gaps.append("entry_theme")
+    if not str(context.get("entry_theme_basis") or "").strip():
+        gaps.append("entry_theme_basis")
+    for field in (
+        "entry_theme_attribution_score",
+        "entry_theme_historical_prior_score",
+    ):
+        value = _number(context.get(field))
+        if value is None or value < 0 or value > 100:
+            gaps.append(field)
+    attribution_weight = _number(
+        context.get("entry_theme_attribution_weight")
+    )
+    if (
+        attribution_weight is None
+        or attribution_weight <= 0
+        or attribution_weight > 1
+    ):
+        gaps.append("entry_theme_attribution_weight")
     for field in (
         "entry_signal_score",
         "entry_execution_gap_pct",
@@ -1860,8 +1885,8 @@ def _performance_cluster_summary(
     for row in materialized:
         entry_date = str(row.get("entry_date") or "").strip()[:10]
         context = row.get("entry_context")
-        industry = (
-            str(context.get("entry_industry") or "").strip()
+        theme = (
+            str(context.get("entry_theme") or "").strip()
             if isinstance(context, Mapping) else ""
         )
         try:
@@ -1871,16 +1896,16 @@ def _performance_cluster_summary(
             )
         except ValueError:
             valid_entry_date = ""
-        if not valid_entry_date or not industry:
+        if not valid_entry_date or not theme:
             missing_cluster_key_count += 1
             continue
-        clusters[(valid_entry_date, industry)].append(row)
+        clusters[(valid_entry_date, theme)].append(row)
 
     cluster_rows: list[dict[str, Any]] = []
     cluster_win_rates: list[float] = []
     cluster_average_returns: list[float] = []
     cluster_sizes: list[int] = []
-    for (entry_date, industry), group in sorted(clusters.items()):
+    for (entry_date, theme), group in sorted(clusters.items()):
         size = len(group)
         wins = sum(float(row["realized_pnl"]) > 0.0 for row in group)
         win_rate = wins / size
@@ -1892,7 +1917,7 @@ def _performance_cluster_summary(
         cluster_average_returns.append(average_return)
         cluster_rows.append({
             "entry_date": entry_date,
-            "entry_industry": industry,
+            "entry_theme": theme,
             "completed_trade_count": size,
             "win_count": wins,
             "win_rate_pct": round(win_rate * 100.0, 4),
@@ -3061,7 +3086,7 @@ def evaluate_niuone_forward(
                 ">= historical_"
                 "reference AND wilson_95_lower_win_rate > 50% AND average_"
                 "net_return > 0 AND realized_pnl > 0 AND profit_factor > 1 "
-                "AND unique(entry_date x entry_industry) >= minimum AND "
+                "AND unique(entry_date x entry_theme) >= minimum AND "
                 "herfindahl_effective_clusters >= minimum AND cluster_"
                 "balanced_win_rate >= historical_reference AND cluster_"
                 "balanced_normal_95_lower_win_rate > 50% AND cluster_"
@@ -3416,6 +3441,11 @@ def evaluate_niuone_forward(
             "entry_industry": _group_summary(
                 completed,
                 lambda row: context_value(row, "entry_industry")
+                or "missing",
+            ),
+            "entry_theme": _group_summary(
+                completed,
+                lambda row: context_value(row, "entry_theme")
                 or "missing",
             ),
             "entry_signal_score": _group_summary(completed, score_bin),

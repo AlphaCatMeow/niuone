@@ -24,6 +24,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Mapping
 from contextlib import contextmanager
 from datetime import datetime, time as dtime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
@@ -1583,6 +1584,8 @@ def enrich_portfolio(state: dict[str, Any]) -> dict[str, Any]:
             "bought_today": today_buy_qty > 0,
             "buy_strategy": pos.get("buy_strategy") or "",
             "industry": pos.get("industry") or pos.get("sector") or "",
+            "entry_theme": pos.get("entry_theme") or "",
+            "active_theme": pos.get("active_theme") or "",
             "entry_reason": pos.get("entry_reason") or "",
             "strategy_mark": strategy_mark,
             "strategy_mark_id": strategy_mark.get("strategy_id") or "",
@@ -1650,6 +1653,8 @@ def enrich_portfolio(state: dict[str, Any]) -> dict[str, Any]:
             source_pos["position_open_risk_pct"] = round(open_risk, 4)
             row.update({
                 "industry": source_pos.get("industry") or source_pos.get("sector") or "",
+                "entry_theme": source_pos.get("entry_theme") or "",
+                "active_theme": source_pos.get("active_theme") or "",
                 "entry_stop_price": source_pos.get("entry_stop_price"),
                 "gap_buffer_pct": source_pos.get("gap_buffer_pct"),
                 "execution_buffer_pct": source_pos.get("execution_buffer_pct"),
@@ -4168,6 +4173,11 @@ NIUONE_ENTRY_CONTEXT_FIELDS = (
     "entry_schedule_triggered_at",
     "entry_execution_mode",
     "entry_industry",
+    "entry_theme",
+    "entry_theme_basis",
+    "entry_theme_attribution_score",
+    "entry_theme_attribution_weight",
+    "entry_theme_historical_prior_score",
     "entry_model_requested_shares",
     "entry_executed_shares",
     "entry_maximum_permitted_shares",
@@ -4178,6 +4188,8 @@ NIUONE_ENTRY_CONTEXT_FIELDS = (
 
 NIUONE_HOLDING_LIFECYCLE_SCHEMA_VERSION = 1
 NIUONE_HOLDING_LIFECYCLE_PATH_FIELD = "niuone_holding_lifecycle_path"
+NIUONE_THEME_SWITCH_CONFIRMATIONS = 2
+NIUONE_THEME_SWITCH_MIN_ATTRIBUTION_GAP = 10.0
 
 
 def _niuone_lifecycle_path_number(value: Any) -> float | None:
@@ -4443,6 +4455,13 @@ PRACTICE_CANDIDATE_EVIDENCE_FIELDS = (
     "name",
     "industry",
     "sector",
+    "signal_theme",
+    "signal_theme_attribution_score",
+    "signal_theme_attribution_weight",
+    "signal_theme_historical_prior_score",
+    "signal_theme_cohort_alignment_score",
+    "theme_attribution_confident",
+    "theme_attribution_gap",
     "best_strategy",
     "strategy",
     "strategy_id",
@@ -4562,6 +4581,41 @@ def is_dynamic_risk_strategy(strategy_id: str) -> bool:
     return is_sector_tide_strategy(strategy_id) or is_niuone_strategy(strategy_id)
 
 
+def niuone_candidate_theme(candidate: Mapping[str, Any]) -> str:
+    """Return the action-selected concept, with a legacy payload fallback."""
+    return str(
+        candidate.get("signal_theme")
+        or candidate.get("active_theme")
+        or candidate.get("entry_theme")
+        or candidate.get("industry")
+        or candidate.get("sector")
+        or ""
+    ).strip()
+
+
+def niuone_position_theme(position: Mapping[str, Any]) -> str:
+    """Return the concept currently used for NiuOne risk and lifecycle."""
+    return str(
+        position.get("active_theme")
+        or position.get("entry_theme")
+        or position.get("entry_industry")
+        or position.get("industry")
+        or position.get("sector")
+        or ""
+    ).strip()
+
+
+def dynamic_strategy_exposure_key(
+    value: Mapping[str, Any],
+    strategy_id: str,
+) -> str:
+    if is_niuone_strategy(strategy_id):
+        if "signal_theme" in value:
+            return niuone_candidate_theme(value)
+        return niuone_position_theme(value)
+    return str(value.get("industry") or value.get("sector") or "").strip()
+
+
 def sector_tide_position_open_risk_pct(pos: dict[str, Any], total_equity: float) -> float:
     """Mark one open Sector Tide position to its current stressed stop risk."""
     mark_price = _safe_float(pos.get("last_price") or pos.get("close") or pos.get("avg_cost"), 0.0)
@@ -4612,7 +4666,10 @@ def dynamic_strategy_existing_open_risk_pct(
         strategy_id = position_entry_strategy(pos)
         if STRATEGY_DEFINITIONS.get(strategy_id, {}).get("persona") != persona:
             continue
-        if industry is not None and str(pos.get("industry") or pos.get("sector") or "").strip() != industry:
+        if (
+            industry is not None
+            and dynamic_strategy_exposure_key(pos, strategy_id) != industry
+        ):
             continue
         total += sector_tide_position_open_risk_pct(pos, total_equity)
     return total
@@ -4725,19 +4782,154 @@ def sync_niuone_position_context(state: dict[str, Any], b1_payload: dict[str, An
         normalized_code = normalize_code(code)
         candidate = candidates.get(normalized_code, {})
         stock = stocks.get(normalized_code) if isinstance(stocks.get(normalized_code), dict) else {}
-        industry = str(
-            candidate.get("industry")
-            or candidate.get("sector")
-            or stock.get("industry")
-            or pos.get("industry")
-            or pos.get("sector")
+        theme_profiles = {
+            str(item.get("industry") or "").strip(): dict(item)
+            for item in (stock.get("theme_profiles") or [])
+            if isinstance(item, Mapping)
+            and str(item.get("industry") or "").strip()
+        }
+        theme_attributions = {
+            str(item.get("theme") or item.get("industry") or "").strip(): dict(item)
+            for item in (stock.get("theme_attributions") or [])
+            if isinstance(item, Mapping)
+            and str(item.get("theme") or item.get("industry") or "").strip()
+        }
+        entry_theme = str(pos.get("entry_theme") or "").strip()
+        if not entry_theme:
+            for legacy_theme in (
+                pos.get("active_theme"),
+                pos.get("entry_industry"),
+                niuone_candidate_theme(candidate),
+                stock.get("industry"),
+                pos.get("industry"),
+                pos.get("sector"),
+            ):
+                normalized_theme = str(legacy_theme or "").strip()
+                if normalized_theme and isinstance(themes.get(normalized_theme), dict):
+                    entry_theme = normalized_theme
+                    pos["entry_theme"] = normalized_theme
+                    break
+        active_theme = str(pos.get("active_theme") or entry_theme).strip()
+        if active_theme:
+            pos["active_theme"] = active_theme
+
+        ranked_attributions = sorted(
+            theme_attributions.values(),
+            key=lambda item: (
+                -_safe_float(item.get("attribution_score"), 0.0),
+                str(item.get("theme") or item.get("industry") or ""),
+            ),
+        )
+        leading_attribution = ranked_attributions[0] if ranked_attributions else {}
+        leading_theme = str(
+            leading_attribution.get("theme")
+            or leading_attribution.get("industry")
             or ""
         ).strip()
-        theme = themes.get(industry) if isinstance(themes.get(industry), dict) else {}
-        if not industry or not theme:
+        active_attribution_score = _safe_float(
+            (theme_attributions.get(active_theme) or {}).get(
+                "attribution_score"
+            ),
+            0.0,
+        )
+        leading_attribution_score = _safe_float(
+            leading_attribution.get("attribution_score"),
+            0.0,
+        )
+        leading_theme_state = str(
+            (themes.get(leading_theme) or {}).get("state") or ""
+        )
+        switch_supported = bool(
+            active_theme
+            and leading_theme
+            and leading_theme != active_theme
+            and leading_theme_state in {"emerging", "mainline", "diverging"}
+            and leading_attribution_score
+            >= active_attribution_score
+            + NIUONE_THEME_SWITCH_MIN_ATTRIBUTION_GAP
+        )
+        if switch_supported:
+            last_switch_date = str(
+                pos.get("pending_theme_switch_last_date") or ""
+            )[:10]
+            if last_switch_date != context_date:
+                consecutive = bool(
+                    previous_trading_day
+                    and last_switch_date == previous_trading_day
+                    and pos.get("pending_theme_switch") == leading_theme
+                )
+                pos["pending_theme_switch_count"] = (
+                    int(pos.get("pending_theme_switch_count") or 0) + 1
+                    if consecutive
+                    else 1
+                )
+                pos["pending_theme_switch"] = leading_theme
+                pos["pending_theme_switch_last_date"] = context_date
+            if int(pos.get("pending_theme_switch_count") or 0) >= NIUONE_THEME_SWITCH_CONFIRMATIONS:
+                prior_active_theme = active_theme
+                active_theme = leading_theme
+                pos["active_theme"] = active_theme
+                switch_history = pos.get("theme_switch_history")
+                if not isinstance(switch_history, list):
+                    switch_history = []
+                switch_history.append({
+                    "from_theme": prior_active_theme,
+                    "to_theme": active_theme,
+                    "confirmed_at": generated_at,
+                    "from_attribution_score": round(
+                        active_attribution_score,
+                        2,
+                    ),
+                    "to_attribution_score": round(
+                        leading_attribution_score,
+                        2,
+                    ),
+                })
+                pos["theme_switch_history"] = switch_history[-20:]
+                pos.pop("pending_theme_switch", None)
+                pos.pop("pending_theme_switch_count", None)
+                pos.pop("pending_theme_switch_last_date", None)
+        else:
+            pos.pop("pending_theme_switch", None)
+            pos.pop("pending_theme_switch_count", None)
+            pos.pop("pending_theme_switch_last_date", None)
+
+        theme = themes.get(active_theme) if isinstance(themes.get(active_theme), dict) else {}
+        if not active_theme or not theme:
             continue
-        pos["industry"] = industry
-        pos["sector"] = industry
+        if candidate.get("signal_theme"):
+            factual_industry = str(
+                candidate.get("industry")
+                or candidate.get("sector")
+                or stock.get("classification_industry")
+                or pos.get("industry")
+                or pos.get("sector")
+                or ""
+            ).strip()
+            if factual_industry:
+                pos["industry"] = factual_industry
+                pos["sector"] = factual_industry
+        active_profile = theme_profiles.get(active_theme) or {}
+        stock_for_theme = dict(stock)
+        stock_for_theme.update(active_profile)
+        pos["active_theme_attribution_score"] = (
+            (theme_attributions.get(active_theme) or {}).get(
+                "attribution_score"
+            )
+        )
+        pos["active_theme_attribution_weight"] = (
+            (theme_attributions.get(active_theme) or {}).get(
+                "attribution_weight"
+            )
+        )
+        pos["entry_theme_score"] = (
+            (themes.get(entry_theme) or {}).get("score")
+            if entry_theme else None
+        )
+        pos["entry_theme_state"] = (
+            (themes.get(entry_theme) or {}).get("state")
+            if entry_theme else ""
+        )
         score = _safe_float(theme.get("score"), -1.0)
         state_name = str(theme.get("state") or "")
         weak = score < 55 or state_name in {"fading", "inactive"}
@@ -4750,17 +4942,20 @@ def sync_niuone_position_context(state: dict[str, Any], b1_payload: dict[str, An
             pos.pop("mainline_weak_last_date", None)
         reversal_probe = entry_strategy == "niu_reversal_probe"
         stock_role = str(
-            stock.get("role") or candidate.get("stock_role") or ""
+            stock_for_theme.get("role") or candidate.get("stock_role") or ""
         ).strip()
-        stock_strong = stock.get("strong")
+        stock_strong = stock_for_theme.get("strong")
         if stock_strong is None:
             if "stock_strong" in candidate:
                 stock_strong = bool(candidate.get("stock_strong"))
-        stock_leader_tier = stock.get("leader_tier")
+        stock_leader_tier = stock_for_theme.get("leader_tier")
         if stock_leader_tier is None:
             if "stock_leader_tier" in candidate:
                 stock_leader_tier = bool(candidate.get("stock_leader_tier"))
-        stock_leader_rank = stock.get("leader_rank", candidate.get("stock_leader_rank"))
+        stock_leader_rank = stock_for_theme.get(
+            "leader_rank",
+            candidate.get("stock_leader_rank"),
+        )
         leader_status_observed = stock_leader_tier is not None
         if leader_status_observed and not reversal_probe:
             is_current_leader = stock_leader_tier is True and stock_strong is not False
@@ -6500,6 +6695,8 @@ def compact_portfolio_for_decision(portfolio: dict[str, Any]) -> dict[str, Any]:
             "market_value": pos.get("market_value"),
             "position_pct": pos.get("position_pct"),
             "industry": pos.get("industry") or "",
+            "entry_theme": pos.get("entry_theme") or "",
+            "active_theme": pos.get("active_theme") or "",
             "entry_stop_price": pos.get("entry_stop_price"),
             "gap_buffer_pct": pos.get("gap_buffer_pct"),
             "effective_loss_distance_pct": pos.get("effective_loss_distance_pct"),
@@ -6898,7 +7095,10 @@ def call_model_decision(
         elif is_niuone_strategy(strat):
             tide_detail = (
                 f"市场:{c.get('market_regime','-')}/{c.get('market_score','-')} "
-                f"主题:{c.get('industry') or c.get('sector') or '-'} "
+                f"题材:{c.get('signal_theme') or c.get('industry') or c.get('sector') or '-'} "
+                f"行业:{c.get('industry') or c.get('sector') or '-'} "
+                f"归因:{c.get('signal_theme_attribution_score','-')}/"
+                f"{c.get('signal_theme_attribution_weight','-')} "
                 f"主线:{c.get('mainline_state','-')}/{c.get('mainline_score','-')} "
                 f"模式:{c.get('mainline_mode','none')} 核心:{c.get('mainline_primary') or '-'}"
                 f"/{c.get('mainline_secondary') or '-'} "
@@ -6944,7 +7144,8 @@ def call_model_decision(
             )
         elif is_niuone_strategy(strat):
             tide_detail = (
-                f" 主题:{c.get('industry') or c.get('sector') or '-'}"
+                f" 题材:{c.get('signal_theme') or c.get('industry') or c.get('sector') or '-'}"
+                f" 行业:{c.get('industry') or c.get('sector') or '-'}"
                 f" 主线:{c.get('mainline_state','-')}/{c.get('mainline_score','-')}"
             )
         held_candidate_lines.append(
@@ -7710,7 +7911,14 @@ def execute_actions(
                     )
                     continue
 
-                industry = str(candidate.get("industry") or candidate.get("sector") or "").strip()
+                industry = (
+                    niuone_position_theme(existing_pos or {})
+                    if niuone_buy and old_qty > 0
+                    else dynamic_strategy_exposure_key(
+                        candidate,
+                        buy_strategy,
+                    )
+                )
                 if not industry:
                     add_execution_block(
                         decision,
@@ -7725,7 +7933,10 @@ def execute_actions(
                     if pos_code != code
                     and isinstance(pos_item, dict)
                     and position_qty(pos_item) > 0
-                    and str(pos_item.get("industry") or pos_item.get("sector") or "").strip() == industry
+                    and dynamic_strategy_exposure_key(
+                        pos_item,
+                        position_entry_strategy(pos_item),
+                    ) == industry
                 ]
                 if old_qty <= 0 and len(same_industry_positions) >= 2:
                     add_execution_block(
@@ -8061,7 +8272,11 @@ def execute_actions(
                         pos[key] = candidate.get(key)
             if is_dynamic_risk_strategy(buy_strategy):
                 niuone_buy = is_niuone_strategy(buy_strategy)
-                pos["industry"] = str(candidate.get("industry") or candidate.get("sector") or "").strip()
+                pos["industry"] = str(
+                    candidate.get("industry")
+                    or candidate.get("sector")
+                    or ""
+                ).strip()
                 pos["sector"] = pos["industry"]
                 pos["entry_stop_price"] = round(tide_effective_stop_price, 3)
                 pos["entry_stop_source"] = str(
@@ -8105,6 +8320,28 @@ def execute_actions(
                 pos["stock_sector_rank"] = candidate.get("stock_sector_rank")
                 if niuone_buy:
                     reversal_buy = buy_strategy == "niu_reversal_probe"
+                    signal_theme = niuone_candidate_theme(candidate)
+                    if old_qty <= 0:
+                        pos["entry_theme"] = signal_theme
+                        pos["active_theme"] = signal_theme
+                        pos["entry_theme_basis"] = str(
+                            candidate.get("theme_basis") or ""
+                        )
+                        pos["entry_theme_attribution_score"] = candidate.get(
+                            "signal_theme_attribution_score"
+                        )
+                        pos["entry_theme_attribution_weight"] = candidate.get(
+                            "signal_theme_attribution_weight"
+                        )
+                        pos["entry_theme_historical_prior_score"] = (
+                            candidate.get(
+                                "signal_theme_historical_prior_score"
+                            )
+                        )
+                    elif not str(pos.get("active_theme") or "").strip():
+                        pos["active_theme"] = str(
+                            pos.get("entry_theme") or signal_theme
+                        ).strip()
                     pos["mainline_score"] = candidate.get("mainline_score", candidate.get("sector_score"))
                     pos["mainline_state"] = candidate.get("mainline_state", candidate.get("sector_status"))
                     pos["mainline_raw_state"] = candidate.get("mainline_raw_state")
@@ -8152,7 +8389,7 @@ def execute_actions(
                             niuone_execution_gap_pct
                         )
                     if old_qty <= 0:
-                        pos["entry_industry"] = industry
+                        pos["entry_industry"] = pos["industry"]
                         pos["entry_model_requested_shares"] = action.get(
                             "model_requested_shares"
                         )

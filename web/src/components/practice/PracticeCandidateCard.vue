@@ -37,6 +37,11 @@ const riskFlags = computed(() => {
 const tier = computed(() => practiceCandidateTier(props.item))
 const tierLabel = computed(() => ({ high: '交易达标', mid: hardBlockers.value.length ? '未达标' : '等确认', low: '仅观察' })[tier.value])
 const industryLabel = computed(() => practiceCandidateIndustryLabel(props.item))
+const signalThemeLabel = computed(() => String(props.item.signal_theme || '').trim())
+const attributionWeightText = computed(() => {
+  const value = Number(props.item.signal_theme_attribution_weight)
+  return Number.isFinite(value) ? `${(value * 100).toFixed(1)}%` : '--'
+})
 const change = computed(() => Number(props.item.change_pct))
 const changeText = computed(() => Number.isFinite(change.value)
   ? `${change.value > 0 ? '+' : ''}${change.value.toFixed(2)}%`
@@ -91,7 +96,7 @@ function toggleCandidateDetails() {
   >
     <div
       class="candidate-summary"
-      :class="{ 'has-industry': industryLabel }"
+      :class="{ 'has-industry': industryLabel || signalThemeLabel }"
       :role="niuoneStrategy ? 'button' : undefined"
       :tabindex="niuoneStrategy ? 0 : undefined"
       :aria-expanded="niuoneStrategy ? detailsExpanded : undefined"
@@ -116,8 +121,9 @@ function toggleCandidateDetails() {
           >{{ strategy.label }}</span>
         </div>
       </div>
-      <div v-if="industryLabel" class="candidate-industry">
-        <span class="candidate-industry-badge">{{ industryLabel }}</span>
+      <div v-if="industryLabel || signalThemeLabel" class="candidate-industry">
+        <span v-if="signalThemeLabel" class="candidate-industry-badge candidate-theme-badge">题材 · {{ signalThemeLabel }}</span>
+        <span v-if="industryLabel" class="candidate-industry-badge">行业 · {{ industryLabel }}</span>
       </div>
       <span class="candidate-tier" :class="tier">{{ tierLabel }}</span>
     </div>
@@ -157,6 +163,18 @@ function toggleCandidateDetails() {
             <div class="niuone-fact">
               <span>主线状态</span>
               <strong>{{ mainlineStateLabel }} · {{ formatPracticeNumber(item.mainline_score) }}</strong>
+            </div>
+            <div class="niuone-fact">
+              <span>本次入选题材</span>
+              <strong>{{ signalThemeLabel || '--' }}</strong>
+            </div>
+            <div class="niuone-fact">
+              <span>题材归因 / 权重</span>
+              <strong>{{ formatPracticeNumber(item.signal_theme_attribution_score) }} · {{ attributionWeightText }}</strong>
+            </div>
+            <div class="niuone-fact">
+              <span>历史先验 / 同题材共振</span>
+              <strong>{{ formatPracticeNumber(item.signal_theme_historical_prior_score) }} · {{ formatPracticeNumber(item.signal_theme_cohort_alignment_score) }}</strong>
             </div>
             <div class="niuone-fact">
               <span>核心题材</span>
@@ -365,9 +383,18 @@ function toggleCandidateDetails() {
 }
 
 .candidate-industry {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
   grid-area: industry;
   justify-self: start;
   min-width: 0;
+}
+
+.candidate-theme-badge {
+  background: var(--green-soft);
+  border-color: var(--green-border);
+  color: var(--green-text);
 }
 
 .candidate-industry-badge {

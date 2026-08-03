@@ -136,6 +136,11 @@ def niu_candidate(**updates) -> dict:
         "hard_blockers": [],
         "industry": "半导体",
         "sector": "半导体",
+        "signal_theme": "半导体",
+        "theme_basis": "eastmoney_concept",
+        "signal_theme_attribution_score": 86.0,
+        "signal_theme_attribution_weight": 1.0,
+        "signal_theme_historical_prior_score": 84.0,
         "market_regime": "offensive",
         "market_score": 78.0,
         "market_hard_stop": False,
@@ -818,6 +823,75 @@ class NiuOneStrategyTests(unittest.TestCase):
             ],
             ["存储芯片", "先进封装"],
         )
+        attributions = context["stocks"]["600000"]["theme_attributions"]
+        self.assertCountEqual(
+            [item["theme"] for item in attributions],
+            ["存储芯片", "先进封装"],
+        )
+        self.assertAlmostEqual(
+            sum(float(item["attribution_weight"]) for item in attributions),
+            1.0,
+            places=5,
+        )
+
+    def test_same_stage_multi_concept_route_prefers_attribution_evidence(self):
+        rows = make_rows("600000", "通信设备", 0.02)
+        theme = {
+            "state": "mainline", "score": 76.0,
+            "niuone_lifecycle_stage": "markup",
+            "member_count": 8, "eligible_data": True,
+            "strong_stock_count": 4, "effective_strong_count": 3.5,
+            "single_stock_dominated": False,
+            "cross_day_persistent": True,
+            "cross_day_confirmed": True,
+            "mainline_confirmed": True,
+            "today_strength_score": 75.0,
+        }
+        context = {
+            "market": {
+                "state": "offensive", "score": 78, "hard_stop": False,
+                "allow_new_buys": True,
+            },
+            "mainline": {"mode": "single", "primary": "通信主题"},
+            "dragon_tiger": {"available": False},
+            "news": {"configured": False},
+            "themes": {
+                "通信主题": dict(theme),
+                "数字货币": dict(theme),
+            },
+            "stocks": {
+                "600000": {
+                    "industry": "通信主题", "theme_rank": 100.0,
+                    "market_rank": 92.0, "strong_score": 92.0,
+                    "strong": True, "role": "leader", "leader_rank": 1,
+                    "leader_tier": True, "news_precheck": {},
+                    "classification_industry": "通信设备",
+                    "theme_profiles": [
+                        {
+                            "industry": "通信主题",
+                            "classification_industry": "通信设备",
+                            "role": "leader", "leader_rank": 1,
+                            "leader_tier": True, "theme_rank": 100.0,
+                            "attribution_score": 61.0,
+                        },
+                        {
+                            "industry": "数字货币",
+                            "classification_industry": "通信设备",
+                            "role": "leader", "leader_rank": 1,
+                            "leader_tier": True, "theme_rank": 90.0,
+                            "attribution_score": 88.0,
+                        },
+                    ],
+                },
+            },
+        }
+
+        result = score_niu_leader(rows, context)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["industry"], "数字货币")
+        self.assertEqual(result["signal_theme"], "数字货币")
+        self.assertEqual(result["classification_industry"], "通信设备")
 
     def test_multi_concept_stock_routes_each_action_to_a_compatible_branch(self):
         rows = make_rows("600000", "成熟分支", 0.02)
@@ -2161,6 +2235,9 @@ class NiuOneStrategyTests(unittest.TestCase):
                 state,
                 decision,
                 [reversal_candidate(
+                    industry="通信设备",
+                    sector="通信设备",
+                    signal_theme="数字货币",
                     recent_close=10.0,
                     mainline_score_change=2.5,
                     mainline_state_streak=3,
@@ -2179,6 +2256,9 @@ class NiuOneStrategyTests(unittest.TestCase):
             self.assertEqual(len(executed), 1)
             position = state["positions"]["600000"]
             self.assertEqual(position["entry_execution_reference_price"], 10.0)
+            self.assertEqual(position["industry"], "通信设备")
+            self.assertEqual(position["entry_theme"], "数字货币")
+            self.assertEqual(position["active_theme"], "数字货币")
             self.assertEqual(position["entry_execution_gap_pct"], 1.0)
             self.assertEqual(position["entry_mainline_score_change"], 2.5)
             self.assertEqual(position["entry_mainline_state_streak"], 3)
@@ -2222,7 +2302,12 @@ class NiuOneStrategyTests(unittest.TestCase):
                 "entry_schedule_run_kind": "scheduled",
                 "entry_schedule_triggered_at": "2026-08-03 09:25:00",
                 "entry_execution_mode": "deferred",
-                "entry_industry": "半导体",
+                "entry_industry": "通信设备",
+                "entry_theme": "数字货币",
+                "entry_theme_basis": "eastmoney_concept",
+                "entry_theme_attribution_score": 86.0,
+                "entry_theme_attribution_weight": 1.0,
+                "entry_theme_historical_prior_score": 84.0,
                 "entry_model_requested_shares": 400,
                 "entry_executed_shares": 400,
                 "entry_maximum_permitted_shares": 600,
@@ -2926,6 +3011,85 @@ class NiuOneStrategyTests(unittest.TestCase):
 
         signal = trader.evaluate_sell_signal("600000", state["positions"]["600000"], "2026-07-16", time_exit_allowed=False)
         self.assertEqual(signal["signal"], "niu_mainline_faded")
+
+    def test_active_theme_switch_requires_two_days_and_keeps_entry_theme(self):
+        state = {
+            "positions": {
+                "600000": {
+                    "code": "600000", "name": "多概念测试", "qty": 400,
+                    "avg_cost": 10.0, "last_price": 10.2,
+                    "buy_strategy": "niu_leader",
+                    "industry": "通信设备", "sector": "通信设备",
+                    "entry_industry": "通信设备",
+                    "entry_theme": "数字货币",
+                    "active_theme": "数字货币",
+                },
+            },
+        }
+
+        def payload(day: str, previous_day: str) -> dict:
+            return {
+                "generated_at": f"{day} 14:30:00",
+                "items": [{
+                    "code": "600000",
+                    "best_strategy": "niu_leader",
+                    "industry": "通信设备",
+                    "sector": "通信设备",
+                    "signal_theme": "eSIM",
+                }],
+                "niuone_context": {
+                    "previous_trading_day": previous_day,
+                    "market": {
+                        "state": "rotation", "score": 70,
+                        "hard_stop": False, "allow_new_buys": True,
+                    },
+                    "themes": {
+                        "数字货币": {"score": 68, "state": "mainline"},
+                        "eSIM": {"score": 82, "state": "mainline"},
+                    },
+                    "stocks": {
+                        "600000": {
+                            "classification_industry": "通信设备",
+                            "theme_profiles": [
+                                {
+                                    "industry": "数字货币", "strong": True,
+                                    "role": "core", "leader_rank": 2,
+                                    "leader_tier": True,
+                                },
+                                {
+                                    "industry": "eSIM", "strong": True,
+                                    "role": "leader", "leader_rank": 1,
+                                    "leader_tier": True,
+                                },
+                            ],
+                            "theme_attributions": [
+                                {"theme": "数字货币", "attribution_score": 65, "attribution_weight": 0.35},
+                                {"theme": "eSIM", "attribution_score": 82, "attribution_weight": 0.65},
+                            ],
+                        },
+                    },
+                },
+            }
+
+        trader.sync_niuone_position_context(
+            state,
+            payload("2026-07-15", "2026-07-14"),
+        )
+        position = state["positions"]["600000"]
+        self.assertEqual(position["entry_theme"], "数字货币")
+        self.assertEqual(position["active_theme"], "数字货币")
+        self.assertEqual(position["pending_theme_switch_count"], 1)
+
+        trader.sync_niuone_position_context(
+            state,
+            payload("2026-07-16", "2026-07-15"),
+        )
+        self.assertEqual(position["entry_theme"], "数字货币")
+        self.assertEqual(position["active_theme"], "eSIM")
+        self.assertEqual(position["industry"], "通信设备")
+        self.assertEqual(position["mainline_score"], 82)
+        self.assertEqual(position["theme_switch_history"][-1]["from_theme"], "数字货币")
+        self.assertEqual(position["theme_switch_history"][-1]["to_theme"], "eSIM")
 
     def test_mainline_context_records_peak_and_current_drawdown(self):
         state = {
