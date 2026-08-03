@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
@@ -20,18 +21,63 @@ from .historical_data import (
 from .selection import (
     HistoricalBar,
     PositionExitStrategy,
+    ReplaySelectionStrategy,
     SelectionBacktestConfig,
     SelectionBacktestResult,
     SelectionFunction,
     SelectionStrategy,
+    build_selection_replay_tape,
     run_selection_backtest,
 )
+from .replay_cache import ReplayTapeCache, build_replay_cache_key
 
 
 IndustryMapLoader = Callable[[set[str]], Mapping[str, str]]
 ThemeMapLoader = Callable[[set[str]], Mapping[str, Iterable[str]]]
 BacktestProgress = Callable[[int, str, str], None]
 AnnotationProgress = Callable[[int, int, str], None]
+
+
+NIUONE_REPLAY_SCORED_FIELDS = (
+    "atr",
+    "atr20",
+    "execution_buffer_pct",
+    "gap_buffer_pct",
+    "industry",
+    "mainline_confirmed",
+    "mainline_cross_day_persistent",
+    "mainline_score",
+    "mainline_state",
+    "market_allows_buys",
+    "market_hard_stop",
+    "market_regime",
+    "niuone_entry_subroute",
+    "niuone_lifecycle_stage",
+    "recent_close",
+    "reversal_basis",
+    "stock_leader_rank",
+    "stock_leader_tier",
+    "stock_strong",
+    "stop_price",
+    "stop_source",
+)
+
+
+def _report_progress(
+    callback: BacktestProgress | None,
+    percent: int,
+    phase: str,
+    message: str,
+    *,
+    details: Mapping[str, Any] | None = None,
+) -> None:
+    if callback is None:
+        return
+    combined_reporter = getattr(callback, "report", None)
+    if callable(combined_reporter):
+        combined_reporter(percent, phase, message, dict(details or {}))
+    else:
+        callback(percent, phase, message)
 
 
 def _code(value: Any) -> str:
@@ -183,6 +229,7 @@ class HistoricalSelectionBacktestRun:
     selection: SelectionBacktestResult
     warnings: tuple[str, ...] = ()
     industry_quality: IndustryAnnotationQuality | None = None
+    replay_cache: Mapping[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -192,6 +239,7 @@ class HistoricalSelectionBacktestRun:
             "industry_quality": (
                 self.industry_quality.to_dict() if self.industry_quality else None
             ),
+            "replay_cache": dict(self.replay_cache or {}),
         }
 
 
@@ -334,6 +382,8 @@ def run_historical_selection_backtest(
     theme_loader: ThemeMapLoader | None = None,
     name_by_symbol: Mapping[str, str] | None = None,
     progress_callback: BacktestProgress | None = None,
+    replay_cache: ReplayTapeCache | None = None,
+    replay_cache_identity: Mapping[str, Any] | None = None,
 ) -> HistoricalSelectionBacktestRun:
     """Download warmup/forward buffers and evaluate selected stocks."""
     try:
@@ -450,15 +500,149 @@ def run_historical_selection_backtest(
             "evaluating",
             f"正在回放 {trading_date}（{completed}/{total}）",
         )
+    cache_info: dict[str, Any] = {"enabled": False, "hit": False}
+    execution_selector = selector
+    use_replay_cache = replay_cache is not None and replay_cache_identity is not None
+    if use_replay_cache:
+        identity = dict(replay_cache_identity or {})
+        _report_progress(
+            progress_callback,
+            64,
+            "replay_cache",
+            "正在校验选股回放缓存",
+        )
+        cache_key = build_replay_cache_key(
+            bars_by_symbol,
+            protocol_version=str(identity.get("protocol_version") or ""),
+            selector_id=str(identity.get("selector_id") or ""),
+            strategy_ids=identity.get("strategy_ids") or (),
+            signal_start_date=start.isoformat(),
+            signal_end_date=end.isoformat(),
+            sources=identity.get("sources") or (),
+            adjustment=str(identity.get("adjustment") or ""),
+            stock_pool=identity.get("stock_pool") or (),
+            source_by_symbol=data.source_by_symbol,
+        )
+        tape = replay_cache.load(cache_key)
+        cache_hit = tape is not None
+        if tape is None:
+            with replay_cache.build_lock(cache_key):
+                # Another Dashboard may have completed the same miss while this
+                # worker waited for the bounded cross-process build lock.
+                tape = replay_cache.load(cache_key)
+                cache_hit = tape is not None
+                if tape is None:
+                    def replay_progress(
+                        completed: int,
+                        total: int,
+                        trading_date: str,
+                        phase: str,
+                        day_elapsed: float,
+                        eta_seconds: float | None,
+                    ) -> None:
+                        bounded = min(max(0, completed), max(0, total))
+                        percent = 68 + round(bounded / max(1, total) * 20)
+                        label = (
+                            "正在重建题材截面"
+                            if phase == "rebuilding_context" else "正在执行策略评分"
+                        )
+                        _report_progress(
+                            progress_callback,
+                            percent,
+                            phase,
+                            f"{label}：{trading_date}（{bounded}/{total}）",
+                            details={
+                                "trading_date": trading_date,
+                                "day_elapsed_seconds": round(day_elapsed, 2),
+                                "eta_seconds": (
+                                    round(eta_seconds, 1)
+                                    if eta_seconds is not None else None
+                                ),
+                            },
+                        )
+
+                    tape = build_selection_replay_tape(
+                        bars_by_symbol,
+                        selector,
+                        config=resolved_selection,
+                        normalization_progress_callback=normalization_progress,
+                        preparation_progress_callback=preparation_progress,
+                        replay_progress_callback=replay_progress,
+                        scored_fields=(
+                            NIUONE_REPLAY_SCORED_FIELDS
+                            if position_exit_strategy is not None else None
+                        ),
+                    )
+                    if not replay_cache.store(cache_key, tape):
+                        warnings.append(
+                            "selection replay cache could not be persisted; this run "
+                            "completed with an in-memory tape"
+                        )
+        cache_info = {
+            "enabled": True,
+            "hit": cache_hit,
+            "key": cache_key.digest[:16],
+            "schema_version": int(cache_key.descriptor["schema_version"]),
+            "classification_snapshot_hash": str(
+                cache_key.descriptor["classification_snapshot_hash"]
+            ),
+        }
+        if cache_hit:
+            _report_progress(
+                progress_callback,
+                88,
+                "replay_cache",
+                "已复用选股回放缓存，跳过题材截面重建与评分",
+            )
+        execution_selector = ReplaySelectionStrategy(tape)
+
+    execution_started_at = time.perf_counter()
+    previous_execution_progress_at = execution_started_at
+    execution_elapsed: list[float] = []
+
+    def execution_progress(completed: int, total: int, trading_date: str) -> None:
+        nonlocal previous_execution_progress_at
+        now = time.perf_counter()
+        day_elapsed = max(0.0, now - previous_execution_progress_at)
+        previous_execution_progress_at = now
+        execution_elapsed.append(day_elapsed)
+        average_elapsed = sum(execution_elapsed) / len(execution_elapsed)
+        bounded = min(max(0, completed), max(0, total))
+        phase = (
+            "replaying_exits"
+            if position_exit_strategy is not None else "evaluating"
+        )
+        label = (
+            "正在回放持仓与退出"
+            if position_exit_strategy is not None else "正在回放选股信号"
+        )
+        _report_progress(
+            progress_callback,
+            89 + round(bounded / max(1, total) * 10),
+            phase,
+            f"{label}：{trading_date}（{bounded}/{total}）",
+            details={
+                "trading_date": trading_date,
+                "day_elapsed_seconds": round(day_elapsed, 2),
+                "eta_seconds": round(
+                    average_elapsed * max(0, total - bounded),
+                    1,
+                ),
+            },
+        )
 
     selection = run_selection_backtest(
         bars_by_symbol,
-        selector,
+        execution_selector,
         config=resolved_selection,
         position_exit_strategy=position_exit_strategy,
-        progress_callback=selection_progress,
-        normalization_progress_callback=normalization_progress,
-        preparation_progress_callback=preparation_progress,
+        progress_callback=(execution_progress if use_replay_cache else selection_progress),
+        normalization_progress_callback=(
+            None if use_replay_cache else normalization_progress
+        ),
+        preparation_progress_callback=(
+            None if use_replay_cache else preparation_progress
+        ),
     )
     if progress_callback is not None:
         progress_callback(100, "completed", "回测完成")
@@ -467,6 +651,7 @@ def run_historical_selection_backtest(
         selection=selection,
         warnings=tuple(warnings),
         industry_quality=industry_quality,
+        replay_cache=MappingProxyType(cache_info),
     )
 
 

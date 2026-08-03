@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import statistics
+import time
 from bisect import bisect_left
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -526,6 +527,10 @@ HistoricalFlowProvider = Callable[[SelectionContext], Any]
 SelectionProgress = Callable[[int, int, str], None]
 SelectionPreparation = Callable[[str], None]
 SelectionPhaseProgress = Callable[[int, int], None]
+SelectionReplayProgress = Callable[
+    [int, int, str, str, float, float | None],
+    None,
+]
 SelectionSignalFilter = Callable[[SelectionSignal], bool]
 
 
@@ -923,6 +928,7 @@ def build_selection_replay_tape(
     preparation_callback: SelectionPreparation | None = None,
     normalization_progress_callback: SelectionPhaseProgress | None = None,
     preparation_progress_callback: SelectionPhaseProgress | None = None,
+    replay_progress_callback: SelectionReplayProgress | None = None,
     scored_fields: Sequence[str] | None = None,
     cross_section_fields: Sequence[str] | None = None,
 ) -> SelectionReplayTape:
@@ -971,6 +977,7 @@ def build_selection_replay_tape(
     )
     evaluation_dates = tuple(trading_dates[first_selector_session:])
     completed_sessions = 0
+    elapsed_sessions: list[float] = []
 
     for session_index, trading_date in enumerate(trading_dates):
         current_bars = {
@@ -1013,7 +1020,36 @@ def build_selection_replay_tape(
         set_exit_tracking_symbols = getattr(selector, "set_exit_tracking_symbols", None)
         if callable(set_exit_tracking_symbols):
             set_exit_tracking_symbols(tracked_symbols)
-        generated_signals = _call_selector(selector, context)
+        session_started_at = time.perf_counter()
+
+        def replay_phase(phase: str, _date: str = trading_date) -> None:
+            if replay_progress_callback is None:
+                return
+            average_elapsed = (
+                sum(elapsed_sessions) / len(elapsed_sessions)
+                if elapsed_sessions else None
+            )
+            replay_progress_callback(
+                completed_sessions,
+                len(evaluation_dates),
+                trading_date,
+                str(phase or "scoring"),
+                max(0.0, time.perf_counter() - session_started_at),
+                (
+                    average_elapsed
+                    * max(0, len(evaluation_dates) - completed_sessions)
+                    if average_elapsed is not None else None
+                ),
+            )
+
+        phase_setter = getattr(selector, "set_replay_phase_callback", None)
+        if callable(phase_setter):
+            phase_setter(replay_phase)
+        try:
+            generated_signals = _call_selector(selector, context)
+        finally:
+            if callable(phase_setter):
+                phase_setter(None)
         if within_signal_window:
             tracked_symbols.update(signal.symbol for signal in generated_signals)
 
@@ -1060,6 +1096,19 @@ def build_selection_replay_tape(
                 cross_section=MappingProxyType(cross_section),
             )
         completed_sessions += 1
+        session_elapsed = max(0.0, time.perf_counter() - session_started_at)
+        elapsed_sessions.append(session_elapsed)
+        average_elapsed = sum(elapsed_sessions) / len(elapsed_sessions)
+        if replay_progress_callback is not None:
+            replay_progress_callback(
+                min(completed_sessions, len(evaluation_dates)),
+                len(evaluation_dates),
+                trading_date,
+                "scoring",
+                session_elapsed,
+                average_elapsed
+                * max(0, len(evaluation_dates) - completed_sessions),
+            )
         if progress_callback is not None:
             progress_callback(
                 min(completed_sessions, len(evaluation_dates)),
@@ -2072,12 +2121,6 @@ def _run_strategy_portfolio_backtest(
             set_exit_tracking_symbols(positions)
         generated_signals = _call_selector(selector, context)
         completed_sessions += 1
-        if progress_callback is not None:
-            progress_callback(
-                min(completed_sessions, len(evaluation_dates)),
-                len(evaluation_dates),
-                trading_date,
-            )
 
         for symbol, position in tuple(positions.items()):
             current_bar = current_bars.get(symbol)
@@ -2265,6 +2308,12 @@ def _run_strategy_portfolio_backtest(
                 "equity": round(equity, 2),
                 "position_count": len(positions),
             })
+        if progress_callback is not None:
+            progress_callback(
+                min(completed_sessions, len(evaluation_dates)),
+                len(evaluation_dates),
+                trading_date,
+            )
 
     for record, _selected, _entry_session in pending_entries.values():
         record["status_reason"] = "no_next_session"
@@ -2706,6 +2755,7 @@ class RegisteredScorerSelector:
         self._latest_scored_by_symbol_strategy: dict[
             tuple[str, str], Mapping[str, Any]
         ] = {}
+        self._replay_phase_callback: Callable[[str, str], None] | None = None
         self._reset_diagnostics()
 
     def _reset_diagnostics(self) -> None:
@@ -2725,7 +2775,15 @@ class RegisteredScorerSelector:
         self._signal_generation_enabled = True
         self._exit_tracking_symbols = frozenset()
         self._latest_scored_by_symbol_strategy = {}
+        self._replay_phase_callback = None
         self._reset_diagnostics()
+
+    def set_replay_phase_callback(
+        self,
+        callback: Callable[[str, str], None] | None,
+    ) -> None:
+        """Expose the context/scoring boundary to a historical replay UI."""
+        self._replay_phase_callback = callback
 
     def set_diagnostics_enabled(self, enabled: bool) -> None:
         """Limit persisted diagnostics to the user-requested signal window."""
@@ -3150,11 +3208,15 @@ class RegisteredScorerSelector:
 
     def on_close(self, context: SelectionContext) -> Iterable[SelectionSignal]:
         self._latest_scored_by_symbol_strategy = {}
+        if self._replay_phase_callback is not None:
+            self._replay_phase_callback("rebuilding_context", context.date)
         shared_context = (
             dict(self.context_provider(context) or {}) if self.context_provider is not None else {}
         )
         if not self._signal_generation_enabled and not self._exit_tracking_symbols:
             return ()
+        if self._replay_phase_callback is not None:
+            self._replay_phase_callback("scoring", context.date)
         candidates: list[tuple[float, float, int, str, str, dict[str, Any]]] = []
         for symbol, current_bar in context.bars.items():
             if self.eligible_symbols is not None and symbol not in self.eligible_symbols:
@@ -3545,6 +3607,7 @@ __all__ = [
     "SelectionPhaseProgress",
     "SelectionProgress",
     "SelectionReplayFrame",
+    "SelectionReplayProgress",
     "SelectionReplayTape",
     "SelectionSignal",
     "SelectionSignalFilter",

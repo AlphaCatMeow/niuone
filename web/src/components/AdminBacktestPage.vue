@@ -112,7 +112,8 @@ const strategyLabels = computed(() => {
 
 const phaseLabels = {
   queued: '等待执行', universe: '构建候选范围', preparing: '准备数据', fetching: '获取历史行情',
-  annotating: '补充行业信息', normalizing: '整理历史行情', precomputing: '预计算技术指标', evaluating: '回放选股信号',
+  annotating: '补充行业信息', normalizing: '整理历史行情', precomputing: '预计算技术指标', replay_cache: '校验选股回放缓存',
+  rebuilding_context: '重建题材截面', scoring: '执行策略评分', evaluating: '回放选股信号', replaying_exits: '回放持仓退出',
   completed: '回测完成', failed: '回测失败', cancelled: '回测已终止',
 }
 const statusLabels = {
@@ -327,6 +328,15 @@ function formatRatio(value) {
 function compactDateTime(value) {
   const text = String(value || '').trim()
   return text ? text.slice(0, 19).replace('T', ' ') : '—'
+}
+
+function formatDuration(value) {
+  const seconds = Number(value)
+  if (!Number.isFinite(seconds) || seconds < 0) return '—'
+  if (seconds < 60) return `${seconds.toFixed(seconds < 10 ? 1 : 0)} 秒`
+  const minutes = Math.floor(seconds / 60)
+  const remaining = Math.round(seconds % 60)
+  return `${minutes} 分 ${remaining} 秒`
 }
 
 function stockCode(value) {
@@ -586,6 +596,9 @@ onBeforeUnmount(stopPolling)
             </div>
             <div class="backtest-timestamps">
               <span>开始于 {{ compactDateTime(job.started_at || job.created_at) }}</span>
+              <span v-if="job.trading_date">交易日 {{ job.trading_date }}</span>
+              <span v-if="job.day_elapsed_seconds !== null && job.day_elapsed_seconds !== undefined">本日耗时 {{ formatDuration(job.day_elapsed_seconds) }}</span>
+              <span v-if="job.eta_seconds !== null && job.eta_seconds !== undefined">预计剩余 {{ formatDuration(job.eta_seconds) }}</span>
             </div>
             <div v-if="job.error" class="errmsg">{{ job.error }}</div>
           </section>

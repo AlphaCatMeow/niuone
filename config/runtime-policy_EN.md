@@ -39,7 +39,7 @@ Private runtime directory:
 | `.local-data/runtime/cron/state/niuone_cron_scheduler.json` | Bounded Cron run keys and daily task outcomes used by strict-forward evaluation |
 | `.local-data/runtime/cron/state/b1_schedule_state.json` | Bounded terminal scan/decision outcomes for configured Practice slots |
 | `.local-data/runtime/market_data/tencent_daily_klines.sqlite3` | Full-market daily-K-line cache populated before the open and incrementally filled by intraday scans |
-| `.local-data/runtime/backtesting/` | Server-side progress and result snapshot for each strategy's current backtest; no historical daily-K cache is stored here |
+| `.local-data/runtime/backtesting/` | Server-side progress/results for each strategy's current backtest, short-lived subprocess exchange files, and compressed selection replay tapes addressed by protocol/data/classification content; this is not a general historical daily-K cache for other modules |
 | `.local-data/runtime/config.yaml` | Model provider, model, and model-key configuration |
 | `.local-data/runtime/cron/state/` | Scheduled-task, X-monitoring, and catch-up-run state |
 | `.local-data/runtime/cron/output/` | Practice-trading candidate-scan cache, simulated-account state, and other non-message runtime caches |

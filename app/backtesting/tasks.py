@@ -1,9 +1,12 @@
-"""Bounded in-process jobs for the admin stock-selection backtest page."""
+"""Bounded, isolated jobs for the admin stock-selection backtest page."""
 from __future__ import annotations
 
 import copy
 import os
 import re
+import shutil
+import subprocess
+import sys
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -37,6 +40,7 @@ from .historical_data import (
     SUPPORTED_HISTORICAL_SOURCES,
 )
 from .niuone_exits import NiuOneStrategyBacktestPolicy
+from .replay_cache import ReplayTapeCache
 from .selection import (
     NiuOneHistoricalContextProvider,
     RegisteredScorerSelector,
@@ -351,6 +355,7 @@ def run_strategy_backtest_request(
     *,
     progress_callback=None,
     universe_loader=load_strategy_universe,
+    replay_cache_dir: Path | None = None,
 ) -> dict[str, Any]:
     suite_id = str(request["strategy"]["id"])
     needs_industry = suite_id in {"niuone", "sector_tide"}
@@ -423,6 +428,21 @@ def run_strategy_backtest_request(
         theme_loader=load_current_theme_map if needs_industry else None,
         name_by_symbol=universe.get("name_by_symbol"),
         progress_callback=progress_callback,
+        replay_cache=(
+            ReplayTapeCache(replay_cache_dir)
+            if replay_cache_dir is not None else None
+        ),
+        replay_cache_identity=(
+            {
+                "protocol_version": protocol_version,
+                "selector_id": suite_id,
+                "strategy_ids": tuple(request["strategy"]["strategy_ids"]),
+                "sources": tuple(request["sources"]),
+                "adjustment": str(request["adjustment"]),
+                "stock_pool": eligible_symbols,
+            }
+            if replay_cache_dir is not None else None
+        ),
     )
     payload = run.to_dict()
     name_by_symbol = universe.get("name_by_symbol") or {}
@@ -519,7 +539,7 @@ def _safe_error(exc: Exception) -> str:
 
 
 class BacktestTaskManager:
-    """Thread-safe server job registry with optional atomic disk persistence."""
+    """Thread-safe registry with one isolated production backtest at a time."""
 
     def __init__(
         self,
@@ -528,10 +548,12 @@ class BacktestTaskManager:
         state_dir: Path | None = None,
     ) -> None:
         self._runner = runner
+        self._uses_subprocess = runner is run_strategy_backtest_request
         self._state_dir = Path(state_dir).expanduser() if state_dir is not None else None
         self._lock = threading.RLock()
         self._jobs: dict[str, dict[str, Any]] = {}
         self._cancel_events: dict[str, threading.Event] = {}
+        self._processes: dict[str, subprocess.Popen[Any]] = {}
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="niuone-backtest")
         resumed = self._load_persisted_jobs()
         for job_id, request in resumed:
@@ -562,6 +584,9 @@ class BacktestTaskManager:
                 "phase": "queued",
                 "progress": 0,
                 "message": "任务已进入队列",
+                "trading_date": "",
+                "day_elapsed_seconds": None,
+                "eta_seconds": None,
                 "created_at": now,
                 "updated_at": now,
                 "started_at": "",
@@ -684,6 +709,9 @@ class BacktestTaskManager:
                         "phase": "queued",
                         "progress": 0,
                         "message": "服务重启后重新排队执行",
+                        "trading_date": "",
+                        "day_elapsed_seconds": None,
+                        "eta_seconds": None,
                         "updated_at": now,
                         "started_at": "",
                         "finished_at": "",
@@ -705,6 +733,124 @@ class BacktestTaskManager:
                 self._jobs[job_id] = job
         return resumed
 
+    def _worker_directory(self, job_id: str) -> Path:
+        if self._state_dir is None or not re.fullmatch(r"[0-9a-f]{32}", job_id):
+            raise ValueError("invalid backtest worker directory")
+        return self._state_dir / "workers" / job_id
+
+    @staticmethod
+    def _terminate_process(process: subprocess.Popen[Any]) -> None:
+        if process.poll() is not None:
+            return
+        try:
+            process.terminate()
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+        except OSError:
+            pass
+
+    def _run_default_subprocess(
+        self,
+        job_id: str,
+        request: dict[str, Any],
+        *,
+        progress: Callable[[int, str, str], None],
+        check_cancelled: Callable[[], None],
+        cancel_event: threading.Event | None,
+    ) -> dict[str, Any]:
+        worker_dir = self._worker_directory(job_id)
+        request_path = worker_dir / "request.json"
+        progress_path = worker_dir / "progress.json"
+        result_path = worker_dir / "result.json"
+        error_path = worker_dir / "error.json"
+        write_json_cache(request_path, {"request": copy.deepcopy(request)})
+        command = [
+            sys.executable,
+            "-m",
+            "app.entrypoints.backtest_worker",
+            "--request",
+            str(request_path),
+            "--progress",
+            str(progress_path),
+            "--result",
+            str(result_path),
+            "--error",
+            str(error_path),
+            "--cache-dir",
+            str(self._state_dir / "replay-cache"),
+        ]
+        creationflags = (
+            int(getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0))
+            if os.name == "nt" else 0
+        )
+        process = subprocess.Popen(
+            command,
+            cwd=PROJECT_ROOT,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=creationflags,
+        )
+        with self._lock:
+            self._processes[job_id] = process
+        last_sequence = -1
+
+        def forward_progress() -> None:
+            nonlocal last_sequence
+            payload = read_json_cache(progress_path)
+            if not isinstance(payload, dict):
+                return
+            sequence = int(payload.get("sequence") or 0)
+            if sequence <= last_sequence:
+                return
+            last_sequence = sequence
+            reporter = getattr(progress, "report", None)
+            details = payload.get("details")
+            if callable(reporter):
+                reporter(
+                    int(payload.get("progress") or 0),
+                    str(payload.get("phase") or "running"),
+                    str(payload.get("message") or "正在回测"),
+                    details if isinstance(details, Mapping) else {},
+                )
+            else:
+                progress(
+                    int(payload.get("progress") or 0),
+                    str(payload.get("phase") or "running"),
+                    str(payload.get("message") or "正在回测"),
+                )
+
+        try:
+            while process.poll() is None:
+                check_cancelled()
+                forward_progress()
+                if cancel_event is not None:
+                    cancel_event.wait(0.1)
+                else:
+                    threading.Event().wait(0.1)
+            forward_progress()
+            check_cancelled()
+            if process.returncode != 0:
+                error = read_json_cache(error_path) or {}
+                raise BacktestTaskError(
+                    str(error.get("error") or f"回测子进程异常退出（{process.returncode}）")
+                )
+            payload = read_json_cache(result_path)
+            result = payload.get("result") if isinstance(payload, dict) else None
+            if not isinstance(result, dict):
+                raise BacktestTaskError("回测子进程未返回有效结果")
+            return result
+        finally:
+            self._terminate_process(process)
+            with self._lock:
+                self._processes.pop(job_id, None)
+            shutil.rmtree(worker_dir, ignore_errors=True)
+
     def _execute(self, job_id: str, request: dict[str, Any]) -> None:
         with self._lock:
             job = self._jobs.get(job_id)
@@ -721,6 +867,9 @@ class BacktestTaskManager:
                 "phase": "preparing",
                 "progress": 1,
                 "message": "正在准备回测",
+                "trading_date": "",
+                "day_elapsed_seconds": None,
+                "eta_seconds": None,
                 "updated_at": now,
                 "started_at": now,
             })
@@ -744,7 +893,12 @@ class BacktestTaskManager:
                 if current is None or current.get("status") != "running":
                     raise _BacktestCancelled("backtest cancelled")
 
-        def progress(percent: int, phase: str, message: str) -> None:
+        def update_progress(
+            percent: int,
+            phase: str,
+            message: str,
+            details: Mapping[str, Any] | None = None,
+        ) -> None:
             check_cancelled()
             with self._lock:
                 current = self._jobs.get(job_id)
@@ -752,16 +906,34 @@ class BacktestTaskManager:
                     raise _BacktestCancelled("backtest cancelled")
                 previous_progress = int(current.get("progress") or 0)
                 previous_phase = str(current.get("phase") or "")
+                previous_details = (
+                    current.get("trading_date"),
+                    current.get("day_elapsed_seconds"),
+                    current.get("eta_seconds"),
+                )
                 current["progress"] = max(
                     previous_progress,
                     min(99, int(percent)),
                 )
                 current["phase"] = str(phase or "running")
                 current["message"] = str(message or "正在回测")[:200]
+                if details:
+                    current["trading_date"] = str(
+                        details.get("trading_date") or ""
+                    )[:10]
+                    current["day_elapsed_seconds"] = details.get(
+                        "day_elapsed_seconds"
+                    )
+                    current["eta_seconds"] = details.get("eta_seconds")
                 current["updated_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
                 if (
                     current["progress"] == previous_progress
                     and current["phase"] == previous_phase
+                    and previous_details == (
+                        current.get("trading_date"),
+                        current.get("day_elapsed_seconds"),
+                        current.get("eta_seconds"),
+                    )
                 ):
                     return
                 try:
@@ -769,9 +941,22 @@ class BacktestTaskManager:
                 except (OSError, TypeError, ValueError) as exc:
                     raise BacktestTaskError("回测进度无法保存到服务端") from exc
 
+        def progress(percent: int, phase: str, message: str) -> None:
+            update_progress(percent, phase, message)
+
         setattr(progress, "check_cancelled", check_cancelled)
+        setattr(progress, "report", update_progress)
         try:
-            result = self._runner(request, progress_callback=progress)
+            if self._uses_subprocess and self._state_dir is not None:
+                result = self._run_default_subprocess(
+                    job_id,
+                    request,
+                    progress=progress,
+                    check_cancelled=check_cancelled,
+                    cancel_event=cancel_event,
+                )
+            else:
+                result = self._runner(request, progress_callback=progress)
         except _BacktestCancelled:
             return
         except Exception as exc:
@@ -800,6 +985,7 @@ class BacktestTaskManager:
                     "phase": "completed",
                     "progress": 100,
                     "message": "回测完成",
+                    "eta_seconds": 0.0,
                     "result": result,
                     "updated_at": now,
                     "finished_at": now,
@@ -819,6 +1005,7 @@ class BacktestTaskManager:
         resolved = str(job_id or "").strip()
         if not resolved:
             return None
+        process: subprocess.Popen[Any] | None = None
         with self._lock:
             job = self._jobs.get(resolved)
             if job is None:
@@ -830,6 +1017,7 @@ class BacktestTaskManager:
                 event = threading.Event()
                 self._cancel_events[resolved] = event
             event.set()
+            process = self._processes.get(resolved)
             now = datetime.now().astimezone().isoformat(timespec="seconds")
             job.update({
                 "status": "cancelled",
@@ -844,7 +1032,10 @@ class BacktestTaskManager:
                 self._persist_job_locked(job)
             except (OSError, TypeError, ValueError) as exc:
                 raise BacktestTaskError("回测已终止，但终止状态保存失败") from exc
-            return copy.deepcopy(job)
+            result = copy.deepcopy(job)
+        if process is not None:
+            self._terminate_process(process)
+        return result
 
     def get(self, job_id: str) -> dict[str, Any] | None:
         with self._lock:
@@ -862,6 +1053,10 @@ class BacktestTaskManager:
 
     def shutdown(self, *, wait: bool = True) -> None:
         """Release the worker; primarily useful for isolated app/tests."""
+        with self._lock:
+            processes = tuple(self._processes.values())
+        for process in processes:
+            self._terminate_process(process)
         self._executor.shutdown(wait=wait, cancel_futures=True)
 
 

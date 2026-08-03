@@ -39,7 +39,7 @@
 | `.local-data/runtime/cron/state/niuone_cron_scheduler.json` | 有界保留的 Cron 运行键与严格前向每日任务结果 |
 | `.local-data/runtime/cron/state/b1_schedule_state.json` | 有界保留的 Practice 配置时点扫描/决策终态 |
 | `.local-data/runtime/market_data/tencent_daily_klines.sqlite3` | 盘前预热并由盘中扫描增量补齐的全市场日 K 缓存 |
-| `.local-data/runtime/backtesting/` | 各策略当前一次回测的服务端进度与结果快照（不保存历史日 K 缓存） |
+| `.local-data/runtime/backtesting/` | 各策略当前一次回测的服务端进度与结果、短生命周期子进程交换文件，以及按协议/数据/分类内容寻址的压缩选股回放带；不保存可供其他模块读取的通用历史日 K 缓存 |
 | `.local-data/runtime/config.yaml` | 模型服务商、模型和模型密钥配置 |
 | `.local-data/runtime/cron/state/` | 定时任务、X 监控和补跑状态 |
 | `.local-data/runtime/cron/output/` | 实战选股缓存、模拟账户状态和其他非消息类运行缓存 |

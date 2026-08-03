@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
 
 from app.backtesting.historical_data import HistoricalDataError, HistoricalFetchConfig
+from app.backtesting.replay_cache import ReplayTapeCache
 from app.backtesting.selection import (
     SelectionBacktestConfig,
     SelectionCostModel,
@@ -13,6 +16,73 @@ from app.backtesting.service import run_historical_selection_backtest
 
 
 class HistoricalSelectionBacktestServiceTests(unittest.TestCase):
+    def test_reuses_cached_selection_tape_without_calling_selector_again(self):
+        rows = [
+            {"date": f"2026-01-0{day}", "open": 10, "high": 11,
+             "low": 9, "close": 10 + day / 10, "volume": 100}
+            for day in range(1, 6)
+        ]
+
+        def fetcher(_symbol, _start, _end, _adjustment, _timeout):
+            return rows
+
+        selector_calls = 0
+
+        def selector(context):
+            nonlocal selector_calls
+            selector_calls += 1
+            return (
+                [SelectionSignal("sh600519", strategy_id="niu_leader")]
+                if context.date == "2026-01-03" else []
+            )
+
+        identity = {
+            "protocol_version": "cache-test-v1",
+            "selector_id": "test",
+            "strategy_ids": ("niu_leader",),
+            "sources": ("eastmoney",),
+            "adjustment": "qfq",
+            "stock_pool": ("sh600519",),
+        }
+        common = {
+            "warmup_calendar_days": 2,
+            "forward_calendar_days": 2,
+            "fetch_config": HistoricalFetchConfig(
+                sources=("eastmoney",), max_attempts_per_source=1,
+            ),
+            "selection_config": SelectionBacktestConfig(
+                holding_sessions=(1,), slippage_bps=0,
+                price_limit_resolver=None,
+            ),
+            "source_fetchers": {"eastmoney": fetcher},
+            "industry_by_symbol": {"600519": "白酒"},
+            "replay_cache_identity": identity,
+        }
+        with tempfile.TemporaryDirectory(prefix="niuone-replay-cache-") as tmp:
+            cache = ReplayTapeCache(Path(tmp))
+            first = run_historical_selection_backtest(
+                ["600519"], "2026-01-03", "2026-01-03", selector,
+                replay_cache=cache,
+                **common,
+            )
+            first_call_count = selector_calls
+
+            def selector_must_not_run(_context):
+                raise AssertionError("cached selector should not run")
+
+            second = run_historical_selection_backtest(
+                ["600519"], "2026-01-03", "2026-01-03",
+                selector_must_not_run,
+                replay_cache=cache,
+                **common,
+            )
+
+        self.assertGreater(first_call_count, 0)
+        self.assertEqual(selector_calls, first_call_count)
+        self.assertFalse(first.replay_cache["hit"])
+        self.assertTrue(second.replay_cache["hit"])
+        self.assertEqual(first.selection.to_dict(), second.selection.to_dict())
+
     def test_forwards_server_cancellation_check_to_history_fetch(self):
         class FetchCancelled(RuntimeError):
             pass

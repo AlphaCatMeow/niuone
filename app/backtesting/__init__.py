@@ -33,6 +33,7 @@ from .selection import (
     SelectionFunction,
     SelectionPreparation,
     SelectionReplayFrame,
+    SelectionReplayProgress,
     SelectionReplayTape,
     SelectionSignal,
     SelectionSignalFilter,
@@ -41,6 +42,7 @@ from .selection import (
     build_selection_replay_tape,
     run_selection_backtest,
 )
+from .replay_cache import ReplayCacheKey, ReplayTapeCache, build_replay_cache_key
 from .niuone_exits import NiuOneDailyExitStrategy, NiuOneStrategyBacktestPolicy
 from .service import (
     HistoricalSelectionBacktestRun,
@@ -73,6 +75,8 @@ __all__ = [
     "PositionExitStrategy",
     "RegisteredScorerSelector",
     "ReplaySelectionStrategy",
+    "ReplayCacheKey",
+    "ReplayTapeCache",
     "SectorTideHistoricalContextProvider",
     "SUPPORTED_ADJUSTMENTS",
     "SUPPORTED_HISTORICAL_SOURCES",
@@ -84,12 +88,14 @@ __all__ = [
     "SelectionFunction",
     "SelectionPreparation",
     "SelectionReplayFrame",
+    "SelectionReplayProgress",
     "SelectionReplayTape",
     "SelectionSignal",
     "SelectionSignalFilter",
     "SelectionStrategy",
     "a_share_price_limits",
     "build_selection_replay_tape",
+    "build_replay_cache_key",
     "fetch_historical_data",
     "fetch_historical_series",
     "load_current_industry_map",

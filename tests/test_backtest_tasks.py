@@ -327,6 +327,71 @@ class BacktestTaskTests(unittest.TestCase):
             release.set()
             manager.shutdown()
 
+    def test_manager_persists_structured_day_timing_details(self):
+        entered = threading.Event()
+        release = threading.Event()
+
+        def runner(_request, *, progress_callback):
+            progress_callback.report(
+                76,
+                "scoring",
+                "正在执行策略评分",
+                {
+                    "trading_date": "2026-01-12",
+                    "day_elapsed_seconds": 2.5,
+                    "eta_seconds": 25.0,
+                },
+            )
+            entered.set()
+            release.wait(timeout=2)
+            return {"ok": True}
+
+        manager = BacktestTaskManager(runner=runner)
+        try:
+            created = manager.start({
+                "strategy_id": "base",
+                "start_date": "2026-01-01",
+                "end_date": "2026-02-01",
+                "adjustment": "qfq",
+                "source": "eastmoney",
+            })
+            self.assertTrue(entered.wait(timeout=1))
+            running = manager.get(created["id"])
+            self.assertEqual(running["phase"], "scoring")
+            self.assertEqual(running["trading_date"], "2026-01-12")
+            self.assertEqual(running["day_elapsed_seconds"], 2.5)
+            self.assertEqual(running["eta_seconds"], 25.0)
+        finally:
+            release.set()
+            manager.shutdown()
+
+    def test_default_production_runner_uses_isolated_subprocess(self):
+        with tempfile.TemporaryDirectory(prefix="niuone-backtest-") as tmp, patch.object(
+            BacktestTaskManager,
+            "_run_default_subprocess",
+            autospec=True,
+            return_value={"selection": {"statistics": {"signal_count": 0}}},
+        ) as isolated:
+            manager = BacktestTaskManager(state_dir=Path(tmp))
+            try:
+                created = manager.start({
+                    "strategy_id": "base",
+                    "start_date": "2026-01-01",
+                    "end_date": "2026-02-01",
+                    "adjustment": "qfq",
+                    "source": "eastmoney",
+                })
+                for _ in range(100):
+                    completed = manager.get(created["id"])
+                    if completed and completed["status"] == "succeeded":
+                        break
+                    time.sleep(0.01)
+                self.assertEqual(completed["status"], "succeeded")
+                isolated.assert_called_once()
+                self.assertEqual(isolated.call_args.args[1], created["id"])
+            finally:
+                manager.shutdown()
+
     def test_manager_persists_progress_restores_result_and_resets_on_next_run(self):
         entered = threading.Event()
         release = threading.Event()

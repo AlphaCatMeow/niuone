@@ -2157,6 +2157,46 @@ class StrategySelectionBacktestingTests(unittest.TestCase):
         self.assertEqual(result.signals[0]["strategy_id"], "higher")
         self.assertEqual(result.signals[0]["entry_date"], "2026-01-07")
 
+    def test_replay_progress_separates_context_building_and_scoring(self):
+        phases = []
+
+        def context_provider(_context):
+            return {"market": {"state": "risk_on"}}
+
+        selector = RegisteredScorerSelector(
+            ["recorded"],
+            context_provider=context_provider,
+            scorers={
+                "recorded": lambda _rows: {
+                    "score": 9.0,
+                    "entry_threshold": 8.0,
+                    "hard_blockers": [],
+                    "actionable": True,
+                },
+            },
+        )
+        build_selection_replay_tape(
+            {"600000": [
+                daily_bar("2026-01-05", 10.0),
+                daily_bar("2026-01-06", 10.1),
+            ]},
+            selector,
+            config=SelectionBacktestConfig(
+                holding_sessions=(1,),
+                signal_start_date="2026-01-05",
+                signal_end_date="2026-01-06",
+            ),
+            replay_progress_callback=(
+                lambda completed, total, trading_date, phase, elapsed, eta:
+                phases.append((completed, total, trading_date, phase, elapsed, eta))
+            ),
+        )
+
+        phase_names = [item[3] for item in phases]
+        self.assertIn("rebuilding_context", phase_names)
+        self.assertIn("scoring", phase_names)
+        self.assertEqual(phases[-1][0:4], (2, 2, "2026-01-06", "scoring"))
+
     def test_registered_selector_caps_one_strategy_without_hiding_other_paths(self):
         def reversal(_rows):
             return {
