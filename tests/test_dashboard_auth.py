@@ -221,6 +221,7 @@ class DashboardAuthTests(unittest.TestCase):
         self.original_admin_password = dashboard.ADMIN_PASSWORD
         self.original_public_data_dir = dashboard.PUBLIC_DATA_DIR
         self.original_public_snapshot_publisher = dashboard.PUBLIC_SNAPSHOT_PUBLISHER
+        self.original_market_data_readiness = dashboard.market_data_readiness
         self.saved_env = {
             name: os.environ.get(name)
             for name in (
@@ -255,6 +256,16 @@ class DashboardAuthTests(unittest.TestCase):
         dashboard.MONEY_FLOW_SNAPSHOT_FILE = self.tmp_path / 'cron' / 'output' / 'industry_main_money_flow_cache.json'
         dashboard.PUBLIC_DATA_DIR = self.tmp_path / 'public-data'
         dashboard.PUBLIC_SNAPSHOT_PUBLISHER = None
+        # Workflow tests exercise behavior after the deployment gate; dedicated
+        # readiness tests below replace this stub with blocked states.
+        dashboard.market_data_readiness = lambda _now=None: {
+            'ready': True,
+            'data_ready': True,
+            'requires_full_kline_cache': True,
+            'blockers': [],
+            'warnings': [],
+            'kline': {'ready': True, 'status': 'completed'},
+        }
         dashboard.API_RESPONSE_CACHE.clear()
         dashboard.API_CACHE_KEY_LOCKS.clear()
         dashboard.API_CACHE_KEY_GENERATIONS.clear()
@@ -275,6 +286,7 @@ class DashboardAuthTests(unittest.TestCase):
         dashboard.ADMIN_PASSWORD = self.original_admin_password
         dashboard.PUBLIC_DATA_DIR = self.original_public_data_dir
         dashboard.PUBLIC_SNAPSHOT_PUBLISHER = self.original_public_snapshot_publisher
+        dashboard.market_data_readiness = self.original_market_data_readiness
         for name, value in self.saved_env.items():
             if value is None:
                 os.environ.pop(name, None)
