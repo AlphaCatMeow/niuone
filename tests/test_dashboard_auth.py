@@ -5076,6 +5076,20 @@ process.stdout.write(JSON.stringify({{
         self.assertIn('初始化完成后运行选股与交易策略', PRACTICE_COMPONENTS)
         self.assertIn('页面已更新，但后台仍在运行旧版本', PRACTICE_COMPONENTS)
 
+    def test_practice_data_readiness_hides_only_when_fully_ready(self):
+        overview = (
+            ROOT / 'web' / 'src' / 'components' / 'practice' / 'PracticeAccountOverview.vue'
+        ).read_text(encoding='utf-8')
+
+        self.assertIn('const showDataReadiness = computed(() => !(', overview)
+        self.assertIn("props.dataReadiness?.status === 'ready'", overview)
+        self.assertIn('props.dataReadiness?.ready === true', overview)
+        self.assertIn('props.dataReadiness?.data_ready === true', overview)
+        self.assertIn('!props.dataReadiness?.error', overview)
+        self.assertIn('!props.dataReadiness?.blockers?.length', overview)
+        self.assertIn('!props.dataReadiness?.warnings?.length', overview)
+        self.assertIn('v-if="showDataReadiness"', overview)
+
     def test_manual_market_summary_snapshot_force_refreshes_live_channels(self):
         original_runner = dashboard.run_dashboard_helper
         original_builder = dashboard.practice_market_summary_impl.build_realtime_market_snapshot

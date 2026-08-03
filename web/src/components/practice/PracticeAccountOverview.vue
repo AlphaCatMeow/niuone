@@ -40,6 +40,15 @@ const readinessBarProgress = computed(() => (
     ? initializationProgress.value
     : readinessCoverage.value
 ))
+const showDataReadiness = computed(() => !(
+  props.dataReadiness?.loading === false
+  && props.dataReadiness?.ready === true
+  && props.dataReadiness?.data_ready === true
+  && props.dataReadiness?.status === 'ready'
+  && !props.dataReadiness?.error
+  && !props.dataReadiness?.blockers?.length
+  && !props.dataReadiness?.warnings?.length
+))
 const manualButtonText = computed(() => {
   if (manualRunning.value) return props.manualCycle.stage_label || '本轮执行中…'
   if (dashboardRestartRequired.value) return '完整重启服务后再运行'
@@ -77,6 +86,7 @@ const manualButtonText = computed(() => {
       </div>
     </div>
     <div
+      v-if="showDataReadiness"
       class="practice-data-readiness"
       :class="`is-${dataReadiness.status || 'unknown'}`"
       role="status"
