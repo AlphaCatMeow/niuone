@@ -25,6 +25,7 @@ from starlette.staticfiles import StaticFiles
 from app.dashboard.routers import (
     AdminAccess,
     create_admin_router,
+    create_backtesting_router,
     create_market_router,
     create_messages_router,
     create_practice_router,
@@ -143,6 +144,7 @@ def create_app(
     legacy_module: ModuleType | None = None,
     web_dist_dir: Path | None = None,
     enable_background_services: bool = True,
+    backtest_task_manager: Any | None = None,
 ) -> FastAPI:
     """Create the production single-port ASGI application."""
 
@@ -254,6 +256,12 @@ def create_app(
     @app.api_route("/admin/settings/{group_slug}", methods=["GET", "HEAD"], include_in_schema=False)
     async def admin_group(request: Request, group_slug: str) -> Response:
         if group_slug not in legacy.ADMIN_SETTING_GROUP_BY_SLUG:
+            return Response(status_code=404, headers={"Cache-Control": "no-store"})
+        return await serve_vue(request)
+
+    @app.api_route("/admin/backtest/{strategy_id}", methods=["GET", "HEAD"], include_in_schema=False)
+    async def admin_backtest(request: Request, strategy_id: str) -> Response:
+        if not strategy_id or len(strategy_id) > 80:
             return Response(status_code=404, headers={"Cache-Control": "no-store"})
         return await serve_vue(request)
 
@@ -379,6 +387,18 @@ def create_app(
             client_ip=lambda request: _client_ip(request, legacy),
             request_is_secure=lambda request: _request_is_secure(request, legacy),
             json_response=_canonical_json_response,
+        )
+    )
+    app.include_router(
+        create_backtesting_router(
+            access=admin_access,
+            rate_limit=lambda request, **kwargs: _rate_limit_response(
+                request,
+                legacy,
+                **kwargs,
+            ),
+            json_response=_canonical_json_response,
+            manager=backtest_task_manager,
         )
     )
     app.include_router(

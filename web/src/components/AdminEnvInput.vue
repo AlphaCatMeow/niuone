@@ -177,25 +177,34 @@ async function removeListValue(index) {
 
   <template v-else-if="kind === 'strategy_source' || kind === 'strategy_suite'">
     <div class="strategy-multi-control">
-      <label
+      <div
         v-for="option in strategyOptions"
         :key="option.id"
-        class="strategy-option"
+        class="strategy-option-row"
         :style="{'--strategy-color': option.color || '#94a3b8'}"
       >
-        <input
-          type="radio"
-          :name="fieldName"
-          :value="option.id"
-          :checked="value === option.id"
-          :aria-label="`${label}：${option.label || option.id}`"
-          data-strategy-source-toggle
-        >
-        <span class="strategy-option-main">
-          <span class="strategy-option-title"><span class="strategy-option-dot" />{{ option.label || option.id }}</span>
-          <span class="strategy-option-desc">{{ option.desc || '' }}</span>
-        </span>
-      </label>
+        <label class="strategy-option">
+          <input
+            type="radio"
+            :name="fieldName"
+            :value="option.id"
+            :checked="value === option.id"
+            :aria-label="`${label}：${option.label || option.id}`"
+            data-strategy-source-toggle
+          >
+          <span class="strategy-option-main">
+            <span class="strategy-option-title"><span class="strategy-option-dot" />{{ option.label || option.id }}</span>
+            <span class="strategy-option-desc">{{ option.desc || '' }}</span>
+          </span>
+        </label>
+        <RouterLink
+          v-if="kind === 'strategy_suite'"
+          class="strategy-backtest-link"
+          :to="`/admin/backtest/${encodeURIComponent(option.id)}`"
+          :aria-label="`回测${option.label || option.id}`"
+          @click.stop
+        >回测</RouterLink>
+      </div>
     </div>
     <div class="config-meta">每轮只启用一套完整策略；候选、买入、卖出和仓位规则互不混用</div>
   </template>

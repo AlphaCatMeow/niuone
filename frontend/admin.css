@@ -82,6 +82,10 @@ select{appearance:none;background-image:linear-gradient(45deg,transparent 50%,#9
 .save-button:active,.save-button.pressed{transform:translateY(2px) scale(.985);filter:brightness(.88);box-shadow:0 3px 8px rgba(0,0,0,.28),0 2px 8px rgba(0,0,0,.30) inset}
 .strategy-multi-control{display:grid;gap:8px}
 .strategy-option{display:grid;grid-template-columns:18px minmax(0,1fr);gap:9px;align-items:start;border:1px solid rgba(148,163,184,.16);border-radius:8px;background:rgba(15,23,42,.54);padding:10px 11px;cursor:pointer;transition:border-color .12s ease,background .12s ease,transform .12s ease}
+.strategy-option-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:stretch;min-width:0}
+.strategy-option-row .strategy-option{min-width:0}
+.strategy-backtest-link{display:inline-flex;align-items:center;justify-content:center;align-self:stretch;min-width:62px;padding:8px 11px;border:1px solid var(--accent-border,rgba(125,211,252,.28));border-radius:8px;background:var(--accent-soft,rgba(14,165,233,.10));color:var(--accent-text,#bae6fd);font-size:12px;font-weight:850;text-decoration:none;transition:border-color .12s ease,background .12s ease,transform .12s ease}
+.strategy-backtest-link:hover,.strategy-backtest-link:focus-visible{border-color:var(--accent,#60a5fa);background:var(--accent-soft,rgba(14,165,233,.16));transform:translateY(-1px);outline:0}
 .strategy-option:hover{border-color:rgba(125,211,252,.32);background:rgba(30,41,59,.62)}
 .strategy-option input{width:16px;min-width:16px;height:16px;margin:2px 0 0;padding:0;accent-color:var(--accent)}
 .strategy-option-main{display:grid;gap:3px;min-width:0}
@@ -179,6 +183,10 @@ html[data-theme="dark"] {
   --red-soft:#2d1818;
   --red-border:#713a36;
   --red-text:#ffaaa3;
+  --danger-button-bg:#b92d24;
+  --danger-button-hover:#d13b30;
+  --danger-button-border:#ff9b93;
+  --danger-button-text:#fff;
   --yellow:#e5b84e;
   --yellow-soft:#29220f;
   --yellow-border:#6b5724;
@@ -211,6 +219,10 @@ html:not([data-theme="dark"]) {
   --red-soft:#fff3f2;
   --red-border:#efc9c5;
   --red-text:#a8342d;
+  --danger-button-bg:#b42318;
+  --danger-button-hover:#912018;
+  --danger-button-border:#7a271a;
+  --danger-button-text:#fff;
   --yellow:#9a5b00;
   --yellow-soft:#fff8e5;
   --yellow-border:#ddc27e;

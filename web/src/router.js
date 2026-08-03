@@ -25,6 +25,10 @@ const routes = [
     component: () => import('./components/AdminPage.vue'),
   },
   {
+    path: '/admin/backtest/:strategyId',
+    component: () => import('./components/AdminBacktestPage.vue'),
+  },
+  {
     path: '/admin/settings/:group',
     component: () => import('./components/AdminPage.vue'),
   },

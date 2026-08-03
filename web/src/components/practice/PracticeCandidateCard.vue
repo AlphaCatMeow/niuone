@@ -4,6 +4,7 @@ import {
   formatPracticeNumber,
   PRACTICE_TIDE_STATUS_LABELS,
   practiceCandidateIndustryLabel,
+  practiceNiuoneLifecycleLabel,
   practiceCandidateTier,
 } from '../../utils/practiceCandidateDisplay.js'
 
@@ -64,6 +65,7 @@ const mainlineModeLabel = computed(() => ({
 const mainlineStateLabel = computed(() => (
   PRACTICE_TIDE_STATUS_LABELS[props.item.mainline_state] || props.item.mainline_state || '--'
 ))
+const lifecycleLabel = computed(() => practiceNiuoneLifecycleLabel(props.item))
 const mainlineThemes = computed(() => [props.item.mainline_primary, props.item.mainline_secondary]
   .filter(Boolean)
   .join(' / ') || '--')
@@ -149,6 +151,10 @@ function toggleCandidateDetails() {
               <strong>{{ marketRegimeLabel }} · {{ formatPracticeNumber(item.market_score) }}</strong>
             </div>
             <div class="niuone-fact">
+              <span>生命周期</span>
+              <strong>{{ lifecycleLabel }}</strong>
+            </div>
+            <div class="niuone-fact">
               <span>主线状态</span>
               <strong>{{ mainlineStateLabel }} · {{ formatPracticeNumber(item.mainline_score) }}</strong>
             </div>
@@ -173,12 +179,16 @@ function toggleCandidateDetails() {
               <strong>#{{ item.stock_leader_rank ?? '--' }} · 强度 {{ formatPracticeNumber(item.stock_strong_score) }}</strong>
             </div>
             <div v-if="reversalStrategy" class="niuone-fact">
-              <span>反转双确认</span>
-              <strong>{{ item.reversal_confirmed ? '已完成' : '待完成' }} · {{ item.reversal_confirmation_count ?? 0 }}次</strong>
+              <span>日线V型区间</span>
+              <strong>{{ item.daily_v_left_days ?? '--' }}日回落 · {{ item.daily_v_right_days ?? '--' }}日修复</strong>
             </div>
             <div v-if="reversalStrategy" class="niuone-fact">
-              <span>日内领涨 / 低点反弹</span>
-              <strong>#{{ item.stock_reversal_leader_rank ?? '--' }} · {{ formatPracticeNumber(item.rebound_from_low_pct) }}%</strong>
+              <span>左侧跌幅 / 右侧反弹</span>
+              <strong>{{ formatPracticeNumber(item.daily_v_decline_pct) }}% · {{ formatPracticeNumber(item.daily_v_rebound_pct) }}%</strong>
+            </div>
+            <div v-if="reversalStrategy" class="niuone-fact">
+              <span>阶段低点 / 跌幅收复</span>
+              <strong>{{ item.daily_v_trough_date || '--' }} · {{ formatPracticeNumber(Number(item.daily_v_recovery_ratio) * 100) }}%</strong>
             </div>
             <div class="niuone-fact">
               <span>主线内排名 / 龙头集中度</span>
@@ -187,8 +197,8 @@ function toggleCandidateDetails() {
           </div>
           <p v-if="reversalStrategy || item.mainline_intraday_state === 'intraday_mainline'" class="niuone-observation-note">
             {{ reversalStrategy
-              ? '反转试仓已完成分时双确认，但不等同于主线确认；T+0不加仓，跨日延续后再升级。'
-              : '日内强势仅用于观察；只有独立的反转试仓满足双确认时才允许小仓试错。' }}
+              ? '牛牛试仓依据日线区间V型结构，右侧修复确认后轻仓参与；日内观察数据不作为该策略的必要条件。'
+              : '日内强势仅作为题材研究观察，不会直接触发牛牛试仓。' }}
           </p>
         </section>
 

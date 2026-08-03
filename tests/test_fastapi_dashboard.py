@@ -82,7 +82,10 @@ class FastApiDashboardTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_vue_dashboard_and_admin_share_the_fastapi_port(self):
-        for path in ("/", "/practice", "/niuone-mainline", "/admin", "/admin/settings/notifications"):
+        for path in (
+            "/", "/practice", "/niuone-mainline", "/admin",
+            "/admin/settings/notifications", "/admin/backtest/niuone",
+        ):
             with self.subTest(path=path):
                 response = self.client.get(path)
                 self.assertEqual(response.status_code, 200)
@@ -589,6 +592,93 @@ class FastApiDashboardTests(unittest.TestCase):
 
         wrong_method = self.client.head("/api/admin/session")
         self.assertEqual(wrong_method.status_code, 405)
+
+    def test_admin_backtest_routes_require_session_and_expose_task_progress(self):
+        manager = Mock()
+        manager.options.return_value = {
+            "strategies": [{"id": "niuone", "label": "牛牛战法", "supported": True}],
+            "defaults": {},
+            "limits": {},
+        }
+        created = {
+            "id": "job-1",
+            "status": "queued",
+            "phase": "queued",
+            "progress": 0,
+        }
+        running = {
+            **created,
+            "status": "running",
+            "phase": "fetching",
+            "progress": 45,
+            "message": "正在获取历史行情",
+        }
+        manager.start.return_value = created
+        manager.get.side_effect = lambda job_id: running if job_id == "job-1" else None
+        manager.latest.return_value = running
+        manager.cancel.return_value = {
+            **running,
+            "status": "cancelled",
+            "phase": "cancelled",
+            "message": "回测已由用户终止",
+        }
+        app = create_app(
+            legacy_module=self.legacy,
+            web_dist_dir=self.dist,
+            enable_background_services=False,
+            backtest_task_manager=manager,
+        )
+        with TestClient(app) as client:
+            locked = client.get("/api/admin/backtests/options")
+            with patch.object(self.legacy, "validate_admin_session", return_value=True):
+                options = client.get("/api/admin/backtests/options")
+                missing_action = client.post(
+                    "/api/admin/backtests",
+                    content="strategy_id=niuone",
+                )
+                started = client.post(
+                    "/api/admin/backtests",
+                    content=(
+                        "strategy_id=niuone&start_date=2026-01-01&end_date=2026-02-01&"
+                        "adjustment=qfq&source=auto"
+                    ),
+                    headers={"X-NiuOne-Action": "1"},
+                )
+                latest = client.get("/api/admin/backtests/latest/niuone")
+                missing_cancel_action = client.post(
+                    "/api/admin/backtests/job-1/cancel"
+                )
+                cancelled = client.post(
+                    "/api/admin/backtests/job-1/cancel",
+                    headers={"X-NiuOne-Action": "1"},
+                )
+                status = client.get("/api/admin/backtests/job-1")
+                missing = client.get("/api/admin/backtests/not-found")
+
+        self.assertEqual(locked.status_code, 403)
+        self.assertEqual(options.status_code, 200)
+        self.assertEqual(options.json()["strategies"][0]["id"], "niuone")
+        self.assertEqual(missing_action.status_code, 403)
+        self.assertEqual(missing_action.json()["error"], "action_header_required")
+        self.assertEqual(started.status_code, 202)
+        self.assertEqual(latest.json()["job"]["progress"], 45)
+        self.assertEqual(latest.headers["Cache-Control"], "no-store")
+        self.assertEqual(missing_cancel_action.status_code, 403)
+        self.assertEqual(cancelled.status_code, 200)
+        self.assertEqual(cancelled.json()["status"], "cancelled")
+        self.assertEqual(cancelled.headers["Cache-Control"], "no-store")
+        self.assertEqual(status.json()["progress"], 45)
+        self.assertEqual(status.headers["Cache-Control"], "no-store")
+        self.assertEqual(missing.status_code, 404)
+        manager.start.assert_called_once_with({
+            "strategy_id": "niuone",
+            "start_date": "2026-01-01",
+            "end_date": "2026-02-01",
+            "adjustment": "qfq",
+            "source": "auto",
+        })
+        manager.latest.assert_called_once_with("niuone")
+        manager.cancel.assert_called_once_with("job-1")
 
     def test_native_admin_login_and_config_bypass_the_adapter(self):
         config_payload = {"items": [{"name": "DASHBOARD_PORT", "secret": False}]}

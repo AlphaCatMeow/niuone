@@ -1003,6 +1003,7 @@ console.log(JSON.stringify({
         })
 
         self.assertEqual(payload['items'], [])
+        self.assertEqual(payload['observed_items'], [display_candidate])
 
     def test_b1_payload_legacy_cache_without_trade_items_uses_display_candidates(self):
         display_candidate = {'code': '600001', 'actionable': True}
@@ -1013,6 +1014,7 @@ console.log(JSON.stringify({
         })
 
         self.assertEqual(payload['items'], [display_candidate])
+        self.assertEqual(payload['observed_items'], [display_candidate])
 
     def test_no_candidate_b1_still_refreshes_and_logs_market_context(self):
         calls = {'summary_trigger': '', 'entries': []}
@@ -1077,7 +1079,55 @@ console.log(JSON.stringify({
         self.assertFalse(mark_done)
         self.assertEqual(entry['market_decision_context']['tone'], 'balanced')
         self.assertEqual(entry['decision']['market_guidance']['source_title'], '此刻盘面总结与评价')
+        self.assertIn('候选池0只，其中0只进入买卖决策', entry['decision']['summary'])
         self.assertIn('继续检查已有持仓的原策略退出规则', entry['decision']['summary'])
+
+    def test_decision_start_log_distinguishes_display_and_trade_candidate_counts(self):
+        calls = {'entries': []}
+
+        class TraderStub:
+            def now_ts(self):
+                return '2026-08-03 09:46:35'
+
+            def record_decision_log_entry(self, entry, mark_b1_done=False):
+                calls['entries'].append((entry, mark_b1_done))
+
+            def run_decision_after_b1(self, payload):
+                calls['decision_payload'] = payload
+                return {'decision': {'summary': '决策完成'}, 'executed': []}
+
+        display_items = [
+            {'code': f'60000{index}', 'best_strategy': 'niu_reversal_probe'}
+            for index in range(10)
+        ]
+        original_get_trader = dashboard.get_trader_module
+        try:
+            dashboard.get_trader_module = lambda: TraderStub()
+            result = dashboard.run_practice_decision_logged(
+                {
+                    'generated_at': '2026-08-03 09:46:30',
+                    'items': display_items,
+                    'trade_items': display_items[:2],
+                },
+                record_start=True,
+                refresh_market_summary=False,
+            )
+        finally:
+            dashboard.get_trader_module = original_get_trader
+
+        self.assertEqual(result['decision']['summary'], '决策完成')
+        self.assertEqual(len(calls['decision_payload']['items']), 2)
+        self.assertEqual(len(calls['decision_payload']['observed_items']), 10)
+        entry, mark_done = calls['entries'][0]
+        self.assertFalse(mark_done)
+        self.assertEqual(
+            entry['decision']['summary'],
+            '选股完成：候选池10只，其中2只进入买卖决策，开始生成买卖决策。',
+        )
+        self.assertEqual(
+            entry['trade_reason'],
+            '选股后买卖决策开始：候选池10只，决策池2只',
+        )
 
     def test_scheduled_b1_refreshes_unified_summary_before_scan_and_reuses_it_for_decision(self):
         calls = []
@@ -1123,7 +1173,11 @@ console.log(JSON.stringify({
                     refresh_market_summary,
                     payload['market_summary']['generated_at'],
                 ))
-                return {'executed': []}
+                return {
+                    'decision': {'actions': []},
+                    'executed': [],
+                    'durable_evidence_persisted': True,
+                }
 
             dashboard.run_practice_decision_logged = fake_decision
 
@@ -1137,6 +1191,154 @@ console.log(JSON.stringify({
         self.assertIn(('mainline', '2026-07-10 10:00'), calls)
         self.assertIn(('decision', True, False, '2026-07-10 10:00:01'), calls)
         self.assertEqual(calls[-1][0:2], ('mark', 'ok'))
+
+    def test_scheduled_b1_records_model_failure_as_terminal_error(self):
+        calls = []
+        originals = {
+            'b1_cache_generated_for_slot': dashboard.b1_cache_generated_for_slot,
+            '_b1_schedule_slot_lag_seconds': dashboard._b1_schedule_slot_lag_seconds,
+            '_mark_b1_schedule_slot': dashboard._mark_b1_schedule_slot,
+            'refresh_practice_market_summary_for_decision': dashboard.refresh_practice_market_summary_for_decision,
+            'trigger_b1_scan': dashboard.trigger_b1_scan,
+            'run_practice_decision_logged': dashboard.run_practice_decision_logged,
+            'start_independent_niuone_mainline_scan': dashboard.start_independent_niuone_mainline_scan,
+        }
+        try:
+            dashboard.b1_cache_generated_for_slot = lambda _slot: False
+            dashboard._b1_schedule_slot_lag_seconds = lambda _slot: 0
+            dashboard._mark_b1_schedule_slot = lambda slot, status, **fields: calls.append(
+                ('mark', status, fields)
+            )
+            dashboard.refresh_practice_market_summary_for_decision = lambda _trigger: {}
+            dashboard.trigger_b1_scan = lambda **_kwargs: {
+                'items': [],
+                'count': 0,
+                'generated_at': '2026-07-10 10:00:05',
+                'error': '',
+            }
+            dashboard.start_independent_niuone_mainline_scan = lambda _slot='': True
+            dashboard.run_practice_decision_logged = lambda *_args, **_kwargs: {
+                'decision': {'error': 'TimeoutError: model timeout'},
+                'executed': [],
+            }
+
+            dashboard.run_scheduled_b1_scan('2026-07-10 10:00')
+        finally:
+            for name, value in originals.items():
+                setattr(dashboard, name, value)
+
+        self.assertEqual(calls[-1][0:2], ('mark', 'error'))
+        self.assertEqual(calls[-1][2]['reason'], 'practice_decision_failed')
+        self.assertIn('model timeout', calls[-1][2]['error'])
+
+    def test_scheduled_b1_records_decision_persistence_failure_as_error(self):
+        calls = []
+        originals = {
+            'b1_cache_generated_for_slot': dashboard.b1_cache_generated_for_slot,
+            '_b1_schedule_slot_lag_seconds': dashboard._b1_schedule_slot_lag_seconds,
+            '_mark_b1_schedule_slot': dashboard._mark_b1_schedule_slot,
+            'refresh_practice_market_summary_for_decision': dashboard.refresh_practice_market_summary_for_decision,
+            'trigger_b1_scan': dashboard.trigger_b1_scan,
+            'run_practice_decision_logged': dashboard.run_practice_decision_logged,
+            'start_independent_niuone_mainline_scan': dashboard.start_independent_niuone_mainline_scan,
+        }
+        try:
+            dashboard.b1_cache_generated_for_slot = lambda _slot: False
+            dashboard._b1_schedule_slot_lag_seconds = lambda _slot: 0
+            dashboard._mark_b1_schedule_slot = lambda slot, status, **fields: calls.append(
+                ('mark', status, fields)
+            )
+            dashboard.refresh_practice_market_summary_for_decision = lambda _trigger: {}
+            dashboard.trigger_b1_scan = lambda **_kwargs: {
+                'items': [],
+                'count': 0,
+                'generated_at': '2026-07-10 10:00:05',
+                'error': '',
+            }
+            dashboard.start_independent_niuone_mainline_scan = lambda _slot='': True
+            dashboard.run_practice_decision_logged = lambda *_args, **_kwargs: {
+                'decision': {'actions': []},
+                'executed': [],
+                'durable_evidence_persisted': False,
+            }
+
+            dashboard.run_scheduled_b1_scan('2026-07-10 10:00')
+        finally:
+            for name, value in originals.items():
+                setattr(dashboard, name, value)
+
+        self.assertEqual(calls[-1][0:2], ('mark', 'error'))
+        self.assertEqual(
+            calls[-1][2]['error'],
+            'practice_decision_evidence_not_persisted',
+        )
+
+    def test_scheduled_b1_does_not_treat_unproven_cached_cycle_as_ok(self):
+        calls = []
+        originals = {
+            'b1_cache_generated_for_slot': dashboard.b1_cache_generated_for_slot,
+            '_b1_schedule_slot_lag_seconds': dashboard._b1_schedule_slot_lag_seconds,
+            '_mark_b1_schedule_slot': dashboard._mark_b1_schedule_slot,
+            'refresh_practice_market_summary_for_decision': dashboard.refresh_practice_market_summary_for_decision,
+            'start_independent_niuone_mainline_scan': dashboard.start_independent_niuone_mainline_scan,
+        }
+        try:
+            dashboard.b1_cache_generated_for_slot = lambda _slot: True
+            dashboard._b1_schedule_slot_lag_seconds = lambda _slot: 0
+            dashboard._mark_b1_schedule_slot = lambda slot, status, **fields: calls.append(
+                ('mark', status, fields)
+            )
+            dashboard.refresh_practice_market_summary_for_decision = lambda _trigger: {}
+            dashboard.start_independent_niuone_mainline_scan = lambda _slot='': True
+
+            dashboard.run_scheduled_b1_scan('2026-07-10 10:00')
+        finally:
+            for name, value in originals.items():
+                setattr(dashboard, name, value)
+
+        self.assertEqual(calls[-1][0:2], ('mark', 'skipped'))
+        self.assertEqual(
+            calls[-1][2]['reason'],
+            'cache_already_generated_for_slot',
+        )
+
+    def test_b1_schedule_retains_daily_terminal_history(self):
+        original_state_file = dashboard.B1_SCHEDULE_STATE_FILE
+        original_run_keys = set(dashboard.B1_SCHEDULE_RUN_KEYS)
+        try:
+            with tempfile.TemporaryDirectory(
+                prefix="niuone-b1-history-"
+            ) as directory:
+                dashboard.B1_SCHEDULE_STATE_FILE = (
+                    Path(directory) / "b1_schedule_state.json"
+                )
+                dashboard.B1_SCHEDULE_RUN_KEYS.clear()
+                dashboard._mark_b1_schedule_slot(
+                    "2026-08-03 09:25",
+                    "running",
+                    run_kind="scheduled",
+                )
+                dashboard._mark_b1_schedule_slot(
+                    "2026-08-03 09:25",
+                    "ok",
+                    run_kind="scheduled",
+                    count=0,
+                )
+                state = json.loads(
+                    dashboard.B1_SCHEDULE_STATE_FILE.read_text(
+                        encoding="utf-8"
+                    )
+                )
+        finally:
+            dashboard.B1_SCHEDULE_STATE_FILE = original_state_file
+            dashboard.B1_SCHEDULE_RUN_KEYS.clear()
+            dashboard.B1_SCHEDULE_RUN_KEYS.update(original_run_keys)
+
+        slot = state["day_history"]["2026-08-03"]["slots"]["09:25"]
+        self.assertEqual(slot["status"], "ok")
+        self.assertEqual(slot["run_kind"], "scheduled")
+        self.assertEqual(slot["scheduled_at"], "2026-08-03 09:25")
+        self.assertIn("finished_at", slot)
 
     def test_independent_mainline_scan_uses_research_only_mode(self):
         calls = []
@@ -1445,6 +1647,11 @@ console.log(JSON.stringify({
             self.assertEqual(result['trade_count'], 0)
             self.assertEqual(cached['trade_items'], [])
             self.assertEqual(cached['trade_count'], 0)
+            self.assertEqual(result['schedule_run_kind'], 'manual')
+            self.assertRegex(
+                result['schedule_triggered_at'],
+                r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$',
+            )
         finally:
             subprocess.run = original_subprocess_run
             dashboard.B1_CACHE_FILE = original_b1_cache_file
@@ -2943,12 +3150,14 @@ console.log(JSON.stringify([
         self.assertNotIn('renderPracticePage', DASHBOARD_FRONTEND)
         self.assertNotIn('loadPracticePage', DASHBOARD_FRONTEND)
         self.assertIn("main_board: '主板'", PRACTICE_CANDIDATE_UTILS)
-        for label in ('牛牛战法 · 领航', '牛牛战法 · 回踩', '牛牛战法 · 启动', '牛牛战法 · 反转试仓'):
+        for label in ('牛牛战法 · 领涨', '牛牛战法 · 转强', '牛牛战法 · 启动', '牛牛战法 · 试仓'):
+            self.assertIn(label, PRACTICE_CANDIDATE_UTILS)
+        for label in ('主线酝酿', '主线主升', '主线高潮', '主线分歧', '主线退幕'):
             self.assertIn(label, PRACTICE_CANDIDATE_UTILS)
         self.assertIn('item.industry || item.sector || item.board_label || item.board', PRACTICE_CANDIDATE_UTILS)
         self.assertIn('{{ industryLabel }}', PRACTICE_CANDIDATE_COMPONENTS)
         self.assertNotIn('所属板块', PRACTICE_CANDIDATE_COMPONENTS)
-        for label in ('主线与龙头', '风控与执行', '未通过条件', '评分依据', '仓位规则', '退出规则'):
+        for label in ('主线与龙头', '生命周期', '风控与执行', '未通过条件', '评分依据', '仓位规则', '退出规则'):
             self.assertIn(label, PRACTICE_CANDIDATE_COMPONENTS)
         self.assertIn("hardBlockers.value.length ? '未达标' : '等确认'", PRACTICE_CANDIDATE_COMPONENTS)
         self.assertNotIn("hardBlockers.value.length ? '硬过滤'", PRACTICE_CANDIDATE_COMPONENTS)
@@ -3093,7 +3302,7 @@ console.log(JSON.stringify([
         self.assertIn('今日强势待确认', mainline_page)
         self.assertIn("label: '结构前5'", mainline_page)
         self.assertIn("label: '今日前5'", mainline_page)
-        self.assertIn("label: '反转试仓'", mainline_page)
+        self.assertIn("label: '日内修复观察'", mainline_page)
         self.assertIn("import { authenticateAdmin } from '../utils/adminSession.js'", mainline_page)
         self.assertIn('@click="refreshData"', mainline_page)
         self.assertIn('await authenticateAdmin(adminAuth.credential)', mainline_page)
@@ -5281,6 +5490,33 @@ process.stdout.write(JSON.stringify({{
 
         self.assertEqual(dashboard.B1_SCAN_TIMEOUT_SECONDS, 480)
         self.assertEqual(item['default'], '480')
+
+    def test_niuone_forward_cohort_start_requires_iso_date(self):
+        item = next(
+            item
+            for item in dashboard.ENV_CONFIG_SCHEMA
+            if item['name'] == dashboard.NIUONE_FORWARD_COHORT_START_ENV
+        )
+
+        self.assertEqual(item['default'], '2026-08-04')
+        self.assertEqual(item['effect'], 'next_run')
+        preflight = next(
+            item
+            for item in dashboard.ENV_CONFIG_SCHEMA
+            if item['name'] == 'DASHBOARD_NIUONE_FORWARD_PREFLIGHT_CRON'
+        )
+        self.assertEqual(preflight['default'], '5 9 * * 1-5')
+        self.assertEqual(preflight['effect'], 'next_run')
+        self.assertEqual(
+            dashboard.normalize_business_updates({preflight['name']: '09:06'})[
+                preflight['name']
+            ],
+            '6 9 * * 1-5',
+        )
+        dashboard.validate_business_updates({item['name']: '2026-11-04'})
+        for invalid in ('', '2026-11-4', '2026-02-29'):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                dashboard.validate_business_updates({item['name']: invalid})
 
     def test_full_market_quote_interval_defaults_to_thirty_seconds(self):
         item = next(
