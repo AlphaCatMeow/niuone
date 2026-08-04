@@ -4,8 +4,12 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
+from app.market_data.tencent_kline_cache import merge_live_quote
+from app.screening import niuone_minute
 from app.screening.niuone_minute import NiuOneMinuteEngine
+from app.strategies.scoring.common import compute_ema
 
 
 def history_rows(price: float = 10.0) -> list[dict[str, object]]:
@@ -58,6 +62,192 @@ def quote_snapshot(generated_at: str, prices: list[float]) -> dict[str, object]:
 
 
 class NiuOneMinuteRefreshTests(unittest.TestCase):
+    def _capture_prepared_rows(
+        self,
+        engine: NiuOneMinuteEngine,
+        snapshot: dict[str, object],
+        *,
+        now: datetime,
+    ) -> list[dict[str, object]]:
+        captured: list[dict[str, object]] = []
+
+        def context_builder(prepared_items, **_kwargs):
+            captured.extend(prepared_items)
+            return {"data_coverage": 1.0}
+
+        with patch.object(niuone_minute, "build_niuone_context", context_builder):
+            engine.build_scan(snapshot, now=now)
+        self.assertEqual(len(captured), 1)
+        return captured[0]["rows"]
+
+    def test_incremental_ema_matches_full_recalculation_and_reuses_seed(self) -> None:
+        start = datetime(2026, 1, 1)
+        rows = []
+        for index in range(180):
+            price = 8.0 + index * 0.07
+            rows.append({
+                "date": (start + timedelta(days=index)).strftime("%Y-%m-%d"),
+                "open": price * 0.99,
+                "close": price,
+                "high": price * 1.01,
+                "low": price * 0.98,
+                "volume": 100_000,
+            })
+        snapshot_one = quote_snapshot("2026-07-30 10:01:00", [16.25])
+        snapshot_two = quote_snapshot("2026-07-30 10:02:00", [17.75])
+
+        with tempfile.TemporaryDirectory(prefix="niuone-minute-ema-") as directory:
+            root = Path(directory)
+            engine = NiuOneMinuteEngine(
+                kline_cache_path=root / "klines.sqlite3",
+                industry_cache_path=root / "industries.json",
+                kline_loader=lambda symbols, **_kwargs: {
+                    symbol: rows for symbol in symbols
+                },
+                industry_loader=lambda _path: {"600001": "半导体"},
+                trading_day_status_loader=lambda _value, **_kwargs: {
+                    "previous_trading_day": "2026-07-29"
+                },
+                minimum_coverage=1.0,
+            )
+            with patch.object(
+                niuone_minute,
+                "_ema_state_from_rows",
+                wraps=niuone_minute._ema_state_from_rows,
+            ) as state_builder:
+                first_rows = self._capture_prepared_rows(
+                    engine,
+                    snapshot_one,
+                    now=datetime(2026, 7, 30, 10, 1, 5),
+                )
+                seed_build_count = state_builder.call_count
+                second_rows = self._capture_prepared_rows(
+                    engine,
+                    snapshot_two,
+                    now=datetime(2026, 7, 30, 10, 2, 5),
+                )
+
+        self.assertEqual(seed_build_count, 1)
+        self.assertEqual(state_builder.call_count, seed_build_count)
+        for snapshot, prepared_rows in (
+            (snapshot_one, first_rows),
+            (snapshot_two, second_rows),
+        ):
+            expected_rows = merge_live_quote(rows, snapshot["quotes"]["sh600001"])
+            closes = [float(row["close"]) for row in expected_rows]
+            self.assertEqual(len(expected_rows), 120)
+            self.assertEqual(prepared_rows[-1]["ema20"], compute_ema(closes, 20)[-1])
+            self.assertEqual(prepared_rows[-1]["ema50"], compute_ema(closes, 50)[-1])
+
+    def test_incremental_ema_replaces_a_cached_same_day_bar(self) -> None:
+        start = datetime(2026, 4, 2)
+        rows = []
+        for index in range(120):
+            price = 9.0 + index * 0.03
+            rows.append({
+                "date": (start + timedelta(days=index)).strftime("%Y-%m-%d"),
+                "open": price,
+                "close": price,
+                "high": price * 1.01,
+                "low": price * 0.99,
+                "volume": 100_000,
+            })
+        self.assertEqual(rows[-1]["date"], "2026-07-30")
+        snapshot = quote_snapshot("2026-07-30 10:01:00", [18.5])
+
+        with tempfile.TemporaryDirectory(prefix="niuone-minute-ema-replace-") as directory:
+            root = Path(directory)
+            engine = NiuOneMinuteEngine(
+                kline_cache_path=root / "klines.sqlite3",
+                industry_cache_path=root / "industries.json",
+                kline_loader=lambda symbols, **_kwargs: {
+                    symbol: rows for symbol in symbols
+                },
+                industry_loader=lambda _path: {"600001": "半导体"},
+                minimum_coverage=1.0,
+            )
+            prepared_rows = self._capture_prepared_rows(
+                engine,
+                snapshot,
+                now=datetime(2026, 7, 30, 10, 1, 5),
+            )
+
+        expected_rows = merge_live_quote(rows, snapshot["quotes"]["sh600001"])
+        closes = [float(row["close"]) for row in expected_rows]
+        self.assertEqual(len(expected_rows), 120)
+        self.assertEqual(prepared_rows[-1]["close"], 18.5)
+        self.assertEqual(prepared_rows[-1]["ema20"], compute_ema(closes, 20)[-1])
+        self.assertEqual(prepared_rows[-1]["ema50"], compute_ema(closes, 50)[-1])
+
+    def test_missing_live_trade_date_falls_back_to_full_ema(self) -> None:
+        rows = history_rows()
+        snapshot = quote_snapshot("2026-07-30 10:01:00", [18.5])
+        del snapshot["quotes"]["sh600001"]["quote_time"]
+
+        with tempfile.TemporaryDirectory(prefix="niuone-minute-ema-fallback-") as directory:
+            root = Path(directory)
+            engine = NiuOneMinuteEngine(
+                kline_cache_path=root / "klines.sqlite3",
+                industry_cache_path=root / "industries.json",
+                kline_loader=lambda symbols, **_kwargs: {
+                    symbol: rows for symbol in symbols
+                },
+                industry_loader=lambda _path: {"600001": "半导体"},
+                minimum_coverage=1.0,
+            )
+            with patch.object(
+                niuone_minute,
+                "_ema_state_from_rows",
+                wraps=niuone_minute._ema_state_from_rows,
+            ) as state_builder:
+                prepared_rows = self._capture_prepared_rows(
+                    engine,
+                    snapshot,
+                    now=datetime(2026, 7, 30, 10, 1, 5),
+                )
+
+        closes = [float(row["close"]) for row in merge_live_quote(rows, {})]
+        self.assertEqual(state_builder.call_count, 2)
+        self.assertEqual(prepared_rows[-1]["ema20"], compute_ema(closes, 20)[-1])
+        self.assertEqual(prepared_rows[-1]["ema50"], compute_ema(closes, 50)[-1])
+
+    def test_new_quote_date_reloads_history_and_rebuilds_ema_seed(self) -> None:
+        loader_calls = 0
+
+        def kline_loader(symbols, **_kwargs):
+            nonlocal loader_calls
+            loader_calls += 1
+            return {
+                symbol: history_rows(10.0 + loader_calls)
+                for symbol in symbols
+            }
+
+        with tempfile.TemporaryDirectory(prefix="niuone-minute-ema-date-") as directory:
+            root = Path(directory)
+            engine = NiuOneMinuteEngine(
+                kline_cache_path=root / "klines.sqlite3",
+                industry_cache_path=root / "industries.json",
+                kline_loader=kline_loader,
+                industry_loader=lambda _path: {"600001": "半导体"},
+                minimum_coverage=1.0,
+            )
+            first_rows = self._capture_prepared_rows(
+                engine,
+                quote_snapshot("2026-07-30 14:59:00", [15.0]),
+                now=datetime(2026, 7, 30, 14, 59, 5),
+            )
+            second_rows = self._capture_prepared_rows(
+                engine,
+                quote_snapshot("2026-07-31 09:31:00", [16.0]),
+                now=datetime(2026, 7, 31, 9, 31, 5),
+            )
+
+        first_expected = compute_ema([11.0] * 60 + [15.0], 20)[-1]
+        second_expected = compute_ema([12.0] * 60 + [16.0], 20)[-1]
+        self.assertEqual(loader_calls, 2)
+        self.assertEqual(first_rows[-1]["ema20"], first_expected)
+        self.assertEqual(second_rows[-1]["ema20"], second_expected)
+
     def test_recalculates_from_each_fresh_quote_and_reuses_local_history(self) -> None:
         loader_calls: list[list[str]] = []
 
