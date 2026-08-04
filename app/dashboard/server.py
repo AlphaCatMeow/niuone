@@ -24,7 +24,11 @@ from urllib.parse import urlparse
 import urllib.request
 
 from a_share_calendar import is_a_share_trading_day as calendar_is_a_share_trading_day, trading_day_status
-from dashboard_json_cache import read_json_cache, write_json_cache
+from dashboard_json_cache import (
+    read_json_cache,
+    read_versioned_json_cache,
+    write_json_cache,
+)
 from core.process_lease import FileLease
 from dashboard import practice_payload as practice_payload_impl
 from dashboard import practice_market_summary as practice_market_summary_impl
@@ -101,7 +105,15 @@ from market_data.tencent_kline_cache import (
 )
 from niuone_paths import apply_container_runtime_overrides, get_dashboard_env_file, get_dashboard_home, get_local_data_dir
 import push_history
-from screening.niuone_mainline_cache import write_niuone_mainline_cache
+from screening.candidate_cache import (
+    build_practice_candidates_cache_payload,
+    write_practice_candidates_cache,
+)
+from screening.niuone_mainline_cache import (
+    build_niuone_mainline_summary_cache_payload,
+    write_niuone_mainline_cache,
+    write_niuone_mainline_summary_cache,
+)
 from screening.niuone_minute import NiuOneMinuteEngine
 from screening.stock_universe import (
     DEFAULT_STOCK_UNIVERSE,
@@ -183,8 +195,10 @@ IWENCAI_DRAGON_TIGER_SNAPSHOT_FILE = Path(
     or CRON_OUTPUT_DIR / "iwencai_dragon_tiger_latest.json"
 ).expanduser()
 B1_CACHE_FILE = CRON_OUTPUT_DIR / "b1_screen_latest.json"
+PRACTICE_CANDIDATES_CACHE_FILE = CRON_OUTPUT_DIR / "practice_candidates_latest.json"
 NIUONE_MAINLINE_CACHE_FILE = CRON_OUTPUT_DIR / "niuone_mainline_latest.json"
 NIUONE_MAINLINE_MINUTE_CACHE_FILE = CRON_OUTPUT_DIR / "niuone_mainline_minute_latest.json"
+NIUONE_MAINLINE_SUMMARY_CACHE_FILE = CRON_OUTPUT_DIR / "niuone_mainline_summary_latest.json"
 STOCK_INDUSTRY_CACHE_FILE = CRON_OUTPUT_DIR / "stock_industry_cache.json"
 EASTMONEY_BOARD_CACHE_FILE = CRON_OUTPUT_DIR / "eastmoney_stock_boards.json"
 MONEY_FLOW_SNAPSHOT_FILE = CRON_OUTPUT_DIR / "industry_main_money_flow_cache.json"
@@ -1728,10 +1742,19 @@ def refresh_b1_candidate_cache_from_current_pool() -> dict[str, Any]:
             parsed["candidates"] = []
             parsed["count"] = 0
             parsed["refreshed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            B1_CACHE_FILE.write_text(json.dumps(parsed, ensure_ascii=False), encoding="utf-8")
-            MULTI_STRATEGY_CACHE_FILE.write_text(
-                json.dumps(parsed, ensure_ascii=False, indent=2),
-                encoding="utf-8",
+            multi_cache_file = _derived_read_model_path(
+                MULTI_STRATEGY_CACHE_FILE,
+                B1_CACHE_FILE,
+            )
+            write_json_cache(B1_CACHE_FILE, parsed)
+            write_json_cache(multi_cache_file, parsed)
+            write_practice_candidates_cache(
+                _derived_read_model_path(
+                    PRACTICE_CANDIDATES_CACHE_FILE,
+                    B1_CACHE_FILE,
+                ),
+                parsed,
+                source_path=multi_cache_file,
             )
             B1_CANDIDATE_REFRESH_LAST_TS = time.time()
             return {"updated": 0, "count": 0}
@@ -2002,9 +2025,20 @@ def refresh_b1_candidate_cache_from_current_pool() -> dict[str, Any]:
             },
             "refreshed_at": refreshed_at,
         }
-        json_text = json.dumps(output, ensure_ascii=False, indent=2)
-        B1_CACHE_FILE.write_text(json_text + "\n", encoding="utf-8")
-        MULTI_STRATEGY_CACHE_FILE.write_text(json_text + "\n", encoding="utf-8")
+        multi_cache_file = _derived_read_model_path(
+            MULTI_STRATEGY_CACHE_FILE,
+            B1_CACHE_FILE,
+        )
+        write_json_cache(B1_CACHE_FILE, output)
+        write_json_cache(multi_cache_file, output)
+        write_practice_candidates_cache(
+            _derived_read_model_path(
+                PRACTICE_CANDIDATES_CACHE_FILE,
+                B1_CACHE_FILE,
+            ),
+            output,
+            source_path=multi_cache_file,
+        )
         with API_RESPONSE_LOCK:
             API_RESPONSE_CACHE.pop(PRACTICE_CANDIDATES_CACHE_KEY, None)
         B1_CANDIDATE_REFRESH_LAST_TS = time.time()
@@ -2129,6 +2163,50 @@ def maybe_run_practice_decision_async(b1_payload: dict[str, Any]) -> None:
         PRACTICE_DECISION_KEYS.clear()
     threading.Thread(target=_worker, name="niuniu-practice-decision", daemon=True).start()
 
+
+def _derived_read_model_path(configured: Path, reference: Path) -> Path:
+    """Keep compatibility tests that relocate legacy cache globals isolated."""
+    if configured.parent == CRON_OUTPUT_DIR and reference.parent != CRON_OUTPUT_DIR:
+        return reference.parent / configured.name
+    return configured
+
+
+def _file_mtime_ns(path: Path) -> int:
+    try:
+        return int(path.stat().st_mtime_ns)
+    except OSError:
+        return 0
+
+
+def _read_model_is_current(
+    snapshot_path: Path,
+    snapshot: Mapping[str, Any],
+    source_paths: tuple[Path, ...],
+) -> bool:
+    snapshot_mtime = _file_mtime_ns(snapshot_path)
+    if not snapshot_mtime:
+        return False
+    source_name = str(snapshot.get("source_cache") or "").strip()
+    if source_name:
+        source = next((path for path in source_paths if path.name == source_name), None)
+        if source is None or not source.exists():
+            return False
+        version = snapshot.get("source_version")
+        if isinstance(version, Mapping):
+            try:
+                stat = source.stat()
+                current_version = {
+                    "device": int(stat.st_dev),
+                    "inode": int(stat.st_ino),
+                    "size": int(stat.st_size),
+                    "mtime_ns": int(stat.st_mtime_ns),
+                }
+            except OSError:
+                return False
+            if current_version != dict(version):
+                return False
+    return snapshot_mtime >= max((_file_mtime_ns(path) for path in source_paths), default=0)
+
 def load_practice_candidates_cache() -> dict[str, Any]:
     strategy_suite = active_strategy_suite(
         os.environ.get(ACTIVE_STRATEGY_ENV),
@@ -2151,11 +2229,29 @@ def load_practice_candidates_cache() -> dict[str, Any]:
     }
     errors: list[str] = []
     stale_cache_found = False
-    for cache_file in (MULTI_STRATEGY_CACHE_FILE, B1_CACHE_FILE):
+    multi_cache_file = _derived_read_model_path(
+        MULTI_STRATEGY_CACHE_FILE,
+        B1_CACHE_FILE,
+    )
+    compact_cache_file = _derived_read_model_path(
+        PRACTICE_CANDIDATES_CACHE_FILE,
+        multi_cache_file,
+    )
+    source_cache_files = (multi_cache_file, B1_CACHE_FILE)
+    compact = read_versioned_json_cache(compact_cache_file)
+    cache_files: list[tuple[Path, dict[str, Any] | None, bool]] = []
+    if isinstance(compact, dict) and _read_model_is_current(
+        compact_cache_file,
+        compact,
+        source_cache_files,
+    ):
+        cache_files.append((compact_cache_file, compact, True))
+    cache_files.extend((path, None, False) for path in source_cache_files)
+    for cache_file, cached_payload, is_compact in cache_files:
         try:
-            if not cache_file.exists():
+            if cached_payload is None and not cache_file.exists():
                 continue
-            parsed = json.loads(cache_file.read_text(encoding="utf-8"))
+            parsed = cached_payload or read_json_cache(cache_file, None)
             if not isinstance(parsed, dict):
                 raise ValueError(f"候选缓存格式无效：{cache_file}")
             items = parsed.get("items") or parsed.get("candidates") or []
@@ -2202,6 +2298,19 @@ def load_practice_candidates_cache() -> dict[str, Any]:
             trade_items = sort_candidates_by_score(
                 active_rows(_candidate_rows(parsed, "trade_items", "items", "candidates"))
             )
+            if not is_compact:
+                parsed = build_practice_candidates_cache_payload(
+                    parsed,
+                    source_cache_name=cache_file.name,
+                )
+                try:
+                    write_practice_candidates_cache(
+                        compact_cache_file,
+                        parsed,
+                        source_path=cache_file,
+                    )
+                except OSError:
+                    pass
             return {
                 **parsed,
                 "generated_at": parsed.get("generated_at", ""),
@@ -2241,27 +2350,59 @@ def load_practice_candidates_cache() -> dict[str, Any]:
 
 
 def load_niuone_mainline_cache_payload() -> dict[str, Any]:
-    """Load the newest dedicated or migration-era NiuOne mainline payload."""
+    """Load operational NiuOne state, using legacy full scans only as fallback."""
     payloads: list[dict[str, Any]] = []
     for cache_file in (
         NIUONE_MAINLINE_MINUTE_CACHE_FILE,
         NIUONE_MAINLINE_CACHE_FILE,
-        MULTI_STRATEGY_CACHE_FILE,
-        B1_CACHE_FILE,
     ):
-        try:
-            parsed = json.loads(cache_file.read_text(encoding="utf-8"))
-        except (OSError, ValueError, TypeError):
-            continue
+        parsed = read_json_cache(cache_file, None)
         if isinstance(parsed, dict) and isinstance(parsed.get("niuone_context"), dict):
             payloads.append(parsed)
-    if not payloads:
-        return {}
-    return max(payloads, key=lambda payload: str(payload.get("generated_at") or ""))
+    if payloads:
+        return max(payloads, key=lambda payload: str(payload.get("generated_at") or ""))
+    for cache_file in (MULTI_STRATEGY_CACHE_FILE, B1_CACHE_FILE):
+        parsed = read_json_cache(cache_file, None)
+        if isinstance(parsed, dict) and isinstance(parsed.get("niuone_context"), dict):
+            payloads.append(parsed)
+    return (
+        max(payloads, key=lambda payload: str(payload.get("generated_at") or ""))
+        if payloads
+        else {}
+    )
+
+
+def load_niuone_mainline_summary_payload() -> dict[str, Any]:
+    """Load the bounded Dashboard theme model and lazily migrate old caches."""
+    summary_path = _derived_read_model_path(
+        NIUONE_MAINLINE_SUMMARY_CACHE_FILE,
+        NIUONE_MAINLINE_CACHE_FILE,
+    )
+    summary = read_versioned_json_cache(summary_path)
+    operational_paths = (
+        NIUONE_MAINLINE_MINUTE_CACHE_FILE,
+        NIUONE_MAINLINE_CACHE_FILE,
+    )
+    if (
+        isinstance(summary, dict)
+        and isinstance(summary.get("niuone_context"), dict)
+        and _file_mtime_ns(summary_path)
+        >= max((_file_mtime_ns(path) for path in operational_paths), default=0)
+    ):
+        return summary
+    operational = load_niuone_mainline_cache_payload()
+    if not operational:
+        return summary if isinstance(summary, dict) else {}
+    compact = build_niuone_mainline_summary_cache_payload(operational)
+    try:
+        write_niuone_mainline_summary_cache(summary_path, operational)
+    except OSError:
+        pass
+    return compact
 
 
 def load_niuone_mainline_view() -> dict[str, Any]:
-    return build_niuone_mainline_view(load_niuone_mainline_cache_payload())
+    return build_niuone_mainline_view(load_niuone_mainline_summary_payload())
 
 
 def get_niuone_mainline_minute_engine() -> NiuOneMinuteEngine:
@@ -2307,6 +2448,13 @@ def run_niuone_mainline_minute_refresh(
         now=current_cn_datetime(),
     )
     payload = write_niuone_mainline_cache(NIUONE_MAINLINE_MINUTE_CACHE_FILE, scan)
+    write_niuone_mainline_summary_cache(
+        _derived_read_model_path(
+            NIUONE_MAINLINE_SUMMARY_CACHE_FILE,
+            NIUONE_MAINLINE_CACHE_FILE,
+        ),
+        scan,
+    )
     invalidate_api_cache(NIUONE_MAINLINE_CACHE_KEY)
     print(
         "[Theme strength] minute quotes updated "
@@ -2720,6 +2868,14 @@ def _trigger_b1_scan_unlocked(
                      **schedule_meta}
             with B1_CANDIDATE_REFRESH_LOCK:
                 write_json_cache(B1_CACHE_FILE, cache)
+                write_practice_candidates_cache(
+                    _derived_read_model_path(
+                        PRACTICE_CANDIDATES_CACHE_FILE,
+                        B1_CACHE_FILE,
+                    ),
+                    cache,
+                    source_path=B1_CACHE_FILE,
+                )
             if decision_mode == "sync":
                 cache["decision_result"] = run_practice_decision_logged(cache, record_start=True)
             elif decision_mode == "async":
@@ -3086,6 +3242,34 @@ def _wait_for_manual_cycle_market_data() -> None:
     )
 
 
+def _load_practice_candidate_decision_context(
+    generated_at: str,
+) -> dict[str, Any]:
+    """Read full scan context only for an explicitly reused trading cycle."""
+    for path in (B1_CACHE_FILE, MULTI_STRATEGY_CACHE_FILE):
+        payload = read_json_cache(path, None)
+        if not isinstance(payload, dict):
+            continue
+        if str(payload.get("generated_at") or "")[:19] != generated_at[:19]:
+            continue
+        return {
+            key: payload.get(key)
+            for key in (
+                "market_snapshot",
+                "sector_tide_context",
+                "niuone_context",
+                "zettaranc_context",
+                "market_summary",
+                "market_decision_context",
+                "schedule_slot",
+                "schedule_run_kind",
+                "schedule_triggered_at",
+            )
+            if key in payload
+        }
+    return {}
+
+
 def recent_practice_candidates_for_manual_cycle() -> dict[str, Any] | None:
     if PRACTICE_MANUAL_SCAN_REUSE_SECONDS <= 0:
         return None
@@ -3102,6 +3286,7 @@ def recent_practice_candidates_for_manual_cycle() -> dict[str, Any] | None:
         return None
     return {
         **cache,
+        **_load_practice_candidate_decision_context(generated_at),
         "manual_scan_reused": True,
         "manual_scan_age_seconds": round(max(0.0, age_seconds), 1),
     }

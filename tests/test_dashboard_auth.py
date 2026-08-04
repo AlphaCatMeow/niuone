@@ -2009,8 +2009,10 @@ console.log(JSON.stringify({
     def test_recent_manual_candidates_respect_reuse_window(self):
         original_seconds = dashboard.PRACTICE_MANUAL_SCAN_REUSE_SECONDS
         original_loader = dashboard.load_practice_candidates_cache
+        original_context_loader = dashboard._load_practice_candidate_decision_context
         try:
             dashboard.PRACTICE_MANUAL_SCAN_REUSE_SECONDS = 600
+            dashboard._load_practice_candidate_decision_context = lambda _generated_at: {}
             generated_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             dashboard.load_practice_candidates_cache = lambda: {
                 'items': [{'code': '000001'}],
@@ -2032,6 +2034,46 @@ console.log(JSON.stringify({
         finally:
             dashboard.PRACTICE_MANUAL_SCAN_REUSE_SECONDS = original_seconds
             dashboard.load_practice_candidates_cache = original_loader
+            dashboard._load_practice_candidate_decision_context = original_context_loader
+
+    def test_recent_manual_candidates_restore_full_trading_context_on_demand(self):
+        original_seconds = dashboard.PRACTICE_MANUAL_SCAN_REUSE_SECONDS
+        original_multi = dashboard.MULTI_STRATEGY_CACHE_FILE
+        original_b1 = dashboard.B1_CACHE_FILE
+        dashboard.PRACTICE_MANUAL_SCAN_REUSE_SECONDS = 600
+        dashboard.MULTI_STRATEGY_CACHE_FILE = self.tmp_path / 'multi_strategy_latest.json'
+        dashboard.B1_CACHE_FILE = self.tmp_path / 'b1_screen_latest.json'
+        generated_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        try:
+            dashboard.write_json_cache(
+                dashboard.B1_CACHE_FILE,
+                {
+                    'generated_at': generated_at,
+                    'items': [{'code': '600001'}],
+                    'trade_items': [{'code': '600001'}],
+                    'niuone_context': {
+                        'market': {'state': 'balanced'},
+                        'stocks': {'600001': {'theme_rank': 1}},
+                    },
+                },
+            )
+
+            recent = dashboard.recent_practice_candidates_for_manual_cycle()
+
+            self.assertEqual(
+                recent['niuone_context']['stocks']['600001']['theme_rank'],
+                1,
+            )
+            compact = json.loads(
+                (self.tmp_path / 'practice_candidates_latest.json').read_text(
+                    encoding='utf-8'
+                )
+            )
+            self.assertNotIn('niuone_context', compact)
+        finally:
+            dashboard.PRACTICE_MANUAL_SCAN_REUSE_SECONDS = original_seconds
+            dashboard.MULTI_STRATEGY_CACHE_FILE = original_multi
+            dashboard.B1_CACHE_FILE = original_b1
 
     def test_b1_slot_cache_is_read_as_utf8(self):
         class RecordingCachePath:
@@ -4336,6 +4378,63 @@ process.stdout.write(JSON.stringify({{
             dashboard.MULTI_STRATEGY_CACHE_FILE = original_multi_strategy_cache_file
             dashboard.B1_CACHE_FILE = original_b1_cache_file
 
+    def test_practice_candidates_cache_uses_small_snapshot_without_parsing_full_scan(self):
+        original_multi_strategy_cache_file = dashboard.MULTI_STRATEGY_CACHE_FILE
+        original_b1_cache_file = dashboard.B1_CACHE_FILE
+        dashboard.MULTI_STRATEGY_CACHE_FILE = self.tmp_path / 'multi_strategy_latest.json'
+        dashboard.B1_CACHE_FILE = self.tmp_path / 'b1_screen_latest.json'
+        try:
+            dashboard.MULTI_STRATEGY_CACHE_FILE.write_text('{bad', encoding='utf-8')
+            compact_path = self.tmp_path / 'practice_candidates_latest.json'
+            dashboard.write_practice_candidates_cache(
+                compact_path,
+                {
+                    'generated_at': '2026-08-04 10:15:00',
+                    'items': [{'code': '600001', 'best_score': 8.8}],
+                    'trade_items': [],
+                },
+                source_path=dashboard.MULTI_STRATEGY_CACHE_FILE,
+            )
+
+            payload = dashboard.load_practice_candidates_cache()
+
+            self.assertEqual(payload['items'][0]['code'], '600001')
+            self.assertEqual(payload['generated_at'], '2026-08-04 10:15:00')
+            self.assertNotIn('error', payload)
+        finally:
+            dashboard.MULTI_STRATEGY_CACHE_FILE = original_multi_strategy_cache_file
+            dashboard.B1_CACHE_FILE = original_b1_cache_file
+
+    def test_practice_candidates_cache_rebuilds_small_snapshot_after_full_scan_changes(self):
+        original_multi_strategy_cache_file = dashboard.MULTI_STRATEGY_CACHE_FILE
+        original_b1_cache_file = dashboard.B1_CACHE_FILE
+        dashboard.MULTI_STRATEGY_CACHE_FILE = self.tmp_path / 'multi_strategy_latest.json'
+        dashboard.B1_CACHE_FILE = self.tmp_path / 'b1_screen_latest.json'
+        try:
+            dashboard.write_json_cache(
+                dashboard.MULTI_STRATEGY_CACHE_FILE,
+                {'generated_at': 'old', 'items': [{'code': 'old'}]},
+            )
+            first = dashboard.load_practice_candidates_cache()
+            self.assertEqual(first['items'][0]['code'], 'old')
+
+            dashboard.write_json_cache(
+                dashboard.MULTI_STRATEGY_CACHE_FILE,
+                {'generated_at': 'new', 'items': [{'code': 'new'}]},
+            )
+            refreshed = dashboard.load_practice_candidates_cache()
+
+            self.assertEqual(refreshed['items'][0]['code'], 'new')
+            compact = json.loads(
+                (self.tmp_path / 'practice_candidates_latest.json').read_text(
+                    encoding='utf-8'
+                )
+            )
+            self.assertEqual(compact['generated_at'], 'new')
+        finally:
+            dashboard.MULTI_STRATEGY_CACHE_FILE = original_multi_strategy_cache_file
+            dashboard.B1_CACHE_FILE = original_b1_cache_file
+
     def test_practice_candidates_cache_hides_candidates_from_inactive_strategy(self):
         original_multi_strategy_cache_file = dashboard.MULTI_STRATEGY_CACHE_FILE
         original_b1_cache_file = dashboard.B1_CACHE_FILE
@@ -4395,6 +4494,81 @@ process.stdout.write(JSON.stringify({{
                 os.environ.pop(dashboard.ACTIVE_STRATEGY_ENV, None)
             else:
                 os.environ[dashboard.ACTIVE_STRATEGY_ENV] = saved_active
+
+    def test_niuone_mainline_view_uses_small_summary_snapshot(self):
+        original_minute = dashboard.NIUONE_MAINLINE_MINUTE_CACHE_FILE
+        original_full = dashboard.NIUONE_MAINLINE_CACHE_FILE
+        original_summary = dashboard.NIUONE_MAINLINE_SUMMARY_CACHE_FILE
+        original_multi = dashboard.MULTI_STRATEGY_CACHE_FILE
+        original_b1 = dashboard.B1_CACHE_FILE
+        dashboard.NIUONE_MAINLINE_MINUTE_CACHE_FILE = self.tmp_path / 'niuone_mainline_minute_latest.json'
+        dashboard.NIUONE_MAINLINE_CACHE_FILE = self.tmp_path / 'niuone_mainline_latest.json'
+        dashboard.NIUONE_MAINLINE_SUMMARY_CACHE_FILE = self.tmp_path / 'niuone_mainline_summary_latest.json'
+        dashboard.MULTI_STRATEGY_CACHE_FILE = self.tmp_path / 'multi_strategy_latest.json'
+        dashboard.B1_CACHE_FILE = self.tmp_path / 'b1_screen_latest.json'
+        try:
+            dashboard.NIUONE_MAINLINE_CACHE_FILE.write_text('{bad', encoding='utf-8')
+            dashboard.write_niuone_mainline_summary_cache(
+                dashboard.NIUONE_MAINLINE_SUMMARY_CACHE_FILE,
+                {
+                    'generated_at': '2026-08-04 10:30:00',
+                    'reference_pool_count': 100,
+                    'reference_analysis_count': 90,
+                    'niuone_context': {
+                        'as_of_date': '2026-08-04',
+                        'mapped_stock_count': 90,
+                        'market': {'state': 'balanced', 'score': 70},
+                        'mainline': {'mode': 'single', 'primary': '半导体'},
+                        'themes': {},
+                    },
+                },
+            )
+
+            view = dashboard.load_niuone_mainline_view()
+
+            self.assertTrue(view['available'])
+            self.assertEqual(view['generated_at'], '2026-08-04 10:30:00')
+            self.assertEqual(view['mainline']['primary'], '半导体')
+        finally:
+            dashboard.NIUONE_MAINLINE_MINUTE_CACHE_FILE = original_minute
+            dashboard.NIUONE_MAINLINE_CACHE_FILE = original_full
+            dashboard.NIUONE_MAINLINE_SUMMARY_CACHE_FILE = original_summary
+            dashboard.MULTI_STRATEGY_CACHE_FILE = original_multi
+            dashboard.B1_CACHE_FILE = original_b1
+
+    def test_niuone_operational_cache_does_not_parse_legacy_when_dedicated_exists(self):
+        original_minute = dashboard.NIUONE_MAINLINE_MINUTE_CACHE_FILE
+        original_full = dashboard.NIUONE_MAINLINE_CACHE_FILE
+        original_multi = dashboard.MULTI_STRATEGY_CACHE_FILE
+        original_b1 = dashboard.B1_CACHE_FILE
+        dashboard.NIUONE_MAINLINE_MINUTE_CACHE_FILE = self.tmp_path / 'niuone_mainline_minute_latest.json'
+        dashboard.NIUONE_MAINLINE_CACHE_FILE = self.tmp_path / 'niuone_mainline_latest.json'
+        dashboard.MULTI_STRATEGY_CACHE_FILE = self.tmp_path / 'multi_strategy_latest.json'
+        dashboard.B1_CACHE_FILE = self.tmp_path / 'b1_screen_latest.json'
+        try:
+            dashboard.write_json_cache(
+                dashboard.NIUONE_MAINLINE_CACHE_FILE,
+                {
+                    'generated_at': '2026-08-04 10:00:00',
+                    'niuone_context': {'mainline': {'primary': '专用缓存'}},
+                },
+            )
+            dashboard.write_json_cache(
+                dashboard.MULTI_STRATEGY_CACHE_FILE,
+                {
+                    'generated_at': '2026-08-04 11:00:00',
+                    'niuone_context': {'mainline': {'primary': '旧完整缓存'}},
+                },
+            )
+
+            payload = dashboard.load_niuone_mainline_cache_payload()
+
+            self.assertEqual(payload['niuone_context']['mainline']['primary'], '专用缓存')
+        finally:
+            dashboard.NIUONE_MAINLINE_MINUTE_CACHE_FILE = original_minute
+            dashboard.NIUONE_MAINLINE_CACHE_FILE = original_full
+            dashboard.MULTI_STRATEGY_CACHE_FILE = original_multi
+            dashboard.B1_CACHE_FILE = original_b1
 
     def test_practice_candidates_api_uses_canonical_cache_for_legacy_alias(self):
         original_loader = dashboard.load_practice_candidates_cache

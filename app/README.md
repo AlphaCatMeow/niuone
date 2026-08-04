@@ -55,3 +55,5 @@ v31 修复多概念龙头被 softmax 份额重复惩罚的问题：归因权重�
 `entrypoints/` 中的脚本是项目支持的启动路径。`compat/` 通过 `_compat.py` 在历史模块命名空间中运行迁移后的实现，供内部裸模块导入和迁移期集成使用。新增业务代码不得写入 `entrypoints/` 或 `compat/`。
 
 Dashboard 继续由 `entrypoints/niuone_dashboard.py` 单端口启动并保留原页面布局。`dashboard/fastapi_app.py` 只负责 FastAPI/Uvicorn 应用组合、中间件、Vue 构建和共享缓存响应，具体 HTTP 接口按 system、messages、market、practice、admin 拆在 `dashboard/routers/`。旧 `BaseHTTPRequestHandler`、`ThreadingHTTPServer` 及原生 HTML/JavaScript 控制器已经删除。`dashboard/security.py`、`dashboard/visit_stats.py` 和 `dashboard/response_cache.py` 分别承载管理员访问控制、访问统计和并发响应缓存，`dashboard/server.py` 保留后台状态、配置、数据源、行情采样和实战计划的组合实现，但不再定义 HTTP 路由。浏览器展示模型由 `dashboard/public_projection.py` 构建，并由 `dashboard/public_snapshots.py` 原子发布；交易和外部请求不得下沉到前端。
+
+高频投影只读取 `practice_candidates_latest.json` 与 `niuone_mainline_summary_latest.json` 两个有界快照，并按文件身份、大小和纳秒修改时间复用已解析对象。完整候选扫描与逐股题材归因仍保留在原私有缓存中供交易和跨日确认使用；升级后若小型快照尚不存在，Dashboard 只兼容读取一次旧缓存并原子补建，不删除或覆盖完整研究数据。

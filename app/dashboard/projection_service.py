@@ -42,7 +42,10 @@ class LegacyDashboardSources:
         return self.legacy.get_practice_market_summary_status()
 
     def niuone_mainline(self) -> dict[str, Any]:
-        return self.legacy.load_niuone_mainline_cache_payload()
+        reader = getattr(self.legacy, "load_niuone_mainline_summary_payload", None)
+        if not callable(reader):
+            reader = self.legacy.load_niuone_mainline_cache_payload
+        return reader()
 
 
 class ProjectionService:

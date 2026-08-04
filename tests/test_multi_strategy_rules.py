@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import concurrent.futures
+import json
 import os
 import sys
 import threading
@@ -312,6 +313,46 @@ class MultiStrategyRuleTests(unittest.TestCase):
 
         self.assertEqual(context["as_of_date"], "2026-07-29")
         self.assertEqual(context["mainline"]["primary"], "半导体")
+
+    def test_scan_outputs_include_bounded_candidate_snapshot(self):
+        with tempfile.TemporaryDirectory(prefix="niuone-scan-output-") as directory:
+            root = Path(directory)
+            originals = {
+                "B1_OUTPUT_DIR": screen.B1_OUTPUT_DIR,
+                "B1_CACHE_FILE": screen.B1_CACHE_FILE,
+                "MULTI_STRATEGY_CACHE": screen.MULTI_STRATEGY_CACHE,
+                "PRACTICE_CANDIDATES_CACHE": screen.PRACTICE_CANDIDATES_CACHE,
+                "B1_HISTORY_DIR": screen.B1_HISTORY_DIR,
+                "MULTI_STRATEGY_HISTORY": screen.MULTI_STRATEGY_HISTORY,
+            }
+            try:
+                screen.B1_OUTPUT_DIR = root
+                screen.B1_CACHE_FILE = root / "b1_screen_latest.json"
+                screen.MULTI_STRATEGY_CACHE = root / "multi_strategy_latest.json"
+                screen.PRACTICE_CANDIDATES_CACHE = root / "practice_candidates_latest.json"
+                screen.B1_HISTORY_DIR = root / "b1_history"
+                screen.MULTI_STRATEGY_HISTORY = root / "multi_strategy_history"
+                screen.write_outputs(
+                    {
+                        "generated_at": "2026-08-04 10:00:00",
+                        "items": [{"code": "600001"}],
+                        "trade_items": [],
+                        "niuone_context": {
+                            "stocks": {"600001": {"private": "large"}}
+                        },
+                    },
+                    "2026-08-04 10:00:00",
+                )
+                compact = json.loads(
+                    screen.PRACTICE_CANDIDATES_CACHE.read_text(encoding="utf-8")
+                )
+            finally:
+                for name, value in originals.items():
+                    setattr(screen, name, value)
+
+        self.assertEqual(compact["items"], [{"code": "600001"}])
+        self.assertEqual(compact["trade_items"], [])
+        self.assertNotIn("niuone_context", compact)
 
     @staticmethod
     def _tencent_quote_response():

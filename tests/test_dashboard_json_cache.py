@@ -6,6 +6,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "app"
@@ -62,6 +63,29 @@ class DashboardJsonCacheTests(unittest.TestCase):
 
             self.assertEqual(cache.read_json_cache(path), {"new": "牛"})
             self.assertEqual(list(Path(td).glob(".*.tmp")), [])
+
+    def test_versioned_json_cache_parses_once_per_atomic_file_version(self):
+        cache = load_module("dashboard_json_cache")
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "read-model.json"
+            cache.write_json_cache(path, {"generation": 1})
+            cache.clear_versioned_json_cache()
+
+            with mock.patch.object(
+                cache.json,
+                "loads",
+                wraps=cache.json.loads,
+            ) as loads:
+                first = cache.read_versioned_json_cache(path)
+                second = cache.read_versioned_json_cache(path)
+                self.assertIs(first, second)
+                self.assertEqual(loads.call_count, 1)
+
+                cache.write_json_cache(path, {"generation": 2})
+                third = cache.read_versioned_json_cache(path)
+
+            self.assertEqual(third, {"generation": 2})
+            self.assertEqual(loads.call_count, 2)
 
     def test_dashboard_api_falls_back_to_stale_cache_on_compute_failure(self):
         stale_payload = {

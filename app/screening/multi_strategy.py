@@ -70,6 +70,7 @@ from market_data.tencent_kline_cache import (
     prewarm_kline_cache,
     store_kline_series,
 )
+from screening.candidate_cache import write_practice_candidates_cache
 from screening.stock_universe import (
     DEFAULT_STOCK_UNIVERSE,
     FULL_SUPPORTED_NON_ST_UNIVERSE,
@@ -85,6 +86,7 @@ from screening.stock_universe import (
 from screening.niuone_mainline_cache import (
     load_cached_niuone_context,
     write_niuone_mainline_cache,
+    write_niuone_mainline_summary_cache,
 )
 from strategies.registry import (
     ACTIVE_STRATEGY_ENV,
@@ -164,8 +166,10 @@ DASHBOARD_ENV_FILE = get_dashboard_env_file(Path(__file__).resolve().parents[1])
 B1_OUTPUT_DIR = DASHBOARD_HOME / "cron" / "output"
 B1_CACHE_FILE = B1_OUTPUT_DIR / "b1_screen_latest.json"
 MULTI_STRATEGY_CACHE = B1_OUTPUT_DIR / "multi_strategy_latest.json"
+PRACTICE_CANDIDATES_CACHE = B1_OUTPUT_DIR / "practice_candidates_latest.json"
 NIUONE_MAINLINE_CACHE = B1_OUTPUT_DIR / "niuone_mainline_latest.json"
 NIUONE_MAINLINE_MINUTE_CACHE = B1_OUTPUT_DIR / "niuone_mainline_minute_latest.json"
+NIUONE_MAINLINE_SUMMARY_CACHE = B1_OUTPUT_DIR / "niuone_mainline_summary_latest.json"
 STOCK_INDUSTRY_CACHE = B1_OUTPUT_DIR / "stock_industry_cache.json"
 EASTMONEY_BOARD_CACHE = B1_OUTPUT_DIR / "eastmoney_stock_boards.json"
 B1_HISTORY_DIR = B1_OUTPUT_DIR / "b1_history"
@@ -1500,18 +1504,24 @@ def annotate_candidate_industries(
 # ========== Main ==========
 
 
-def write_outputs(json_str: str, generated_at: str) -> None:
+def write_outputs(
+    payload: Mapping[str, Any],
+    generated_at: str,
+    *,
+    json_str: str | None = None,
+) -> None:
     """Write B1 cache (backward compat), multi-strategy cache, and archives."""
     B1_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    serialized = json_str or json.dumps(payload, ensure_ascii=False, indent=2)
 
     # Multi-strategy cache (primary)
     tmp_ms = MULTI_STRATEGY_CACHE.with_suffix(MULTI_STRATEGY_CACHE.suffix + ".new")
-    tmp_ms.write_text(json_str + "\n", encoding="utf-8")
+    tmp_ms.write_text(serialized + "\n", encoding="utf-8")
     tmp_ms.replace(MULTI_STRATEGY_CACHE)
 
     # B1 cache (backward compat for dashboard/现有pipeline)
     tmp_b1 = B1_CACHE_FILE.with_suffix(B1_CACHE_FILE.suffix + ".new")
-    tmp_b1.write_text(json_str + "\n", encoding="utf-8")
+    tmp_b1.write_text(serialized + "\n", encoding="utf-8")
     tmp_b1.replace(B1_CACHE_FILE)
 
     # Archive
@@ -1523,8 +1533,15 @@ def write_outputs(json_str: str, generated_at: str) -> None:
         d.mkdir(parents=True, exist_ok=True)
         f = d / f"{safe_ts}.json"
         ft = f.with_suffix(f.suffix + ".new")
-        ft.write_text(json_str + "\n", encoding="utf-8")
+        ft.write_text(serialized + "\n", encoding="utf-8")
         ft.replace(f)
+
+    # The Dashboard polls this bounded read model instead of the full scan.
+    write_practice_candidates_cache(
+        PRACTICE_CANDIDATES_CACHE,
+        payload,
+        source_path=MULTI_STRATEGY_CACHE,
+    )
 
 
 def prewarm_full_market_klines(
@@ -2059,6 +2076,10 @@ def main():
             "niuone_context": niuone_context,
         }
         write_niuone_mainline_cache(NIUONE_MAINLINE_CACHE, output)
+        write_niuone_mainline_summary_cache(
+            NIUONE_MAINLINE_SUMMARY_CACHE,
+            output,
+        )
         print(json.dumps(output, ensure_ascii=False, indent=2))
         print(
             "  Independent theme-strength cache updated: "
@@ -2496,7 +2517,11 @@ def main():
     print(json_str)
     if niuone_context is not None:
         write_niuone_mainline_cache(NIUONE_MAINLINE_CACHE, output)
-    write_outputs(json_str, generated_at)
+        write_niuone_mainline_summary_cache(
+            NIUONE_MAINLINE_SUMMARY_CACHE,
+            output,
+        )
+    write_outputs(output, generated_at, json_str=json_str)
     report_scan_progress(
         "completed",
         stage_label="选股扫描已完成",

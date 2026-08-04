@@ -8,8 +8,10 @@ from pathlib import Path
 from app.dashboard.niuone_mainline import build_niuone_mainline_view
 from app.screening.niuone_mainline_cache import (
     build_niuone_mainline_cache_payload,
+    build_niuone_mainline_summary_cache_payload,
     load_cached_niuone_context,
     write_niuone_mainline_cache,
+    write_niuone_mainline_summary_cache,
 )
 
 
@@ -287,6 +289,28 @@ class NiuOneMainlineViewTests(unittest.TestCase):
         self.assertNotIn("raw_news", serialized)
         self.assertNotIn("internal_samples", serialized)
         self.assertNotIn("V形修复", serialized)
+
+    def test_summary_snapshot_preserves_view_without_per_stock_state(self) -> None:
+        scan = sample_scan()
+        summary = build_niuone_mainline_summary_cache_payload(scan)
+
+        self.assertEqual(
+            build_niuone_mainline_view(summary),
+            build_niuone_mainline_view(scan),
+        )
+        self.assertNotIn("stocks", summary["niuone_context"])
+        self.assertNotIn("industry_money_flow", summary["niuone_context"])
+        self.assertNotIn(
+            "internal_samples",
+            summary["niuone_context"]["themes"]["工业金属"],
+        )
+
+        with tempfile.TemporaryDirectory(prefix="niuone-summary-") as directory:
+            path = Path(directory) / "niuone_mainline_summary_latest.json"
+            written = write_niuone_mainline_summary_cache(path, scan)
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertEqual(loaded, written)
 
     def test_empty_payload_returns_stable_unavailable_view(self) -> None:
         view = build_niuone_mainline_view(None)
