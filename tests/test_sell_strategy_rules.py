@@ -3314,6 +3314,7 @@ class SellStrategyRuleTests(unittest.TestCase):
         db_points = []
         fake_db = types.ModuleType("niuniu_db")
         fake_db.record_daily_equity = lambda point: db_points.append(dict(point))
+        fake_db.archive_account_history = lambda _state: True
         original_db = sys.modules.get("niuniu_db")
         original_state_file = trader.STATE_FILE
         originals = {

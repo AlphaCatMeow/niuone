@@ -447,6 +447,12 @@ PROVIDER_DISPLAY_NAME = "Crossdesk.ccwu.cc"
 CROSSDESK_PROVIDER_NAME = "Crossdesk.ccwu.cc"
 TRADE_LOG_LIMIT = 200
 EQUITY_HISTORY_LIMIT = 500
+JSON_RECENT_HISTORY_LIMITS = {
+    "trade_log": TRADE_LOG_LIMIT,
+    "decision_log": 50,
+    "equity_history": EQUITY_HISTORY_LIMIT,
+    "daily_equity_history": EQUITY_HISTORY_LIMIT,
+}
 
 
 def now_ts() -> str:
@@ -720,6 +726,7 @@ def default_state() -> dict[str, Any]:
         "decision_log": [],
         "pending_decisions": [],
         "equity_history": [],
+        "daily_equity_history": [],
         "last_b1_generated_at": "",
         "last_decision_at": "",
         "last_error": "",
@@ -742,7 +749,105 @@ def load_state() -> dict[str, Any]:
     base.setdefault("decision_log", [])
     base.setdefault("pending_decisions", [])
     base.setdefault("equity_history", [])
+    base.setdefault("daily_equity_history", [])
     return base
+
+
+def _account_history_identity(kind: str, value: Any) -> str:
+    if isinstance(value, Mapping):
+        if kind in {"equity_history", "daily_equity_history"}:
+            time_text = str(value.get("time") or value.get("date") or "")
+            if time_text:
+                return f"time:{time_text}"
+        if kind == "trade_log":
+            identity = {
+                field: value.get(field, "")
+                for field in (
+                    "time",
+                    "action",
+                    "code",
+                    "shares",
+                    "price",
+                    "reason",
+                )
+            }
+            return "trade:" + json.dumps(
+                identity,
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            )
+    return "payload:" + json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    )
+
+
+def load_account_history(
+    kind: str,
+    recent: list[Any] | None = None,
+    *,
+    limit: int | None = None,
+) -> list[Any]:
+    """Merge archived history with current JSON, preferring the current state."""
+    if kind not in JSON_RECENT_HISTORY_LIMITS:
+        raise ValueError(f"unsupported account history kind: {kind}")
+    archived: list[Any] = []
+    try:
+        from niuniu_db import query_account_history as _query_history
+
+        result = _query_history(kind, limit=limit)
+        if isinstance(result, list):
+            archived = result
+    except Exception as exc:
+        print(
+            "[WARN] 账户历史读取失败，使用近期 JSON: "
+            f"{type(exc).__name__}",
+            flush=True,
+        )
+
+    merged: dict[str, Any] = {}
+    order: list[str] = []
+    for value in [*archived, *(recent or [])]:
+        identity = _account_history_identity(kind, value)
+        if identity not in merged:
+            order.append(identity)
+        merged[identity] = value
+    rows = [merged[identity] for identity in order]
+    rows.sort(
+        key=lambda value: str(
+            value.get("time") or value.get("date") or ""
+        ) if isinstance(value, Mapping) else ""
+    )
+    if limit is not None:
+        resolved_limit = max(0, int(limit))
+        return rows[-resolved_limit:] if resolved_limit else []
+    return rows
+
+
+def _archive_account_history_before_compaction(state: Mapping[str, Any]) -> bool:
+    try:
+        from niuniu_db import archive_account_history as _archive_history
+
+        return _archive_history(state) is True
+    except Exception as exc:
+        print(
+            "[WARN] 账户历史归档失败，保留完整 JSON: "
+            f"{type(exc).__name__}",
+            flush=True,
+        )
+        return False
+
+
+def _compact_account_state_json(state: Mapping[str, Any]) -> dict[str, Any]:
+    compacted = dict(state)
+    for kind, limit in JSON_RECENT_HISTORY_LIMITS.items():
+        values = state.get(kind)
+        if isinstance(values, list):
+            compacted[kind] = values[-limit:]
+    return compacted
 
 
 _STATE_FILE_THREAD_LOCK = threading.RLock()
@@ -1119,10 +1224,25 @@ def save_state(state: dict[str, Any]) -> None:
             if current_market_time > state_market_time:
                 state["market_decision_context"] = current_market_ctx
 
+        unarchived_history = {
+            kind: list(state.get(kind) or [])
+            for kind in JSON_RECENT_HISTORY_LIMITS
+            if isinstance(state.get(kind), list)
+        }
+        history_archived = _archive_account_history_before_compaction(state)
+
         prune_non_trading_day_equity_points(state)
         prune_future_intraday_equity_points(state)
         normalize_daily_equity_history(state)
         sort_equity_history(state)
+
+        if history_archived:
+            persisted_state = _compact_account_state_json(state)
+        else:
+            # Existing JSON remains the recovery source until a complete archive
+            # transaction succeeds, including rows rejected by active-view cleanup.
+            persisted_state = dict(state)
+            persisted_state.update(unarchived_history)
 
         equity_point_to_sync = next(
             (
@@ -1134,7 +1254,10 @@ def save_state(state: dict[str, Any]) -> None:
             None,
         )
         tmp = STATE_FILE.with_name(f"{STATE_FILE.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-        tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.write_text(
+            json.dumps(persisted_state, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
         tmp.replace(STATE_FILE)
 
         # Synchronize SQLite only after the canonical same-minute point is chosen.
@@ -9748,8 +9871,16 @@ def get_dashboard_payload() -> dict[str, Any]:
     save_state(state)
     
     payload = enrich_portfolio(state)
-    payload["equity_history"] = state.get("equity_history", [])
-    payload["daily_equity_history"] = state.get("daily_equity_history", [])
+    payload["equity_history"] = load_account_history(
+        "equity_history",
+        state.get("equity_history", []),
+        limit=2000,
+    )
+    payload["daily_equity_history"] = load_account_history(
+        "daily_equity_history",
+        state.get("daily_equity_history", []),
+        limit=EQUITY_HISTORY_LIMIT,
+    )
     payload["trading_calendar"] = trading_day_status()
     # 补充从 DB 读取的每日资金快照（作为兜底）
     try:

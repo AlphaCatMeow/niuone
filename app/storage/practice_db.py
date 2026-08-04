@@ -17,6 +17,7 @@ import time
 from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from a_share_calendar import is_a_share_trading_day
 from niuone_paths import get_dashboard_home
@@ -29,6 +30,13 @@ STATE_FILE = Path(
         DASHBOARD_HOME / "cron" / "output" / "niuniu_practice_portfolio.json",
     )
 ).expanduser()
+
+ACCOUNT_HISTORY_KINDS = frozenset({
+    "trade_log",
+    "decision_log",
+    "equity_history",
+    "daily_equity_history",
+})
 
 
 def _json_safe(value):
@@ -46,7 +54,7 @@ def _json_safe(value):
     return str(value)
 
 
-def _canonical_payload(value: Mapping) -> str:
+def _canonical_payload(value: Any) -> str:
     return json.dumps(
         _json_safe(value),
         ensure_ascii=False,
@@ -60,6 +68,37 @@ def _decision_event_key(payload_json: str) -> str:
     return hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
 
 
+def _history_logical_key(kind: str, value: Any, payload_json: str) -> str:
+    """Return the active-record identity without discarding archived revisions."""
+    if isinstance(value, Mapping):
+        if kind in {"equity_history", "daily_equity_history"}:
+            time_text = str(value.get("time") or value.get("date") or "")
+            if time_text:
+                return f"time:{time_text}"
+        if kind == "trade_log":
+            identity = {
+                field: value.get(field, "")
+                for field in (
+                    "time",
+                    "action",
+                    "code",
+                    "shares",
+                    "price",
+                    "reason",
+                )
+            }
+            return "trade:" + hashlib.sha256(
+                _canonical_payload(identity).encode("utf-8")
+            ).hexdigest()
+    return "payload:" + _decision_event_key(payload_json)
+
+
+def _history_event_time(value: Any) -> str:
+    if not isinstance(value, Mapping):
+        return ""
+    return str(value.get("time") or value.get("date") or "")
+
+
 def _is_trading_day_text(value: str) -> bool:
     try:
         return is_a_share_trading_day(datetime.strptime(str(value or "")[:10], "%Y-%m-%d"))
@@ -69,9 +108,10 @@ def _is_trading_day_text(value: str) -> bool:
 
 def _connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), timeout=10)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=10000")
     return conn
 
 
@@ -139,11 +179,36 @@ def init_db():
         payload_json TEXT NOT NULL DEFAULT '', -- 完整候选与决策证据
         created_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS account_history (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        history_kind TEXT NOT NULL,
+        event_key    TEXT NOT NULL,
+        logical_key  TEXT NOT NULL,
+        event_time   TEXT NOT NULL DEFAULT '',
+        payload_json TEXT NOT NULL,
+        archived_at  TEXT NOT NULL,
+        UNIQUE(history_kind, event_key)
+    );
     
     CREATE INDEX IF NOT EXISTS idx_trades_time ON trades(time);
     CREATE INDEX IF NOT EXISTS idx_trades_code ON trades(code);
     CREATE INDEX IF NOT EXISTS idx_positions_date ON position_snapshots(date);
     CREATE INDEX IF NOT EXISTS idx_daily_equity_date ON daily_equity(date);
+    CREATE INDEX IF NOT EXISTS idx_account_history_kind_time
+        ON account_history(history_kind, event_time, id);
+    CREATE INDEX IF NOT EXISTS idx_account_history_kind_logical
+        ON account_history(history_kind, logical_key, id);
+    CREATE TRIGGER IF NOT EXISTS account_history_no_update
+        BEFORE UPDATE ON account_history
+        BEGIN
+            SELECT RAISE(ABORT, 'account_history is append-only');
+        END;
+    CREATE TRIGGER IF NOT EXISTS account_history_no_delete
+        BEFORE DELETE ON account_history
+        BEGIN
+            SELECT RAISE(ABORT, 'account_history is append-only');
+        END;
     """)
     _ensure_trade_payload_column(conn)
     _ensure_decision_evidence_columns(conn)
@@ -220,6 +285,149 @@ def _deduplicate_trades(conn: sqlite3.Connection):
     """)
 
 
+def _archive_account_history_conn(
+    conn: sqlite3.Connection,
+    state: Mapping[str, Any],
+) -> int:
+    """Append lossless history payloads inside the caller's transaction."""
+    archived_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    rows: list[tuple[str, str, str, str, str, str]] = []
+    for kind in ACCOUNT_HISTORY_KINDS:
+        values = state.get(kind)
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            payload_json = _canonical_payload(value)
+            event_key = _decision_event_key(payload_json)
+            rows.append((
+                kind,
+                event_key,
+                _history_logical_key(kind, value, payload_json),
+                _history_event_time(value),
+                payload_json,
+                archived_at,
+            ))
+    if rows:
+        conn.executemany(
+            """
+            INSERT OR IGNORE INTO account_history (
+                history_kind, event_key, logical_key, event_time,
+                payload_json, archived_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+    return len(rows)
+
+
+def archive_account_history(state: Mapping[str, Any]) -> bool:
+    """Atomically append all JSON account history before the file is compacted."""
+    conn = None
+    try:
+        conn = _connect()
+        conn.execute("BEGIN IMMEDIATE")
+        _archive_account_history_conn(conn, state)
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as exc:
+        if conn is not None:
+            try:
+                conn.rollback()
+                conn.close()
+            except sqlite3.Error:
+                pass
+        print(
+            "[niuniu_db] 归档账户历史失败: "
+            f"{type(exc).__name__}",
+        )
+        return False
+
+
+def archive_state_file_history() -> bool:
+    """Idempotently seed the immutable archive from a legacy full-state JSON."""
+    if not STATE_FILE.exists():
+        return True
+    try:
+        state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except Exception as exc:
+        print(
+            "[niuniu_db] 读取账户历史 JSON 失败: "
+            f"{type(exc).__name__}",
+        )
+        return False
+    if not isinstance(state, Mapping):
+        return False
+    return archive_account_history(state)
+
+
+def query_account_history(kind: str, limit: int | None = None) -> list[Any]:
+    """Read active history rows while keeping every older revision in SQLite."""
+    if kind not in ACCOUNT_HISTORY_KINDS:
+        raise ValueError(f"unsupported account history kind: {kind}")
+    conn = None
+    try:
+        conn = _connect()
+        params: list[Any] = [kind]
+        active_rows_sql = """
+            SELECT h.id, h.event_time, h.payload_json
+            FROM account_history AS h
+            WHERE h.history_kind = ?
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM account_history AS newer
+                  WHERE newer.history_kind = h.history_kind
+                    AND newer.logical_key = h.logical_key
+                    AND newer.id > h.id
+              )
+        """
+        if limit is not None:
+            resolved_limit = max(0, int(limit))
+            if resolved_limit == 0:
+                conn.close()
+                return []
+            query = f"""
+                SELECT payload_json
+                FROM ({active_rows_sql}
+                      ORDER BY h.event_time DESC, h.id DESC
+                      LIMIT ?)
+                ORDER BY event_time, id
+            """
+            params.append(resolved_limit)
+        else:
+            query = f"""
+                SELECT payload_json
+                FROM ({active_rows_sql})
+                ORDER BY event_time, id
+            """
+        raw_rows = conn.execute(query, params).fetchall()
+        conn.close()
+        restored: list[Any] = []
+        invalid_count = 0
+        for (payload_json,) in raw_rows:
+            try:
+                restored.append(json.loads(payload_json))
+            except (TypeError, json.JSONDecodeError):
+                invalid_count += 1
+        if invalid_count:
+            print(
+                "[niuniu_db] 跳过无法解析的账户历史记录: "
+                f"{invalid_count} 条"
+            )
+        return restored
+    except Exception as exc:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+        print(
+            "[niuniu_db] 查询账户历史失败: "
+            f"{type(exc).__name__}",
+        )
+        return []
+
+
 def migrate_from_json():
     """从 niuniu_practice_portfolio.json 迁移历史数据到 SQLite。"""
     json_path = STATE_FILE
@@ -228,8 +436,13 @@ def migrate_from_json():
     
     conn = _connect()
     try:
-        state = json.loads(json_path.read_text())
+        state = json.loads(json_path.read_text(encoding="utf-8"))
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # Archive the source payloads first. The structured summary tables below
+        # remain useful for existing reports, while account_history is the
+        # lossless, append-only source used before compacting the JSON state.
+        _archive_account_history_conn(conn, state)
         
         # 1. 迁移每日资金快照
         daily_history = state.get("daily_equity_history", [])
@@ -240,7 +453,7 @@ def migrate_from_json():
                 if not date:
                     continue
                 conn.execute("""
-                    INSERT OR REPLACE INTO daily_equity (date, equity, cash, market_value, pnl_pct, account_created_at, created_at)
+                    INSERT OR IGNORE INTO daily_equity (date, equity, cash, market_value, pnl_pct, account_created_at, created_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?)
                 """, (date, pt.get("equity", 0), pt.get("cash", 0), pt.get("market_value", 0), pt.get("pnl_pct", 0), state.get("created_at", ""), pt.get("time", now)))
                 migrated += 1
@@ -306,7 +519,7 @@ def migrate_from_json():
                 pnl = (last_price - avg_cost) * qty
                 pnl_pct_val = ((last_price / avg_cost - 1) * 100) if avg_cost > 0 else 0
                 conn.execute("""
-                    INSERT OR REPLACE INTO position_snapshots (date, code, name, shares, avg_cost, last_price, market_value, pnl, pnl_pct, created_at)
+                    INSERT OR IGNORE INTO position_snapshots (date, code, name, shares, avg_cost, last_price, market_value, pnl, pnl_pct, created_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (today, code, p.get("name", ""), qty, avg_cost, last_price, mv, pnl, pnl_pct_val, now))
                 migrated += 1
@@ -473,8 +686,11 @@ def has_daily_equity_table() -> bool:
 if not DB_PATH.exists() or DB_PATH.stat().st_size < 1024:
     init_db()
     migrate_from_json()
+    archive_state_file_history()
 elif not has_daily_equity_table():
     init_db()
     migrate_from_json()
+    archive_state_file_history()
 else:
     init_db()
+    archive_state_file_history()

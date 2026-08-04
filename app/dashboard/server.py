@@ -1368,6 +1368,18 @@ def get_practice_payload() -> dict[str, Any]:
         payload = trader.enrich_portfolio(state)
         equity_history = state.get("equity_history", []) or []
         daily_equity_history = state.get("daily_equity_history", []) or []
+        history_loader = getattr(trader, "load_account_history", None)
+        if callable(history_loader):
+            equity_history = history_loader(
+                "equity_history",
+                equity_history,
+                limit=2000,
+            )
+            daily_equity_history = history_loader(
+                "daily_equity_history",
+                daily_equity_history,
+                limit=500,
+            )
         payload["equity_history"] = filter_future_equity_points(
             equity_history,
             now=now,
