@@ -4,8 +4,17 @@ from __future__ import annotations
 import math
 from typing import Any, Mapping
 
+try:
+    from app.market_data.eastmoney_concept_boards import (
+        normalize_eastmoney_concept_name,
+    )
+except ImportError:  # pragma: no cover - standalone entrypoints add app/ to sys.path
+    from market_data.eastmoney_concept_boards import (
+        normalize_eastmoney_concept_name,
+    )
 
-NIUONE_MAINLINE_VIEW_SCHEMA_VERSION = 12
+
+NIUONE_MAINLINE_VIEW_SCHEMA_VERSION = 13
 NIUONE_MAINLINE_THEME_LIMIT = 5
 
 
@@ -28,6 +37,96 @@ def _integer(value: Any) -> int:
 
 def _text(value: Any, limit: int = 160) -> str:
     return str(value or "").strip()[:limit]
+
+
+def _eastmoney_board_view(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    name = _text(value.get("name"), 80)
+    rank = _integer(value.get("rank"))
+    if not name or rank <= 0:
+        return None
+    up_count = _integer(value.get("up_count"))
+    down_count = _integer(value.get("down_count"))
+    flat_count = _integer(value.get("flat_count"))
+    quote_count = up_count + down_count + flat_count
+    leader_code = _text(value.get("leader_code"), 12)
+    leader_name = _text(value.get("leader_name"), 40)
+    return {
+        "board_code": _text(value.get("code"), 16),
+        "board_name": name,
+        "rank": rank,
+        "change_pct": _number(value.get("change_pct")),
+        "main_net_yi": _number(value.get("main_net_yi")),
+        "up_count": up_count,
+        "down_count": down_count,
+        "flat_count": flat_count,
+        "breadth_pct": (
+            round(up_count / quote_count * 100, 2) if quote_count else None
+        ),
+        "leader": (
+            {
+                "code": leader_code,
+                "name": leader_name,
+                "change_pct": _number(value.get("leader_change_pct")),
+            }
+            if leader_code or leader_name
+            else None
+        ),
+    }
+
+
+def _eastmoney_signal_view(
+    value: Any,
+) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+    default = {
+        "available": False,
+        "status": "not_collected",
+        "source": "eastmoney_concept_board_rank",
+        "source_url": "",
+        "captured_at": "",
+        "quote_generated_at": "",
+        "sort": "change_pct_desc",
+        "total_count": 0,
+        "covered_count": 0,
+        "stale": False,
+        "matched_theme_count": 0,
+    }
+    if not isinstance(value, Mapping):
+        return default, {}
+    boards = [
+        board
+        for raw in list(value.get("boards") or [])[:100]
+        if (board := _eastmoney_board_view(raw)) is not None
+    ]
+    available = value.get("available") is not False and bool(boards)
+    signal = {
+        "available": available,
+        "status": (
+            "available"
+            if available
+            else _text(value.get("status"), 40) or "upstream_unavailable"
+        ),
+        "source": _text(value.get("source"), 60)
+        or "eastmoney_concept_board_rank",
+        "source_url": _text(value.get("source_url"), 240),
+        "captured_at": _text(value.get("captured_at"), 19),
+        "quote_generated_at": _text(value.get("quote_generated_at"), 19),
+        "sort": _text(value.get("sort"), 32) or "change_pct_desc",
+        "total_count": _integer(value.get("total_count")),
+        "covered_count": _integer(value.get("covered_count")) or len(boards),
+        "stale": value.get("stale") is True,
+        "matched_theme_count": 0,
+    }
+    lookup: dict[str, dict[str, Any]] = {}
+    if available:
+        for board in boards:
+            normalized = normalize_eastmoney_concept_name(
+                board.get("board_name")
+            )
+            if normalized and normalized not in lookup:
+                lookup[normalized] = board
+    return signal, lookup
 
 
 def _strong_stock_view(value: Any) -> dict[str, Any] | None:
@@ -251,6 +350,17 @@ def build_niuone_mainline_view(payload: Mapping[str, Any] | None) -> dict[str, A
     today_primary = _text(mainline.get("today_primary"), 80)
     raw_themes = context.get("themes") if isinstance(context.get("themes"), Mapping) else {}
     theme_views = [theme for value in raw_themes.values() if (theme := _theme_view(value)) is not None]
+    eastmoney_signal, eastmoney_lookup = _eastmoney_signal_view(
+        payload.get("eastmoney_concept_signal")
+    )
+    matched_theme_count = 0
+    for theme in theme_views:
+        normalized = normalize_eastmoney_concept_name(theme.get("industry"))
+        board = eastmoney_lookup.get(normalized)
+        if board is not None:
+            theme["eastmoney"] = dict(board)
+            matched_theme_count += 1
+    eastmoney_signal["matched_theme_count"] = matched_theme_count
     themes = _diverse_themes(
         sorted(
             theme_views,
@@ -336,6 +446,7 @@ def build_niuone_mainline_view(payload: Mapping[str, Any] | None) -> dict[str, A
         },
         "theme_count": _integer(context.get("theme_count")),
         "strong_stock_count": _integer(context.get("strong_stock_count")),
+        "eastmoney_concept_signal": eastmoney_signal,
         "themes": themes[:NIUONE_MAINLINE_THEME_LIMIT],
         "today_themes": today_themes[:NIUONE_MAINLINE_THEME_LIMIT],
         "data_quality": {

@@ -25,6 +25,7 @@ const market = computed(() => payload.value.market || {})
 const mainline = computed(() => payload.value.mainline || {})
 const themes = computed(() => Array.isArray(payload.value.themes) ? payload.value.themes : [])
 const todayThemes = computed(() => Array.isArray(payload.value.today_themes) ? payload.value.today_themes : [])
+const eastmoneySignal = computed(() => payload.value.eastmoney_concept_signal || {})
 const hardStopMarket = computed(() => market.value.hard_stop === true)
 const defensiveMarket = computed(() => (
   market.value.state === 'defensive'
@@ -141,6 +142,27 @@ function breadthDetail(theme) {
   return activeFilter.value === 'today'
     ? `归因 ${numeric(theme.today_attributed_breadth_pct)}% · 原始 ${numeric(theme.today_breadth_pct)}%`
     : `今日 ${numeric(theme.today_breadth_pct)}%`
+}
+
+function eastmoneyQuoteCount(theme) {
+  const signal = theme?.eastmoney || {}
+  return ['up_count', 'down_count', 'flat_count']
+    .reduce((total, key) => total + (Number(signal[key]) || 0), 0)
+}
+
+function eastmoneyLeaderDetail(theme) {
+  const signal = theme?.eastmoney || {}
+  const leader = signal.leader || {}
+  const quoteCount = eastmoneyQuoteCount(theme)
+  const breadth = quoteCount > 0 ? `上涨 ${signal.up_count || 0}/${quoteCount}` : '广度待补充'
+  if (!leader.name && !leader.code) return breadth
+  return `${breadth} · 领涨 ${leader.name || leader.code} ${signed(leader.change_pct, '%')}`
+}
+
+function eastmoneyMissingDetail() {
+  if (eastmoneySignal.value.available) return `涨幅榜前${eastmoneySignal.value.covered_count || 100}未匹配`
+  if (eastmoneySignal.value.status === 'not_collected') return '等待下一次题材快照采集'
+  return '即时概念榜暂不可用'
 }
 
 function stockChangeTone(value) {
@@ -364,7 +386,7 @@ onBeforeUnmount(() => {
         <div class="mainline-section-head">
           <div>
             <h3>题材强度榜</h3>
-            <p>结构榜用于跨日主线确认；今日榜只观察当日参与，不改变牛牛战法的跨日生命周期和交易门槛。</p>
+            <p>结构榜用于跨日主线确认；今日榜只观察当日参与，东方财富概念涨幅榜仅作即时交叉验证，不改变排序、生命周期和交易门槛。</p>
           </div>
           <div class="mainline-filters" role="group" aria-label="主线状态筛选">
             <button
@@ -387,7 +409,11 @@ onBeforeUnmount(() => {
             <span class="theme-column-help" role="columnheader" tabindex="0" data-tooltip="结构广度按个股题材归因权重计算；今日广度还会按题材样本量向全市场广度收缩，原始广度保留在详情中。" aria-label="广度：使用题材归因和小样本收缩后的有效广度。">{{ activeFilter === 'today' ? '归因广度' : '结构广度' }}</span>
             <span class="theme-column-help" role="columnheader" tabindex="0" data-tooltip="与上一相邻交易日重合的核心强势股数量及比例。" aria-label="核心延续：与上一相邻交易日重合的核心强势股数量及比例。">核心延续</span>
             <span role="columnheader">{{ activeFilter === 'today' ? '日内领涨' : '结构龙头' }}</span>
-            <span class="theme-column-help" role="columnheader" tabindex="0" data-tooltip="展示是否形成跨日延续，以及行业主力资金净额或数据状态。" aria-label="延续与资金：展示是否形成跨日延续，以及行业主力资金净额或数据状态。">延续与资金</span>
+            <span class="theme-column-help" role="columnheader"
+              tabindex="0"
+              :data-tooltip="activeFilter === 'today' ? '东方财富概念板块涨幅榜前100的即时排名、广度与领涨股，仅作交叉验证，不参与今日强度排序。' : '展示是否形成跨日延续，以及行业主力资金净额或数据状态。'"
+              :aria-label="activeFilter === 'today' ? '东财交叉验证：展示东方财富概念涨幅榜即时数据，不参与今日强度排序。' : '延续与资金：展示是否形成跨日延续，以及行业主力资金净额或数据状态。'"
+            >{{ activeFilter === 'today' ? '东财交叉验证' : '延续与资金' }}</span>
           </div>
           <article
             v-for="(theme, index) in filteredThemes"
@@ -456,10 +482,23 @@ onBeforeUnmount(() => {
               <span v-else>—</span>
             </div>
             <div class="theme-context" role="cell">
-              <strong>{{ theme.cross_day_persistent ? '连续出现' : '尚未跨日' }}</strong>
-              <small v-if="theme.single_stock_dominated" class="risk-text">单股主导</small>
-              <small v-else-if="theme.flow_net_yi != null">主力净额 {{ signed(theme.flow_net_yi, '亿') }}</small>
-              <small v-else>资金数据待补充</small>
+              <template v-if="activeFilter === 'today'">
+                <template v-if="theme.eastmoney">
+                  <strong>东财 #{{ theme.eastmoney.rank }} · {{ signed(theme.eastmoney.change_pct, '%') }}</strong>
+                  <small>{{ eastmoneyLeaderDetail(theme) }}</small>
+                  <small v-if="eastmoneySignal.stale" class="risk-text">陈旧快照 · {{ eastmoneySignal.quote_generated_at || eastmoneySignal.captured_at }}</small>
+                </template>
+                <template v-else>
+                  <strong>{{ eastmoneySignal.available ? '东财未匹配' : '东财数据不可用' }}</strong>
+                  <small>{{ eastmoneyMissingDetail() }}</small>
+                </template>
+              </template>
+              <template v-else>
+                <strong>{{ theme.cross_day_persistent ? '连续出现' : '尚未跨日' }}</strong>
+                <small v-if="theme.single_stock_dominated" class="risk-text">单股主导</small>
+                <small v-else-if="theme.flow_net_yi != null">主力净额 {{ signed(theme.flow_net_yi, '亿') }}</small>
+                <small v-else>资金数据待补充</small>
+              </template>
             </div>
           </article>
         </div>

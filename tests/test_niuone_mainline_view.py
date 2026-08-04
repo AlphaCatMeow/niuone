@@ -312,6 +312,94 @@ class NiuOneMainlineViewTests(unittest.TestCase):
 
         self.assertEqual(loaded, written)
 
+    def test_eastmoney_concept_rank_is_a_sanitized_today_cross_check_only(self) -> None:
+        scan = sample_scan()
+        scan["eastmoney_concept_signal"] = {
+            "schema_version": 1,
+            "source": "eastmoney_concept_board_rank",
+            "source_url": "https://quote.eastmoney.com/center/boardlist.html",
+            "captured_at": "2026-07-28 14:12:12",
+            "quote_generated_at": "2026-07-28 14:12:08",
+            "sort": "change_pct_desc",
+            "total_count": 503,
+            "covered_count": 100,
+            "stale": False,
+            "raw_response": "must-not-survive",
+            "boards": [
+                {
+                    "code": "BK0999",
+                    "name": "工业金属概念",
+                    "normalized_name": "工业金属",
+                    "rank": 12,
+                    "change_pct": 4.2,
+                    "main_net_yi": 3.5,
+                    "up_count": 7,
+                    "down_count": 1,
+                    "flat_count": 0,
+                    "leader_code": "603979",
+                    "leader_name": "金诚信",
+                    "leader_market": 1,
+                    "leader_change_pct": 5.26,
+                    "private": "must-not-survive",
+                },
+                {
+                    "code": "BK0475",
+                    "name": "银行",
+                    "rank": 3,
+                    "change_pct": 1.1,
+                    "up_count": 30,
+                    "down_count": 10,
+                    "flat_count": 2,
+                },
+            ],
+        }
+
+        summary = build_niuone_mainline_summary_cache_payload(scan)
+        view = build_niuone_mainline_view(summary)
+
+        self.assertEqual(
+            [theme["industry"] for theme in view["today_themes"]],
+            ["工业金属", "银行"],
+        )
+        signal = view["eastmoney_concept_signal"]
+        self.assertTrue(signal["available"])
+        self.assertEqual(signal["covered_count"], 100)
+        self.assertEqual(signal["matched_theme_count"], 2)
+        industrial_metals = view["today_themes"][0]["eastmoney"]
+        self.assertEqual(industrial_metals["board_name"], "工业金属概念")
+        self.assertEqual(industrial_metals["rank"], 12)
+        self.assertEqual(industrial_metals["breadth_pct"], 87.5)
+        self.assertEqual(industrial_metals["leader"]["name"], "金诚信")
+        serialized = json.dumps(summary, ensure_ascii=False)
+        self.assertNotIn("raw_response", serialized)
+        self.assertNotIn("must-not-survive", serialized)
+
+    def test_unavailable_eastmoney_signal_does_not_hide_niuone_today_rank(self) -> None:
+        scan = sample_scan()
+        scan["eastmoney_concept_signal"] = {
+            "schema_version": 1,
+            "source": "eastmoney_concept_board_rank",
+            "captured_at": "2026-07-28 14:12:12",
+            "available": False,
+            "status": "upstream_unavailable",
+            "boards": [],
+        }
+
+        view = build_niuone_mainline_view(
+            build_niuone_mainline_summary_cache_payload(scan)
+        )
+
+        self.assertEqual(
+            [theme["industry"] for theme in view["today_themes"]],
+            ["工业金属", "银行"],
+        )
+        self.assertFalse(view["eastmoney_concept_signal"]["available"])
+        self.assertEqual(
+            view["eastmoney_concept_signal"]["status"],
+            "upstream_unavailable",
+        )
+        self.assertNotIn("eastmoney", view["today_themes"][0])
+
     def test_empty_payload_returns_stable_unavailable_view(self) -> None:
         view = build_niuone_mainline_view(None)
 

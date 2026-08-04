@@ -96,6 +96,11 @@ from market_data.eastmoney_turnover import (
     fetch_market_turnover_estimate,
     fetch_turnover_profile,
 )
+from market_data.eastmoney_concept_boards import (
+    EASTMONEY_CONCEPT_BOARD_SCHEMA_VERSION,
+    EASTMONEY_CONCEPT_BOARD_SOURCE,
+    load_eastmoney_concept_board_signal,
+)
 from market_data.tencent_market_breadth import fetch_tencent_market_breadth
 from market_data.tencent_kline_cache import (
     kline_cache_path,
@@ -352,6 +357,11 @@ NIUONE_MAINLINE_MINUTE_PENDING: dict[str, Any] | None = None
 NIUONE_MAINLINE_MINUTE_THREAD: threading.Thread | None = None
 NIUONE_MAINLINE_MINUTE_ENGINE: NiuOneMinuteEngine | None = None
 NIUONE_MAINLINE_MINUTE_ENGINE_PATHS: tuple[str, str] = ("", "")
+NIUONE_MAINLINE_MINUTE_NEXT_ALLOWED_MONOTONIC = 0.0
+NIUONE_MAINLINE_MINUTE_MAX_CPU_SHARE = 0.25
+NIUONE_MAINLINE_MINUTE_MAX_COOLDOWN_SECONDS = 300.0
+NIUONE_MAINLINE_MINUTE_PROCESS_TIMEOUT_SECONDS = 180.0
+NIUONE_MAINLINE_MINUTE_BUSY_RETRY_SECONDS = 15.0
 PENDING_DECISION_THREAD: threading.Thread | None = None
 PENDING_DECISION_POLL_SECONDS = float(os.environ.get("DASHBOARD_PENDING_DECISION_POLL_SECONDS", "5") or "5")
 PRACTICE_EQUITY_HEARTBEAT_LOCK = threading.Lock()
@@ -2441,12 +2451,26 @@ def run_niuone_mainline_minute_refresh(
     flow_rows = read_json_cache(MONEY_FLOW_SNAPSHOT_FILE, None) or {}
     if str(flow_rows.get("generated_at") or "")[:10] != quote_generated_at[:10]:
         flow_rows = {}
+    resolved_now = current_cn_datetime()
     scan = (engine or get_niuone_mainline_minute_engine()).build_scan(
         quote_snapshot,
         previous_payload=previous_payload,
         flow_rows=flow_rows,
-        now=current_cn_datetime(),
+        now=resolved_now,
     )
+    try:
+        scan["eastmoney_concept_signal"] = (
+            load_eastmoney_concept_board_signal().to_dict()
+        )
+    except Exception:
+        scan["eastmoney_concept_signal"] = {
+            "schema_version": EASTMONEY_CONCEPT_BOARD_SCHEMA_VERSION,
+            "source": EASTMONEY_CONCEPT_BOARD_SOURCE,
+            "captured_at": resolved_now.strftime("%Y-%m-%d %H:%M:%S"),
+            "available": False,
+            "status": "upstream_unavailable",
+            "boards": [],
+        }
     payload = write_niuone_mainline_cache(NIUONE_MAINLINE_MINUTE_CACHE_FILE, scan)
     write_niuone_mainline_summary_cache(
         _derived_read_model_path(
@@ -2466,26 +2490,129 @@ def run_niuone_mainline_minute_refresh(
         "updated": True,
         "quote_generated_at": payload.get("quote_generated_at") or "",
         "generated_at": payload.get("generated_at") or "",
+        "calculation_duration_ms": max(
+            0, int(payload.get("calculation_duration_ms") or 0)
+        ),
     }
 
 
+def niuone_mainline_minute_cooldown_seconds(
+    calculation_duration_ms: object,
+    *,
+    sample_interval_seconds: float | None = None,
+) -> float:
+    """Keep expensive theme refreshes within a bounded single-core duty cycle."""
+
+    try:
+        duration_seconds = max(0.0, float(calculation_duration_ms) / 1000.0)
+    except (TypeError, ValueError):
+        duration_seconds = 0.0
+    interval_seconds = max(
+        1.0,
+        float(
+            MARKET_BREADTH_SAMPLE_INTERVAL_SECONDS
+            if sample_interval_seconds is None
+            else sample_interval_seconds
+        ),
+    )
+    cadence_wait = max(0.0, interval_seconds - duration_seconds)
+    guarded_wait = duration_seconds * (
+        (1.0 / NIUONE_MAINLINE_MINUTE_MAX_CPU_SHARE) - 1.0
+    )
+    return min(
+        NIUONE_MAINLINE_MINUTE_MAX_COOLDOWN_SECONDS,
+        max(cadence_wait, guarded_wait),
+    )
+
+
+def run_niuone_mainline_minute_refresh_isolated(
+    quote_snapshot: Mapping[str, Any],
+    *,
+    timeout_seconds: float = NIUONE_MAINLINE_MINUTE_PROCESS_TIMEOUT_SECONDS,
+) -> bool:
+    """Run the CPU-heavy refresh in a bounded interpreter process."""
+
+    request_body = json.dumps(
+        dict(quote_snapshot),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    process = subprocess.Popen(
+        [sys.executable, "-B", str(ENTRYPOINT_DIR / "niuone_minute_refresh.py")],
+        stdin=subprocess.PIPE,
+    )
+    try:
+        process.communicate(
+            input=request_body,
+            timeout=max(1.0, float(timeout_seconds)),
+        )
+    except subprocess.TimeoutExpired:
+        process.terminate()
+        try:
+            process.communicate(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate()
+        print(
+            "[WARN] Minute theme-strength refresh retained previous cache: "
+            "isolated compute timed out",
+            file=sys.stderr,
+            flush=True,
+        )
+        return False
+    return process.returncode == 0
+
+
+def niuone_mainline_heavy_scan_in_progress() -> bool:
+    """Prefer complete research and trading scans over the derived minute view."""
+
+    return (
+        B1_FULL_SCAN_LOCK.locked()
+        or NIUONE_MAINLINE_SCAN_LOCK.locked()
+        or KLINE_PREWARM_LOCK.locked()
+    )
+
+
 def _niuone_mainline_minute_worker() -> None:
+    global NIUONE_MAINLINE_MINUTE_NEXT_ALLOWED_MONOTONIC
     global NIUONE_MAINLINE_MINUTE_PENDING, NIUONE_MAINLINE_MINUTE_THREAD
     while True:
         with NIUONE_MAINLINE_MINUTE_STATE_LOCK:
             snapshot = NIUONE_MAINLINE_MINUTE_PENDING
-            NIUONE_MAINLINE_MINUTE_PENDING = None
             if snapshot is None:
                 NIUONE_MAINLINE_MINUTE_THREAD = None
                 return
+            wait_seconds = max(
+                0.0,
+                NIUONE_MAINLINE_MINUTE_NEXT_ALLOWED_MONOTONIC - time.monotonic(),
+            )
+            if wait_seconds <= 0 and niuone_mainline_heavy_scan_in_progress():
+                wait_seconds = NIUONE_MAINLINE_MINUTE_BUSY_RETRY_SECONDS
+            if wait_seconds <= 0:
+                NIUONE_MAINLINE_MINUTE_PENDING = None
+        if wait_seconds > 0:
+            time.sleep(wait_seconds)
+            continue
+        started = time.monotonic()
         try:
-            run_niuone_mainline_minute_refresh(snapshot)
+            updated = run_niuone_mainline_minute_refresh_isolated(snapshot)
         except Exception as exc:
+            updated = False
             print(
                 f"[WARN] Minute theme-strength refresh retained previous cache: "
                 f"{type(exc).__name__}: {exc}",
                 file=sys.stderr,
                 flush=True,
+            )
+        elapsed_ms = max(0, int((time.monotonic() - started) * 1000))
+        cooldown_seconds = niuone_mainline_minute_cooldown_seconds(
+            elapsed_ms
+        )
+        if updated:
+            invalidate_api_cache(NIUONE_MAINLINE_CACHE_KEY)
+        with NIUONE_MAINLINE_MINUTE_STATE_LOCK:
+            NIUONE_MAINLINE_MINUTE_NEXT_ALLOWED_MONOTONIC = (
+                time.monotonic() + cooldown_seconds
             )
 
 

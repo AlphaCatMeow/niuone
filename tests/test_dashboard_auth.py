@@ -4536,6 +4536,108 @@ process.stdout.write(JSON.stringify({{
             dashboard.MULTI_STRATEGY_CACHE_FILE = original_multi
             dashboard.B1_CACHE_FILE = original_b1
 
+    def test_minute_theme_refresh_attaches_eastmoney_cross_check_with_failure_degrade(self):
+        original_minute = dashboard.NIUONE_MAINLINE_MINUTE_CACHE_FILE
+        original_full = dashboard.NIUONE_MAINLINE_CACHE_FILE
+        original_summary = dashboard.NIUONE_MAINLINE_SUMMARY_CACHE_FILE
+        original_multi = dashboard.MULTI_STRATEGY_CACHE_FILE
+        original_b1 = dashboard.B1_CACHE_FILE
+        original_loader = dashboard.load_eastmoney_concept_board_signal
+        dashboard.NIUONE_MAINLINE_MINUTE_CACHE_FILE = self.tmp_path / 'niuone_mainline_minute_latest.json'
+        dashboard.NIUONE_MAINLINE_CACHE_FILE = self.tmp_path / 'niuone_mainline_latest.json'
+        dashboard.NIUONE_MAINLINE_SUMMARY_CACHE_FILE = self.tmp_path / 'niuone_mainline_summary_latest.json'
+        dashboard.MULTI_STRATEGY_CACHE_FILE = self.tmp_path / 'multi_strategy_latest.json'
+        dashboard.B1_CACHE_FILE = self.tmp_path / 'b1_screen_latest.json'
+
+        class FakeEngine:
+            @staticmethod
+            def build_scan(snapshot, **_kwargs):
+                generated_at = snapshot['generated_at']
+                return {
+                    'generated_at': generated_at,
+                    'quote_generated_at': generated_at,
+                    'refresh_mode': 'minute_quotes',
+                    'reference_pool_count': 10,
+                    'reference_analysis_count': 10,
+                    'niuone_context': {
+                        'as_of_date': generated_at[:10],
+                        'mapped_stock_count': 10,
+                        'market': {'state': 'balanced', 'score': 70},
+                        'mainline': {'today_primary': '半导体'},
+                        'themes': {
+                            '半导体': {
+                                'industry': '半导体',
+                                'score': 60,
+                                'today_eligible_data': True,
+                                'today_strength_score': 75,
+                                'today_median_change_pct': 2.5,
+                            },
+                        },
+                    },
+                }
+
+        class FakeSignal:
+            @staticmethod
+            def to_dict():
+                return {
+                    'schema_version': 1,
+                    'source': 'eastmoney_concept_board_rank',
+                    'captured_at': '2026-08-04 10:30:00',
+                    'quote_generated_at': '2026-08-04 10:29:58',
+                    'total_count': 503,
+                    'covered_count': 100,
+                    'boards': [{
+                        'code': 'BK1036',
+                        'name': '半导体概念',
+                        'rank': 6,
+                        'change_pct': 3.8,
+                        'up_count': 80,
+                        'down_count': 20,
+                        'flat_count': 0,
+                    }],
+                }
+
+        try:
+            dashboard.load_eastmoney_concept_board_signal = lambda: FakeSignal()
+            updated = dashboard.run_niuone_mainline_minute_refresh(
+                {'generated_at': '2026-08-04 10:30:00'},
+                engine=FakeEngine(),
+            )
+            first_view = dashboard.load_niuone_mainline_view()
+
+            self.assertTrue(updated['updated'])
+            self.assertTrue(first_view['eastmoney_concept_signal']['available'])
+            self.assertEqual(first_view['today_themes'][0]['eastmoney']['rank'], 6)
+
+            def unavailable():
+                raise OSError('temporary upstream failure')
+
+            dashboard.load_eastmoney_concept_board_signal = unavailable
+            dashboard.run_niuone_mainline_minute_refresh(
+                {'generated_at': '2026-08-04 10:31:00'},
+                engine=FakeEngine(),
+            )
+            degraded_view = dashboard.load_niuone_mainline_view()
+
+            self.assertEqual(
+                [theme['industry'] for theme in degraded_view['today_themes']],
+                ['半导体'],
+            )
+            self.assertFalse(
+                degraded_view['eastmoney_concept_signal']['available']
+            )
+            self.assertEqual(
+                degraded_view['eastmoney_concept_signal']['status'],
+                'upstream_unavailable',
+            )
+        finally:
+            dashboard.NIUONE_MAINLINE_MINUTE_CACHE_FILE = original_minute
+            dashboard.NIUONE_MAINLINE_CACHE_FILE = original_full
+            dashboard.NIUONE_MAINLINE_SUMMARY_CACHE_FILE = original_summary
+            dashboard.MULTI_STRATEGY_CACHE_FILE = original_multi
+            dashboard.B1_CACHE_FILE = original_b1
+            dashboard.load_eastmoney_concept_board_signal = original_loader
+
     def test_niuone_operational_cache_does_not_parse_legacy_when_dedicated_exists(self):
         original_minute = dashboard.NIUONE_MAINLINE_MINUTE_CACHE_FILE
         original_full = dashboard.NIUONE_MAINLINE_CACHE_FILE

@@ -128,6 +128,34 @@ _SUMMARY_COVERAGE_REASON_FIELDS = (
     "count",
     "description",
 )
+_EASTMONEY_CONCEPT_SIGNAL_FIELDS = (
+    "schema_version",
+    "source",
+    "source_url",
+    "captured_at",
+    "quote_generated_at",
+    "sort",
+    "total_count",
+    "covered_count",
+    "stale",
+    "available",
+    "status",
+)
+_EASTMONEY_CONCEPT_BOARD_FIELDS = (
+    "code",
+    "name",
+    "normalized_name",
+    "rank",
+    "change_pct",
+    "main_net_yi",
+    "up_count",
+    "down_count",
+    "flat_count",
+    "leader_code",
+    "leader_name",
+    "leader_market",
+    "leader_change_pct",
+)
 
 
 def _compact_stock_attributions(value: object) -> dict[str, object] | None:
@@ -147,6 +175,26 @@ def _compact_stock_attributions(value: object) -> dict[str, object] | None:
     return {"theme_attributions": attributions}
 
 
+def _compact_eastmoney_concept_signal(value: object) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    signal = _copy_mapping_fields(value, _EASTMONEY_CONCEPT_SIGNAL_FIELDS)
+    signal["boards"] = [
+        board
+        for raw in list(value.get("boards") or [])[:100]
+        if (
+            board := _copy_mapping_fields(
+                raw,
+                _EASTMONEY_CONCEPT_BOARD_FIELDS,
+            )
+        )
+        and str(board.get("name") or "").strip()
+    ]
+    if len(signal) == 1 and not signal["boards"]:
+        return None
+    return signal
+
+
 def build_niuone_mainline_cache_payload(scan: Mapping[str, Any]) -> dict[str, Any]:
     """Keep the state needed for cross-day confirmation and the mainline page."""
     context = scan.get("niuone_context") if isinstance(scan.get("niuone_context"), Mapping) else {}
@@ -163,7 +211,7 @@ def build_niuone_mainline_cache_payload(scan: Mapping[str, Any]) -> dict[str, An
         for code, value in raw_stocks.items()
         if (compact := _compact_stock_attributions(value)) is not None
     }
-    return {
+    payload = {
         "schema_version": NIUONE_MAINLINE_CACHE_SCHEMA_VERSION,
         "generated_at": str(scan.get("generated_at") or "")[:19],
         "quote_generated_at": str(scan.get("quote_generated_at") or "")[:19],
@@ -175,6 +223,12 @@ def build_niuone_mainline_cache_payload(scan: Mapping[str, Any]) -> dict[str, An
         "reference_analysis_count": int(scan.get("reference_analysis_count") or 0),
         "niuone_context": compact_context,
     }
+    concept_signal = _compact_eastmoney_concept_signal(
+        scan.get("eastmoney_concept_signal")
+    )
+    if concept_signal is not None:
+        payload["eastmoney_concept_signal"] = concept_signal
+    return payload
 
 
 def _copy_mapping_fields(
@@ -256,7 +310,7 @@ def build_niuone_mainline_summary_cache_payload(
             },
         }
     )
-    return {
+    payload = {
         "schema_version": NIUONE_MAINLINE_SUMMARY_CACHE_SCHEMA_VERSION,
         "snapshot_kind": "niuone_mainline_summary",
         "generated_at": str(scan.get("generated_at") or "")[:19],
@@ -274,6 +328,12 @@ def build_niuone_mainline_summary_cache_payload(
         ),
         "niuone_context": compact_context,
     }
+    concept_signal = _compact_eastmoney_concept_signal(
+        scan.get("eastmoney_concept_signal")
+    )
+    if concept_signal is not None:
+        payload["eastmoney_concept_signal"] = concept_signal
+    return payload
 
 
 def load_cached_niuone_context(path: Path) -> dict[str, Any] | None:

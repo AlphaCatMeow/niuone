@@ -957,6 +957,206 @@ class MarketBreadthHistoryTests(unittest.TestCase):
         finally:
             dashboard.MARKET_BREADTH_HISTORY_FILE = original_history_file
 
+    def test_minute_theme_refresh_cooldown_limits_expensive_cpu_duty_cycle(self):
+        self.assertEqual(
+            dashboard.niuone_mainline_minute_cooldown_seconds(
+                5_000,
+                sample_interval_seconds=30,
+            ),
+            25.0,
+        )
+        self.assertEqual(
+            dashboard.niuone_mainline_minute_cooldown_seconds(
+                24_000,
+                sample_interval_seconds=30,
+            ),
+            72.0,
+        )
+
+    def test_minute_theme_worker_waits_and_keeps_latest_pending_snapshot(self):
+        original_pending = dashboard.NIUONE_MAINLINE_MINUTE_PENDING
+        original_thread = dashboard.NIUONE_MAINLINE_MINUTE_THREAD
+        original_next_allowed = (
+            dashboard.NIUONE_MAINLINE_MINUTE_NEXT_ALLOWED_MONOTONIC
+        )
+        clock = {"now": 0.0}
+        sleeps = []
+        processed = []
+
+        def monotonic():
+            return clock["now"]
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            clock["now"] += seconds
+
+        def refresh_isolated(snapshot):
+            processed.append(snapshot["generated_at"])
+            clock["now"] += 24.0
+            if len(processed) == 1:
+                with dashboard.NIUONE_MAINLINE_MINUTE_STATE_LOCK:
+                    dashboard.NIUONE_MAINLINE_MINUTE_PENDING = {
+                        "generated_at": "2026-08-04 10:31:00"
+                    }
+            return True
+
+        try:
+            dashboard.NIUONE_MAINLINE_MINUTE_PENDING = {
+                "generated_at": "2026-08-04 10:30:00"
+            }
+            dashboard.NIUONE_MAINLINE_MINUTE_THREAD = object()
+            dashboard.NIUONE_MAINLINE_MINUTE_NEXT_ALLOWED_MONOTONIC = 0.0
+            with patch.object(
+                dashboard.time,
+                "monotonic",
+                side_effect=monotonic,
+            ), patch.object(
+                dashboard.time,
+                "sleep",
+                side_effect=sleep,
+            ), patch.object(
+                dashboard,
+                "run_niuone_mainline_minute_refresh_isolated",
+                side_effect=refresh_isolated,
+            ):
+                dashboard._niuone_mainline_minute_worker()
+
+            self.assertEqual(
+                processed,
+                ["2026-08-04 10:30:00", "2026-08-04 10:31:00"],
+            )
+            self.assertEqual(sleeps, [72.0])
+            self.assertIsNone(dashboard.NIUONE_MAINLINE_MINUTE_THREAD)
+        finally:
+            dashboard.NIUONE_MAINLINE_MINUTE_PENDING = original_pending
+            dashboard.NIUONE_MAINLINE_MINUTE_THREAD = original_thread
+            dashboard.NIUONE_MAINLINE_MINUTE_NEXT_ALLOWED_MONOTONIC = (
+                original_next_allowed
+            )
+
+    def test_minute_theme_worker_defers_while_complete_scan_is_running(self):
+        original_pending = dashboard.NIUONE_MAINLINE_MINUTE_PENDING
+        original_thread = dashboard.NIUONE_MAINLINE_MINUTE_THREAD
+        original_next_allowed = (
+            dashboard.NIUONE_MAINLINE_MINUTE_NEXT_ALLOWED_MONOTONIC
+        )
+        clock = {"now": 0.0}
+        sleeps = []
+        processed = []
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            clock["now"] += seconds
+
+        try:
+            dashboard.NIUONE_MAINLINE_MINUTE_PENDING = {
+                "generated_at": "2026-08-04 10:30:00"
+            }
+            dashboard.NIUONE_MAINLINE_MINUTE_THREAD = object()
+            dashboard.NIUONE_MAINLINE_MINUTE_NEXT_ALLOWED_MONOTONIC = 0.0
+            with patch.object(
+                dashboard.time,
+                "monotonic",
+                side_effect=lambda: clock["now"],
+            ), patch.object(
+                dashboard.time,
+                "sleep",
+                side_effect=sleep,
+            ), patch.object(
+                dashboard,
+                "niuone_mainline_heavy_scan_in_progress",
+                side_effect=[True, False, False],
+            ), patch.object(
+                dashboard,
+                "run_niuone_mainline_minute_refresh_isolated",
+                side_effect=lambda snapshot: processed.append(snapshot) or True,
+            ):
+                dashboard._niuone_mainline_minute_worker()
+
+            self.assertEqual(
+                sleeps,
+                [dashboard.NIUONE_MAINLINE_MINUTE_BUSY_RETRY_SECONDS],
+            )
+            self.assertEqual(
+                [item["generated_at"] for item in processed],
+                ["2026-08-04 10:30:00"],
+            )
+        finally:
+            dashboard.NIUONE_MAINLINE_MINUTE_PENDING = original_pending
+            dashboard.NIUONE_MAINLINE_MINUTE_THREAD = original_thread
+            dashboard.NIUONE_MAINLINE_MINUTE_NEXT_ALLOWED_MONOTONIC = (
+                original_next_allowed
+            )
+
+    def test_isolated_minute_theme_refresh_is_spawned_and_bounded(self):
+        class FakeProcess:
+            returncode = 0
+
+            def __init__(self):
+                self.input = None
+                self.timeout = None
+
+            def communicate(self, *, input=None, timeout=None):
+                self.input = input
+                self.timeout = timeout
+
+        process = FakeProcess()
+
+        with patch.object(
+            dashboard.subprocess,
+            "Popen",
+            return_value=process,
+        ) as popen:
+            updated = dashboard.run_niuone_mainline_minute_refresh_isolated(
+                {"generated_at": "2026-08-04 10:30:00"},
+                timeout_seconds=45,
+            )
+
+        self.assertTrue(updated)
+        command = popen.call_args.args[0]
+        self.assertEqual(command[:2], [dashboard.sys.executable, "-B"])
+        self.assertEqual(Path(command[2]).name, "niuone_minute_refresh.py")
+        self.assertEqual(popen.call_args.kwargs["stdin"], dashboard.subprocess.PIPE)
+        self.assertEqual(
+            json.loads(process.input.decode("utf-8")),
+            {"generated_at": "2026-08-04 10:30:00"},
+        )
+        self.assertEqual(process.timeout, 45.0)
+
+    def test_isolated_minute_theme_refresh_terminates_on_timeout(self):
+        class TimedOutProcess:
+            returncode = None
+
+            def __init__(self):
+                self.communicate_calls = 0
+                self.terminated = False
+
+            def communicate(self, *, input=None, timeout=None):
+                self.communicate_calls += 1
+                if self.communicate_calls == 1:
+                    raise dashboard.subprocess.TimeoutExpired(
+                        cmd="niuone-minute-refresh",
+                        timeout=timeout,
+                    )
+
+            def terminate(self):
+                self.terminated = True
+
+        process = TimedOutProcess()
+        with patch.object(
+            dashboard.subprocess,
+            "Popen",
+            return_value=process,
+        ):
+            updated = dashboard.run_niuone_mainline_minute_refresh_isolated(
+                {"generated_at": "2026-08-04 10:30:00"},
+                timeout_seconds=45,
+            )
+
+        self.assertFalse(updated)
+        self.assertTrue(process.terminated)
+        self.assertEqual(process.communicate_calls, 2)
+
     def test_producer_reuses_fresh_background_sample_without_duplicate_fetch(self):
         original_history_file = dashboard.MARKET_BREADTH_HISTORY_FILE
         try:
