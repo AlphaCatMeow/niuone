@@ -2063,6 +2063,57 @@ console.log(JSON.stringify({
         self.assertEqual(reuse['default'], '0')
         self.assertEqual(reuse['effect'], 'restart')
 
+    def test_practice_decisions_are_serialized_across_schedule_slots(self):
+        first_started = threading.Event()
+        release_first = threading.Event()
+        second_started = threading.Event()
+        calls = []
+
+        class TraderStub:
+            def run_decision_after_b1(self, payload):
+                calls.append(payload['slot'])
+                if payload['slot'] == 'first':
+                    first_started.set()
+                    self.assert_released(release_first)
+                else:
+                    second_started.set()
+                return {'slot': payload['slot']}
+
+            @staticmethod
+            def assert_released(event):
+                if not event.wait(2):
+                    raise AssertionError('first decision was not released')
+
+        original_get_trader = dashboard.get_trader_module
+        original_lock = dashboard.PRACTICE_DECISION_LOCK
+        try:
+            trader_stub = TraderStub()
+            dashboard.get_trader_module = lambda: trader_stub
+            dashboard.PRACTICE_DECISION_LOCK = threading.Lock()
+            first = threading.Thread(
+                target=dashboard.run_practice_decision,
+                args=({'slot': 'first'},),
+            )
+            second = threading.Thread(
+                target=dashboard.run_practice_decision,
+                args=({'slot': 'second'},),
+            )
+            first.start()
+            self.assertTrue(first_started.wait(1))
+            second.start()
+            self.assertFalse(second_started.wait(0.05))
+            release_first.set()
+            first.join(2)
+            second.join(2)
+        finally:
+            release_first.set()
+            dashboard.get_trader_module = original_get_trader
+            dashboard.PRACTICE_DECISION_LOCK = original_lock
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(calls, ['first', 'second'])
+
     def test_fast_practice_payload_derives_daily_calendar_points_from_intraday_history(self):
         class TraderStub:
             def load_state(self):

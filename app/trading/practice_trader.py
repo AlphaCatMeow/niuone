@@ -13,6 +13,7 @@ Rules implemented:
 from __future__ import annotations
 
 import concurrent.futures
+import copy
 import json
 import math
 import os
@@ -858,6 +859,158 @@ def reconcile_positions_with_trade_log(state: dict[str, Any]) -> list[str]:
     return reconciled
 
 
+def _trade_cash_delta(trade: Mapping[str, Any]) -> float:
+    """Return the signed cash movement recorded by one durable fill."""
+    action = str(trade.get("action") or "").upper()
+    try:
+        shares = max(0, int(float(trade.get("shares") or 0)))
+    except (TypeError, ValueError):
+        shares = 0
+    try:
+        price = max(0.0, float(trade.get("price") or 0))
+    except (TypeError, ValueError):
+        price = 0.0
+    try:
+        fee = max(0.0, float(trade.get("fee") or 0))
+    except (TypeError, ValueError):
+        fee = 0.0
+    try:
+        amount = max(0.0, float(trade.get("amount") or 0))
+    except (TypeError, ValueError):
+        amount = 0.0
+    gross = amount if amount > 0 else shares * price
+    if action == "BUY":
+        try:
+            total_cost = float(trade.get("total_cost"))
+        except (TypeError, ValueError):
+            total_cost = gross + fee
+        return -max(0.0, total_cost)
+    if action == "SELL":
+        try:
+            net_proceeds = float(trade.get("net_proceeds"))
+        except (TypeError, ValueError):
+            net_proceeds = gross - fee
+        return max(0.0, net_proceeds)
+    return 0.0
+
+
+def _apply_trade_to_account_snapshot(
+    positions: dict[str, Any],
+    trade: Mapping[str, Any],
+    templates: Mapping[str, Any],
+) -> None:
+    """Replay one branch-only fill onto another branch's position snapshot."""
+    action = str(trade.get("action") or "").upper()
+    code = normalize_code(str(trade.get("code") or ""))
+    try:
+        shares = max(0, int(float(trade.get("shares") or 0)))
+    except (TypeError, ValueError):
+        shares = 0
+    if action not in {"BUY", "SELL"} or not code or shares <= 0:
+        return
+
+    template = templates.get(code)
+    if not isinstance(template, Mapping):
+        template = next(
+            (
+                value
+                for key, value in templates.items()
+                if normalize_code(str(key)) == code and isinstance(value, Mapping)
+            ),
+            {},
+        )
+    existing = positions.get(code)
+    if not isinstance(existing, dict):
+        existing = next(
+            (
+                value
+                for key, value in positions.items()
+                if normalize_code(str(key)) == code and isinstance(value, dict)
+            ),
+            None,
+        )
+
+    if action == "BUY":
+        old_qty = position_qty(existing or {})
+        old_avg_cost = _safe_float((existing or {}).get("avg_cost"), 0.0)
+        if existing is None:
+            position = copy.deepcopy(dict(template)) if template else {}
+            position["qty"] = 0
+            position.pop("shares", None)
+            position["avg_cost"] = 0.0
+            position["buy_date_lots"] = {}
+        else:
+            position = existing
+            for key, value in dict(template).items():
+                if key not in position and key not in {"qty", "shares", "avg_cost", "buy_date_lots"}:
+                    position[key] = copy.deepcopy(value)
+
+        total_cost = -_trade_cash_delta(trade)
+        new_qty = old_qty + shares
+        position.update({
+            "code": code,
+            "name": str(trade.get("name") or position.get("name") or ""),
+            "qty": new_qty,
+            "avg_cost": round((old_qty * old_avg_cost + total_cost) / new_qty, 4),
+        })
+        position.pop("shares", None)
+        if not position.get("last_price"):
+            position["last_price"] = _safe_float(trade.get("price"), 0.0)
+        if old_qty <= 0:
+            if trade.get("buy_strategy"):
+                position["buy_strategy"] = trade.get("buy_strategy")
+            if trade.get("reason"):
+                position["entry_reason"] = trade.get("reason")
+            if isinstance(trade.get("strategy_mark"), Mapping):
+                position["strategy_mark"] = copy.deepcopy(trade.get("strategy_mark"))
+        lots = position.get("buy_date_lots")
+        lots = dict(lots) if isinstance(lots, Mapping) else {}
+        trade_date = str(trade.get("time") or "")[:10]
+        if trade_date:
+            lots[trade_date] = int(lots.get(trade_date, 0) or 0) + shares
+        position["buy_date_lots"] = lots
+        positions[code] = position
+        return
+
+    if existing is None:
+        return
+    remaining_qty = max(0, position_qty(existing) - shares)
+    lots = existing.get("buy_date_lots")
+    lots = dict(lots) if isinstance(lots, Mapping) else {}
+    remaining_to_consume = shares
+    trade_date = str(trade.get("time") or "")[:10]
+    for day in sorted(lots):
+        if day == trade_date or remaining_to_consume <= 0:
+            continue
+        lot_qty = max(0, int(lots.get(day, 0) or 0))
+        used = min(lot_qty, remaining_to_consume)
+        lots[day] = lot_qty - used
+        remaining_to_consume -= used
+    lots = {day: qty for day, qty in lots.items() if qty > 0}
+    if remaining_qty <= 0:
+        positions.pop(code, None)
+    else:
+        existing["qty"] = remaining_qty
+        existing.pop("shares", None)
+        existing["buy_date_lots"] = lots
+
+
+def merge_divergent_trade_account_state(
+    state: dict[str, Any],
+    current: Mapping[str, Any],
+    state_only_trades: list[dict[str, Any]],
+) -> None:
+    """Merge disjoint fills without dropping either writer's cash or positions."""
+    positions = copy.deepcopy(current.get("positions") or {})
+    templates = state.get("positions") or {}
+    cash = _safe_float(current.get("cash"), _safe_float(state.get("cash"), 0.0))
+    for trade in sorted(state_only_trades, key=lambda item: str(item.get("time") or "")):
+        cash += _trade_cash_delta(trade)
+        _apply_trade_to_account_snapshot(positions, trade, templates)
+    state["cash"] = round(cash, 2)
+    state["positions"] = positions
+
+
 def save_state(state: dict[str, Any]) -> None:
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     with state_file_write_lock():
@@ -908,11 +1061,23 @@ def save_state(state: dict[str, Any]) -> None:
             current_has_unseen_trades = bool(current_trade_ids - state_trade_ids)
             state_has_unseen_trades = bool(state_trade_ids - current_trade_ids)
             if current_has_unseen_trades:
-                # A slow dashboard quote refresh can save an old portfolio after
-                # the trade engine has already appended fills. Keep the traded
-                # cash/positions from disk; quote refresh can safely run again.
-                state["cash"] = current.get("cash", state.get("cash"))
-                state["positions"] = current.get("positions", state.get("positions", {}))
+                if state_has_unseen_trades:
+                    state_only_trades = [
+                        item
+                        for item in (state.get("trade_log") or [])
+                        if isinstance(item, dict) and trade_id(item) not in current_trade_ids
+                    ]
+                    merge_divergent_trade_account_state(
+                        state,
+                        current,
+                        state_only_trades,
+                    )
+                else:
+                    # A slow dashboard quote refresh can save an old portfolio after
+                    # the trade engine has already appended fills. Keep the traded
+                    # cash/positions from disk; quote refresh can safely run again.
+                    state["cash"] = current.get("cash", state.get("cash"))
+                    state["positions"] = current.get("positions", state.get("positions", {}))
 
             merge_list("decision_log", ("time", "b1_generated_at", "decision"))
             merge_list("trade_log", trade_identity_fields)

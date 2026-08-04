@@ -387,6 +387,7 @@ TRADER_MODULE_MTIME = 0.0
 TRADER_SELL_SIGNALS_FILE = SCRIPT_DIR / "trading" / "sell_signals.py"
 TRADER_SELL_SIGNALS_MTIME = 0.0
 TRADER_MODULE_LOCK = threading.Lock()
+PRACTICE_DECISION_LOCK = threading.Lock()
 PRACTICE_DECISION_KEYS: set[str] = set()
 PRACTICE_MANUAL_CYCLE_LOCK = threading.Lock()
 PRACTICE_MANUAL_CYCLE_STATE_LOCK = threading.RLock()
@@ -1661,7 +1662,11 @@ def normalize_b1_payload_for_trader(b1_payload: dict[str, Any]) -> dict[str, Any
     return payload
 
 def run_practice_decision(b1_payload: dict[str, Any]) -> dict[str, Any]:
-    return get_trader_module().run_decision_after_b1(b1_payload)
+    # Different schedule slots may finish their scans out of order. Serialize
+    # the account read/decision/execute/save transaction so a later slot cannot
+    # trade against a portfolio snapshot captured before an earlier fill.
+    with PRACTICE_DECISION_LOCK:
+        return get_trader_module().run_decision_after_b1(b1_payload)
 
 
 def _tencent_key_for_code(code: str) -> str:
@@ -3559,7 +3564,8 @@ def pending_decision_loop() -> None:
         try:
             trader = get_trader_module()
             if hasattr(trader, "execute_due_pending_decisions"):
-                result = trader.execute_due_pending_decisions()
+                with PRACTICE_DECISION_LOCK:
+                    result = trader.execute_due_pending_decisions()
                 if result.get("attempted"):
                     print(
                         f"[practice pending] attempted={result.get('attempted')} "

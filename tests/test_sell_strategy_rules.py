@@ -1944,6 +1944,81 @@ class SellStrategyRuleTests(unittest.TestCase):
         self.assertEqual(saved["positions"]["001257"]["qty"], 300)
         self.assertEqual(len(saved["trade_log"]), 1)
 
+    def test_save_state_merges_divergent_concurrent_buys(self):
+        original_state_file = trader.STATE_FILE
+        with tempfile.TemporaryDirectory() as td:
+            try:
+                trader.STATE_FILE = Path(td) / "portfolio.json"
+                earlier_buy = {
+                    "time": "2026-08-04 09:51:51", "action": "BUY", "code": "001257",
+                    "name": "并发股票", "shares": 1200, "price": 10.0, "amount": 12000.0,
+                    "fee": 5.0, "total_cost": 12005.0, "reason": "先完成的成交",
+                }
+                current = {
+                    "initial_cash": 100000.0,
+                    "cash": 87995.0,
+                    "positions": {
+                        "001257": {
+                            "code": "001257", "name": "并发股票", "qty": 1200,
+                            "avg_cost": round(12005.0 / 1200, 4),
+                            "buy_date_lots": {"2026-08-04": 1200},
+                        }
+                    },
+                    "trade_log": [earlier_buy],
+                    "decision_log": [],
+                    "equity_history": [],
+                }
+                trader.STATE_FILE.write_text(json.dumps(current, ensure_ascii=False))
+
+                later_add = {
+                    "time": "2026-08-04 09:59:37", "action": "BUY", "code": "001257",
+                    "name": "并发股票", "shares": 3000, "price": 10.1, "amount": 30300.0,
+                    "fee": 5.0, "total_cost": 30305.0, "reason": "后完成的加仓",
+                }
+                later_new = {
+                    "time": "2026-08-04 09:59:43", "action": "BUY", "code": "002045",
+                    "name": "国光电器", "shares": 5100, "price": 8.5, "amount": 43350.0,
+                    "fee": 4.77, "total_cost": 43354.77, "reason": "后完成的新仓",
+                    "buy_strategy": "niu_reversal_probe",
+                }
+                divergent = {
+                    "initial_cash": 100000.0,
+                    "cash": 26340.23,
+                    "positions": {
+                        "001257": {
+                            "code": "001257", "name": "并发股票", "qty": 3000,
+                            "avg_cost": round(30305.0 / 3000, 4),
+                            "buy_date_lots": {"2026-08-04": 3000},
+                        },
+                        "002045": {
+                            "code": "002045", "name": "国光电器", "qty": 5100,
+                            "avg_cost": round(43354.77 / 5100, 4),
+                            "buy_date_lots": {"2026-08-04": 5100},
+                            "buy_strategy": "niu_reversal_probe",
+                        },
+                    },
+                    "trade_log": [later_add, later_new],
+                    "decision_log": [],
+                    "equity_history": [],
+                }
+
+                trader.save_state(divergent)
+                saved = trader.load_state()
+            finally:
+                trader.STATE_FILE = original_state_file
+
+        self.assertAlmostEqual(saved["cash"], 14335.23, places=2)
+        self.assertEqual(saved["positions"]["001257"]["qty"], 4200)
+        self.assertEqual(saved["positions"]["001257"]["buy_date_lots"]["2026-08-04"], 4200)
+        self.assertAlmostEqual(
+            saved["positions"]["001257"]["avg_cost"],
+            round((12005.0 + 30305.0) / 4200, 4),
+            places=4,
+        )
+        self.assertEqual(saved["positions"]["002045"]["qty"], 5100)
+        self.assertEqual(saved["positions"]["002045"]["buy_date_lots"]["2026-08-04"], 5100)
+        self.assertEqual(len(saved["trade_log"]), 3)
+
     def test_save_state_does_not_resurrect_position_after_merged_sell(self):
         original_state_file = trader.STATE_FILE
         with tempfile.TemporaryDirectory() as td:
