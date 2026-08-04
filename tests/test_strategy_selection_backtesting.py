@@ -429,6 +429,74 @@ class StrategySelectionBacktestingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "max_industry_positions"):
             NiuOneStrategyBacktestPolicy(max_industry_positions=0)
 
+    def test_niuone_structure_gate_uses_market_open_before_slippage(self):
+        scored = {
+            "stop_price": 9.4,
+            "atr20": 0.5,
+            "gap_buffer_pct": 0.5,
+            "execution_buffer_pct": 0.2,
+            "industry": "半导体",
+            "market_regime": "recovery",
+            "market_allows_buys": True,
+            "market_hard_stop": False,
+        }
+
+        class OneSignalSelector:
+            def on_close(self, context):
+                if context.date != "2026-01-05":
+                    return []
+                return [SelectionSignal(
+                    "600000",
+                    strategy_id="niu_leader",
+                    score=9.0,
+                    metadata={"scored": scored},
+                )]
+
+        def replay(next_open):
+            rows = [
+                daily_bar("2026-01-05", 10.0, 10.0, industry="半导体"),
+                daily_bar(
+                    "2026-01-06",
+                    next_open,
+                    10.1,
+                    industry="半导体",
+                ),
+                daily_bar("2026-01-07", 10.1, 10.1, industry="半导体"),
+            ]
+            return run_selection_backtest(
+                {"600000": rows},
+                OneSignalSelector(),
+                position_exit_strategy=NiuOneStrategyBacktestPolicy(),
+                config=SelectionBacktestConfig(
+                    holding_sessions=(1,),
+                    signal_start_date="2026-01-05",
+                    signal_end_date="2026-01-05",
+                    slippage_bps=5,
+                    price_limit_resolver=None,
+                    cost_model=SelectionCostModel(
+                        commission_rate=0,
+                        transfer_fee_rate=0,
+                        sell_stamp_duty_rate=0,
+                    ),
+                ),
+            )
+
+        accepted = replay(10.0)
+        self.assertEqual(accepted.statistics["trade_count"], 1)
+        self.assertEqual(accepted.signals[0]["entry_open"], 10.0)
+        self.assertEqual(accepted.signals[0]["entry_price"], 10.005)
+        self.assertGreater(
+            accepted.signals[0]["entry_effective_loss_distance_pct"],
+            6.0,
+        )
+
+        blocked = replay(10.001)
+        self.assertEqual(blocked.statistics["trade_count"], 0)
+        self.assertEqual(
+            blocked.statistics["entry_rejection_counts"],
+            {"structure_risk_block": 1},
+        )
+
     def test_niuone_aggressive_profile_scales_account_budgets_only(self):
         balanced = NiuOneStrategyBacktestPolicy()
         aggressive = NiuOneStrategyBacktestPolicy(

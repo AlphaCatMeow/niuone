@@ -224,6 +224,8 @@ v29 moves multi-concept attribution ahead of theme aggregation. Eastmoney `f103`
 
 v30 adds a 20-session market-neutral return-wave signal to multi-concept attribution. It correlates the stock's daily excess returns with the leave-one-out median excess return of each `f103` cohort, then shrinks the signal by its relative rank across that stock's candidates. Every NiuOne scan mode now skips news precheck and model calls; news configuration remains available only to other modules that explicitly use it. Context/cache schemas advance to v11/v9 and strict-forward/backtest protocols to `niuone-strict-forward-v30`/`niuone-backtest-v31`; older evidence must not be pooled.
 
+v31 fixes the second dilution of multi-concept leaders. The 15% attribution-weight floor still filters ordinary weak branches, but a stock's highest-scoring theme remains leadership-eligible when its attribution score is at least 60, even if many candidate labels push that primary share below 15%. Qualified structural leaders rank by raw stock strength and qualified intraday leaders by same-day return; attribution score is only a tie-breaker. The admin backtest checks structural eligibility against the actual next-session open, while 5bp synthetic slippage affects only the fill and risk sizing. Theme breadth, amount, concentration, lifecycle, setup, stop, and portfolio-risk rules are unchanged. Context/cache schemas advance to v12/v10 and strict-forward/backtest protocols to `niuone-strict-forward-v31`/`niuone-backtest-v32`; archive old locks, reports, and backtests before deployment.
+
 When a strategy appears not to trigger, check in this order:
 
 1. Confirm that `DASHBOARD_ACTIVE_STRATEGY` in `.local-data/dashboard.env` names the expected suite.

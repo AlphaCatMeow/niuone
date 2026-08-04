@@ -41,7 +41,7 @@ class BacktestReplayCacheTests(unittest.TestCase):
     def _key(self, bar: HistoricalBar):
         return build_replay_cache_key(
             {"sh600519": (bar,)},
-            protocol_version="niuone-backtest-v31",
+            protocol_version="niuone-backtest-v32",
             selector_id="niuone",
             strategy_ids=("niu_leader",),
             signal_start_date="2026-01-05",
@@ -104,7 +104,7 @@ class BacktestReplayCacheTests(unittest.TestCase):
 
         alternate_source_order = build_replay_cache_key(
             {"sh600519": (_bar(),)},
-            protocol_version="niuone-backtest-v31",
+            protocol_version="niuone-backtest-v32",
             selector_id="niuone",
             strategy_ids=("niu_leader",),
             signal_start_date="2026-01-05",

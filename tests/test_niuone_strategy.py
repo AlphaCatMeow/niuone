@@ -79,6 +79,7 @@ from strategies.scoring.niuone import (  # noqa: E402
     _daily_v_reversal_metrics,
     _peer_resonance_score,
     _peer_resonance_score_reference,
+    _rank_theme_leaders,
     _shared_entry_metrics,
     _theme_peer_statistics,
 )
@@ -1201,6 +1202,86 @@ class NiuOneStrategyTests(unittest.TestCase):
         )
         self.assertTrue(all(item["current_attribution_score"] == 0.0 for item in profiles))
         self.assertTrue(all(item["unattributed_weight"] == 0.75 for item in profiles))
+
+    def test_primary_high_evidence_theme_survives_multi_label_weight_dilution(self):
+        profiles = _apply_theme_attributions(
+            [
+                {
+                    "industry": f"题材{index:02d}",
+                    "theme_member_count": 50,
+                    "return_correlation_score": 88.0,
+                    "return_correlation_observation_count": 20,
+                    "peer_resonance_score": 82.0,
+                    "cohort_alignment_score": 80.0,
+                    "today_rank_score": 90.0,
+                    "theme_rank": 90.0,
+                    "strong": True,
+                }
+                for index in range(12)
+            ],
+            previous_stock=None,
+            same_trading_day=False,
+        )
+
+        self.assertLess(profiles[0]["attribution_weight"], 0.15)
+        self.assertGreaterEqual(profiles[0]["attribution_score"], 60.0)
+        self.assertTrue(profiles[0]["leadership_eligible"])
+        self.assertFalse(any(
+            item["leadership_eligible"] for item in profiles[1:]
+        ))
+
+    def test_qualified_theme_leaders_rank_by_stock_strength_not_weight_mass(self):
+        members = [
+            {
+                "code": "600522",
+                "strong_score": 96.0,
+                "change_pct": 6.0,
+                "amount": 1.0e9,
+            },
+            {
+                "code": "600001",
+                "strong_score": 91.0,
+                "change_pct": 4.0,
+                "amount": 2.0e9,
+            },
+            {
+                "code": "600002",
+                "strong_score": 99.0,
+                "change_pct": 9.0,
+                "amount": 3.0e9,
+            },
+        ]
+        attributions = {
+            "600522": {
+                "attribution_score": 84.0,
+                "attribution_weight": 0.09,
+                "leadership_eligible": True,
+            },
+            "600001": {
+                "attribution_score": 75.0,
+                "attribution_weight": 0.70,
+                "leadership_eligible": True,
+            },
+            "600002": {
+                "attribution_score": 59.0,
+                "attribution_weight": 0.14,
+                "leadership_eligible": False,
+            },
+        }
+
+        structural = _rank_theme_leaders(
+            members,
+            attributions,
+            intraday=False,
+        )
+        intraday = _rank_theme_leaders(
+            members,
+            attributions,
+            intraday=True,
+        )
+
+        self.assertEqual([item["code"] for item in structural], ["600522", "600001"])
+        self.assertEqual([item["code"] for item in intraday], ["600522", "600001"])
 
     def test_nested_theme_tie_prefers_the_more_specific_cohort(self):
         profiles = _apply_theme_attributions(

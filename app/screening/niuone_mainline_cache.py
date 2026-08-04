@@ -10,7 +10,7 @@ except ModuleNotFoundError:  # Standalone entrypoints add app/ directly to sys.p
     from core.json_cache import read_json_cache, write_json_cache
 
 
-NIUONE_MAINLINE_CACHE_SCHEMA_VERSION = 9
+NIUONE_MAINLINE_CACHE_SCHEMA_VERSION = 10
 
 _THEME_ATTRIBUTION_FIELDS = (
     "theme",
@@ -20,6 +20,7 @@ _THEME_ATTRIBUTION_FIELDS = (
     "historical_prior_score",
     "attribution_score",
     "attribution_weight",
+    "leadership_eligible",
     "cohort_alignment_score",
     "peer_resonance_score",
     "return_correlation_score",

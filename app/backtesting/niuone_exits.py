@@ -1490,13 +1490,20 @@ class NiuOneStrategyBacktestPolicy(NiuOneDailyExitStrategy):
         existing_stop = _number((position or {}).get("entry_stop_price"), 0.0)
         stop_price = max(candidate_stop, existing_stop)
         atr = _number(scored.get("atr20") or scored.get("atr"), 0.0)
+        # Structural eligibility is a strategy decision made against the
+        # observable market open.  The synthetic backtest slippage belongs to
+        # fill cost and position sizing; letting it move the hard-stop gate can
+        # reject an otherwise valid open that sits exactly on the risk limit.
+        structure_reference_price = float(entry_bar.open)
         stop_distance_pct = (
-            (entry_price - stop_price) / entry_price * 100.0
-            if 0 < stop_price < entry_price else 0.0
+            (structure_reference_price - stop_price)
+            / structure_reference_price
+            * 100.0
+            if 0 < stop_price < structure_reference_price else 0.0
         )
         stop_atr = (
-            (entry_price - stop_price) / atr
-            if atr > 0 and 0 < stop_price < entry_price else 0.0
+            (structure_reference_price - stop_price) / atr
+            if atr > 0 and 0 < stop_price < structure_reference_price else 0.0
         )
         if not niuone_structure_risk_ok(
             stop_distance_pct,

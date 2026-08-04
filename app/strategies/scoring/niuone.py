@@ -83,7 +83,7 @@ NIUONE_THEME_RETURN_CORRELATION_MIN_PEERS = 3
 NIUONE_THEME_RETURN_CORRELATION_RANK_FULL_SPREAD = 15.0
 NIUONE_MIN_ATTRIBUTED_THEME_MASS = 1.5
 NIUONE_TODAY_BREADTH_PRIOR_MASS = 4.0
-NIUONE_CONTEXT_VERSION = 11
+NIUONE_CONTEXT_VERSION = 12
 
 
 def _mean(values: list[float], default: float = 0.0) -> float:
@@ -727,7 +727,7 @@ def _apply_theme_attributions(
     for item, units in zip(scored, weight_units):
         item["attribution_weight"] = units / weight_scale
         item["unattributed_weight"] = round(1.0 - attributed_mass, 6)
-    return sorted(
+    ordered = sorted(
         scored,
         key=lambda item: (
             -float(item.get("attribution_score") or 0.0),
@@ -735,6 +735,64 @@ def _apply_theme_attributions(
             str(item.get("industry") or ""),
         ),
     )
+    for index, item in enumerate(ordered):
+        item["leadership_eligible"] = bool(
+            float(item.get("attribution_weight") or 0.0)
+            >= NIUONE_THEME_LEADER_MIN_ATTRIBUTION_WEIGHT
+            or (
+                index == 0
+                and float(item.get("attribution_score") or 0.0)
+                >= NIUONE_THEME_ATTRIBUTION_CONFIDENCE_SCORE
+            )
+        )
+    return ordered
+
+
+def _theme_leadership_eligible(attribution: Mapping[str, Any]) -> bool:
+    """Keep one high-evidence primary theme from being diluted by label count."""
+    explicit = attribution.get("leadership_eligible")
+    if explicit is not None:
+        return bool(explicit)
+    return bool(
+        float(attribution.get("attribution_weight") or 0.0)
+        >= NIUONE_THEME_LEADER_MIN_ATTRIBUTION_WEIGHT
+    )
+
+
+def _rank_theme_leaders(
+    members: Iterable[Mapping[str, Any]],
+    attributions: Mapping[str, Mapping[str, Any]],
+    *,
+    intraday: bool,
+) -> list[Mapping[str, Any]]:
+    """Rank qualified members without multiplying strength by attribution mass."""
+    eligible = [
+        member
+        for member in members
+        if _theme_leadership_eligible(
+            attributions.get(str(member.get("code") or "")) or {}
+        )
+    ]
+
+    def rank_key(member: Mapping[str, Any]) -> tuple[float, float, float, float, str]:
+        attribution = attributions.get(str(member.get("code") or "")) or {}
+        if intraday:
+            return (
+                -float(member.get("change_pct") or 0.0),
+                -float(attribution.get("attribution_score") or 0.0),
+                -float(member.get("strong_score") or 0.0),
+                -float(member.get("amount") or 0.0),
+                str(member.get("code") or ""),
+            )
+        return (
+            -float(member.get("strong_score") or 0.0),
+            -float(attribution.get("attribution_score") or 0.0),
+            -float(attribution.get("attribution_weight") or 0.0),
+            -float(member.get("amount") or 0.0),
+            str(member.get("code") or ""),
+        )
+
+    return sorted(eligible, key=rank_key)
 
 
 @dataclass(frozen=True)
@@ -1077,19 +1135,10 @@ def _today_theme_metrics(
         + attributed_5_pct * 0.15
         + positive_median_score * 0.15
     )
-    leaders = sorted(
-        (
-            member
-            for member in quoted_members
-            if float((attributions.get(str(member.get("code") or "")) or {}).get("attribution_weight") or 0.0)
-            >= NIUONE_THEME_LEADER_MIN_ATTRIBUTION_WEIGHT
-        ),
-        key=lambda member: (
-            float(member["change_pct"])
-            * float((attributions.get(str(member.get("code") or "")) or {}).get("attribution_weight") or 0.0),
-            float(member["amount"]),
-        ),
-        reverse=True,
+    leaders = _rank_theme_leaders(
+        quoted_members,
+        attributions,
+        intraday=True,
     )[:NIUONE_CORE_STOCK_LIMIT]
     top_positive_changes = [
         (
@@ -1695,18 +1744,10 @@ def build_niuone_context(
         raw_strong_members = [
             member for member in theme_members if member["strong"]
         ]
-        strong_members = sorted(
-            (
-                member
-                for member in raw_strong_members
-                if attribution_weight(member)
-                >= NIUONE_THEME_LEADER_MIN_ATTRIBUTION_WEIGHT
-            ),
-            key=lambda member: (
-                float(member["strong_score"]) * attribution_weight(member),
-                float(member["strong_score"]),
-            ),
-            reverse=True,
+        strong_members = _rank_theme_leaders(
+            raw_strong_members,
+            theme_attributions,
+            intraday=False,
         )
         attributed_strong_count = sum(
             attribution_weight(member) for member in raw_strong_members
@@ -1959,14 +2000,14 @@ def build_niuone_context(
                 "historical_prior_score": attribution.get("historical_prior_score"),
                 "attribution_score": attribution.get("attribution_score"),
                 "attribution_weight": attribution.get("attribution_weight"),
+                "leadership_eligible": _theme_leadership_eligible(attribution),
                 "unattributed_weight": attribution.get("unattributed_weight"),
                 "attribution_observation_count": attribution.get("attribution_observation_count"),
                 "attribution_wave_count": attribution.get("attribution_wave_count"),
                 "strong_score": round(float(member["strong_score"]), 2),
                 "strong": bool(
                     member["strong"]
-                    and float(attribution.get("attribution_weight") or 0.0)
-                    >= NIUONE_THEME_LEADER_MIN_ATTRIBUTION_WEIGHT
+                    and _theme_leadership_eligible(attribution)
                 ),
                 "role": role,
                 "leader_rank": leader_rank,
@@ -2091,6 +2132,7 @@ def build_niuone_context(
                 ),
                 "attribution_score": profile.get("attribution_score"),
                 "attribution_weight": profile.get("attribution_weight"),
+                "leadership_eligible": profile.get("leadership_eligible"),
                 "cohort_alignment_score": profile.get(
                     "cohort_alignment_score"
                 ),
@@ -2340,8 +2382,7 @@ def _action_theme_profile(
     attributed_candidates = [
         item
         for item in candidates
-        if float(item[0].get("attribution_weight") or 0.0)
-        >= NIUONE_THEME_LEADER_MIN_ATTRIBUTION_WEIGHT
+        if _theme_leadership_eligible(item[0])
     ]
     if attributed_candidates:
         candidates = attributed_candidates

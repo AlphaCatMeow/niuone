@@ -223,6 +223,8 @@ v29 treats Eastmoney `f103` as candidate labels rather than the final traded nar
 
 v30 adds 20-session market-neutral return-wave attribution. It compares the stock with the leave-one-out median excess-return path of each `f103` cohort and shrinks the result by relative candidate rank. No NiuOne scan mode performs news precheck or a model call. Context/cache schemas are v11/v9 and standalone strict-forward/backtest protocols are `niuone-strict-forward-v30`/`niuone-backtest-v31`.
 
+v31 fixes repeated dilution in multi-concept leadership. The 15% weight floor remains for ordinary weak branches, while the stock's highest-scoring theme gets one low-share exception when its attribution score is at least 60. Qualified structural and intraday leaders then rank by raw strength and same-day return respectively, with attribution score used only as a tie-breaker. Weighted breadth, amount, concentration, and every trading-risk gate remain unchanged. Context/cache schemas are v12/v10 and standalone strict-forward/backtest protocols are `niuone-strict-forward-v31`/`niuone-backtest-v32`; archive old protocol locks, reports, and backtests before deployment.
+
 ### One-Click Enablement
 
 `--service` first performs the same directory initialization, virtual-environment creation, and dependency installation as a normal startup, then registers and immediately starts the native services for the current platform. Running it again updates the existing registrations, which is useful after code or configuration changes.

@@ -33,7 +33,7 @@ class StrategyBacktestFrontendTests(unittest.TestCase):
         self.assertNotIn("selectedRiskProfile", source)
         self.assertIn("牛牛战法固定使用进取风险参数", source)
         self.assertIn("NIUONE_BACKTEST_PROTOCOL_VERSION", source)
-        self.assertIn("'niuone-backtest-v31'", source)
+        self.assertIn("'niuone-backtest-v32'", source)
         self.assertIn("staleResult", source)
         self.assertIn("当前结果由旧版牛牛回测协议生成", source)
         self.assertIn("/api/admin/backtests/latest/${encodeURIComponent(expectedStrategyId)}", source)
