@@ -12,6 +12,23 @@ PUBLIC_PROJECTION_PATH = WEB_SRC / "composables" / "usePublicProjection.js"
 
 
 class FrontendPerformanceTests(unittest.TestCase):
+    def test_dashboard_brand_logo_uses_bundled_vite_asset(self):
+        index_source = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+        dashboard_source = (
+            WEB_SRC / "components" / "DashboardPage.vue"
+        ).read_text(encoding="utf-8")
+        logo_path = WEB_SRC / "assets" / "niuone-logo.png"
+
+        self.assertTrue(logo_path.is_file())
+        self.assertIn('href="/src/assets/niuone-logo.png"', index_source)
+        self.assertIn(
+            "import niuoneLogoUrl from '../assets/niuone-logo.png'",
+            dashboard_source,
+        )
+        self.assertIn(':src="niuoneLogoUrl"', dashboard_source)
+        self.assertNotIn('href="/favicon.png"', index_source)
+        self.assertNotIn('src="/favicon.png"', dashboard_source)
+
     def test_dashboard_panels_are_loaded_on_demand(self):
         source = (WEB_SRC / "components" / "DashboardPage.vue").read_text(
             encoding="utf-8"

@@ -24,6 +24,8 @@
     .header-row { display:flex; align-items:center; justify-content:space-between; gap:14px; }
     .header-actions { --header-control-height:34px; display:flex; align-items:center; justify-content:flex-end; gap:8px; flex-wrap:wrap; }
     h1 { margin:0; font-size:clamp(24px, 3vw, 34px); letter-spacing:-.03em; font-weight:760; white-space:nowrap; }
+    .dashboard-brand { display:inline-flex; align-items:center; gap:10px; }
+    .dashboard-brand-logo { display:block; width:42px; height:42px; flex:0 0 auto; object-fit:contain; }
     .settings-link, .header-link, .version-status, .refresh-pill { display:inline-flex; align-items:baseline; gap:7px; flex:0 0 auto; height:var(--header-control-height); border:1px solid var(--line); background:#fff; border-radius:7px; padding:7px 10px; color:#475467; }
     .settings-link, .header-link { align-items:center; text-decoration:none; color:#344054; font-size:13px; font-weight:700; transition:.16s ease; }
     .settings-link:hover, .header-link:hover { border-color:#b9c2ce; background:#f7f8fa; }
@@ -1252,6 +1254,8 @@
       .header-row { gap:8px; }
       .header-actions { --header-control-height:28px; gap:5px; }
       h1 { font-size:18px; line-height:1.06; letter-spacing:-.02em; }
+      .dashboard-brand { gap:6px; }
+      .dashboard-brand-logo { width:24px; height:24px; }
       .settings-link, .header-link, .version-status, .refresh-pill { padding:5px 7px; gap:5px; }
       .settings-link, .header-link { font-size:12px; }
       .version-status { min-width:0; }

@@ -6,6 +6,7 @@ import LastUpdated from './LastUpdated.vue'
 import ThemeToggle from './ThemeToggle.vue'
 import VersionStatus from './VersionStatus.vue'
 import { useDashboardTabs } from '../composables/useDashboardTabs.js'
+import niuoneLogoUrl from '../assets/niuone-logo.png'
 
 const DragonTigerPanel = defineAsyncComponent(() => import('./DragonTigerPanel.vue'))
 const IndustryFlowPanel = defineAsyncComponent(() => import('./IndustryFlowPanel.vue'))
@@ -24,7 +25,10 @@ const { activeCategory } = useDashboardTabs()
   <ComplianceDialog />
   <header>
     <div class="header-row">
-      <h1>牛牛1号</h1>
+      <h1 class="dashboard-brand">
+        <img class="dashboard-brand-logo" :src="niuoneLogoUrl" alt="" aria-hidden="true" />
+        <span>牛牛1号</span>
+      </h1>
       <div class="header-actions">
         <a class="header-link" href="https://github.com/kunkundi/niuone" target="_blank" rel="noopener noreferrer" title="开源仓库" aria-label="打开 GitHub 开源仓库">
           <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
