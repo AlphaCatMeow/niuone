@@ -1,4 +1,4 @@
-<img width="2115" height="744" alt="niuone" src="https://github.com/user-attachments/assets/50dd932a-5af9-441a-b17a-d63a0b6801ac" />
+<img width="1200" alt="NiuOne 牛牛1号" src="docs/assets/readme/niuone.webp" />
 
 # NiuOne · 牛牛1号
 

@@ -4,6 +4,7 @@
 
 更新或重新录制动图时，参见 [README GIF 更新流程](GIF_WORKFLOW.md)。
 
+- `niuone.webp`：README 顶部横幅；
 - `practice-trading.gif`：每日 / 累计收益切换与交易日历；
 - `theme-strength.gif`：对照今日/结构题材排名，展开两类代表股并查看有效覆盖原因；
 - `capital-flow.gif`：A 股板块与活跃股票、主力净流入 / 净流出榜及行业资金流动画；
