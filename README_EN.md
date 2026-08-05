@@ -13,11 +13,11 @@
 
 ## Introduction
 
-NiuOne is a research and simulated trading system for China's A-share market. LLMs drive market analysis and trading decisions, while the system provides market data aggregation, news retrieval, strategy configuration, and simulated portfolio tracking.
+NiuOne is a local-first market research and simulated trading system. Its main focus is China's A-share market, with additional coverage of overnight U.S. markets, institutional ratings, and selected Twitter/X sources. Market data, news, strategies, and simulated portfolios come together in a single web dashboard, with optional LLM support for research and trading decisions.
 
-The web dashboard provides a unified view of market data, analysis results, and simulated portfolio status. Scheduled jobs automatically collect pre-open call auction data, intraday and post-market activity, capital flows, sector performance, overnight U.S. market activity, institutional ratings, and content from a Twitter/X watchlist. Guided by user-configured strategy rules, LLMs perform news retrieval, market analysis, and simulated buy and sell decisions. Portfolio state, trade records, and decision rationale are stored locally, while simulated execution alerts can be delivered through Feishu, DingTalk, WeCom, or Telegram.
+Scheduled jobs collect pre-open auction data, intraday and post-market activity, capital flows, sector performance, and overseas market information. When a model service is enabled, NiuOne can retrieve news, analyze the market, and make simulated buy and sell decisions within user-defined strategy rules. Portfolio state, trade records, and decision rationale remain local, while execution alerts can be sent through Feishu, DingTalk, WeCom, or Telegram.
 
-NiuOne connects information collection, market analysis, trading decisions, and portfolio records into an automated, traceable, and reviewable simulated trading loop. The system can be deployed on a personal computer or server, with configuration and research data managed by the user. All trades are executed in a simulated account; NiuOne does not connect to brokerage trading interfaces or use real funds.
+NiuOne runs on a personal computer or server, and its configuration and research data stay under the user's control. It works only with simulated accounts: there is no brokerage connection and no real-money execution.
 
 ## Live Demo
 
@@ -27,7 +27,7 @@ NiuOne connects information collection, market analysis, trading decisions, and 
 
 ## Product Tour
 
-Each feature below has its own dark-theme, 1200-pixel-wide animation, using either a full-page or focused-panel view as appropriate, with visible pointer movement, click feedback, and scrolling. Click an animation to open the corresponding live page.
+Click an animation to open the corresponding live page.
 
 ### Simulated Trading and Portfolio Review
 
@@ -37,7 +37,7 @@ Each feature below has its own dark-theme, 1200-pixel-wide animation, using eith
   </a>
 </p>
 
-<p align="center"><sub>Keep the portfolio overview, return chart, and current positions in view while switching daily and cumulative returns and opening the trading calendar.</sub></p>
+<p align="center"><sub>Portfolio summary, return charts, open positions, and the trading calendar are available in one place.</sub></p>
 
 ### Theme Strength Radar
 
@@ -47,7 +47,7 @@ Each feature below has its own dark-theme, 1200-pixel-wide animation, using eith
   </a>
 </p>
 
-<p align="center"><sub>Compare today's top five with the cross-session structural top five, use Eastmoney's live rank, breadth, and leader as a cross-check, expand both sets of representative stocks, and inspect coverage gaps.</sub></p>
+<p align="center"><sub>Today's theme strength sits beside cross-session structural rankings, with Eastmoney rankings, breadth, and leading stocks as additional context.</sub></p>
 
 ### Capital Inflows and Outflows
 
@@ -57,7 +57,7 @@ Each feature below has its own dark-theme, 1200-pixel-wide animation, using eith
   </a>
 </p>
 
-<p align="center"><sub>Open A-share data, inspect sectors and active stocks, scroll through the leading net inflow and outflow lists, then replay the industry-flow timeline.</sub></p>
+<p align="center"><sub>A-share quotes, active sectors, stock-level inflows and outflows, and industry capital movements share one view.</sub></p>
 
 ### Market Breadth and Red/Green Counts
 
@@ -67,7 +67,7 @@ Each feature below has its own dark-theme, 1200-pixel-wide animation, using eith
   </a>
 </p>
 
-<p align="center"><sub>Move across the intraday chart to inspect the selected time, limit-up, limit-down, failed-breakout, red/green counts, and projected, actual, and incremental turnover.</sub></p>
+<p align="center"><sub>The intraday chart links price breadth with limit-up, limit-down, failed-breakout, red/green counts, and turnover data.</sub></p>
 
 ### Automated Market Monitoring
 
@@ -77,7 +77,7 @@ Each feature below has its own dark-theme, 1200-pixel-wide animation, using eith
   </a>
 </p>
 
-<p align="center"><sub>Expand a post-market summary and scroll through its core view, capital flows, leading sectors, risk notes, and next-session watchlist.</sub></p>
+<p align="center"><sub>Pre-open, midday, and post-market reports cover the main view, capital flows, leading sectors, risks, and next-session watchlist.</sub></p>
 
 ### Twitter/X Monitoring
 
@@ -87,7 +87,7 @@ Each feature below has its own dark-theme, 1200-pixel-wide animation, using eith
   </a>
 </p>
 
-<p align="center"><sub>Browse posts, replies, and quotes in a chronological feed, expand full content, and open media in the image viewer.</sub></p>
+<p align="center"><sub>Posts, replies, quotes, and media from watched accounts are collected in a chronological feed.</sub></p>
 
 ### U.S. Institutional Ratings
 
@@ -97,7 +97,7 @@ Each feature below has its own dark-theme, 1200-pixel-wide animation, using eith
   </a>
 </p>
 
-<p align="center"><sub>Compare current and target prices and implied upside, then inspect the institution, analyst, catalysts, risks, and historical daily reports.</sub></p>
+<p align="center"><sub>Review current and target prices, implied upside, institutional views, catalysts, and risks.</sub></p>
 
 ### Local Configuration Center
 
@@ -105,21 +105,18 @@ Each feature below has its own dark-theme, 1200-pixel-wide animation, using eith
   <img width="1200" alt="Local-configuration interaction: browse groups, switch trading strategies, and open market and capital-flow settings" src="docs/assets/readme/dashboard-settings.gif" />
 </p>
 
-<p align="center"><sub>Open strategy settings and switch strategies, return to browse every configuration group, then open market and capital-flow settings.</sub></p>
+<p align="center"><sub>Manage data sources, models, strategies, notifications, and runtime options from the local settings page.</sub></p>
 
-> Market and simulated-portfolio values in these animations are for interface demonstration only and are not investment advice. The configuration-center animation comes from an isolated temporary runtime and contains no secrets or private runtime data.
+> Market and simulated-portfolio values in these animations are for interface demonstration only and are not investment advice.
 
 ## Feature Overview
 
-- **Unified dashboard**: View theme strength, indices, sectors, market sentiment, industry capital flows, Dragon-Tiger data, and historical news in one place.
-- **Theme-strength and strategy research**: Reuse the default 30-second full-market quote sample to update the “Today” ranking beside the structural ranking used for cross-session confirmation. Stocks are aggregated by theme-attribution weight; Eastmoney's live concept-gain ranking is only a cross-check and does not change NiuOne rankings or trading gates. Built-in suites cover Base, Z-ge, Li Daxiao, Sector Tide, and NiuOne; NiuOne includes a daily-interval V-shaped Probe, cross-session mainline confirmation, and Launch/Leading/Resumption paths.
-- **Information aggregation**: Organize A-share auction/midday/close reports, U.S. market summaries, institutional ratings, Twitter/X watchlists, and iWencai Dragon-Tiger data. Limit-up-streak and consecutively listed stocks can receive a structured news precheck.
-- **Intelligent summaries**: Connect compatible large-model services to summarize and structure information from multiple sources.
-- **Custom trading strategies**: Choose a built-in strategy or describe your own candidate-selection, buy, sell, position-sizing, and timing rules in natural language.
-- **Simulated trading and portfolio tracking**: Use your own simulated account for candidate screening, buy and sell decisions, position and P&L tracking, and access to the equity curve and trading logs—all without connecting to a brokerage or using real funds.
-- **Execution notifications**: After a simulated execution is persisted, send alerts to Feishu, DingTalk, WeCom, and Telegram, with independent enable/disable and test controls for each channel.
-- **Automated tasks**: Schedule data collection, summary generation, database ingestion, and background monitoring.
-- **Local configuration and version notices**: Configuration, databases, logs, and task output stay in a separate runtime directory. The settings page can test connections, display the current version, and check Docker Hub for a newer release, but it never downloads or installs an update automatically.
+- **Market dashboard**: View theme strength, indices, sectors, market breadth, industry capital flows, Dragon-Tiger data, and historical news in one place.
+- **Theme and strategy research**: Compare today's theme strength with cross-session structural rankings, using full-market quotes, theme attribution, and Eastmoney rankings as context. NiuOne includes Base, Z-ge, Li Daxiao, Sector Tide, and NiuOne strategies, and also accepts natural-language rules for candidates, entries, exits, position sizing, and timing.
+- **Information and model-assisted analysis**: Collect A-share auction, midday, and close reports alongside overnight U.S. markets, institutional ratings, Twitter/X watchlists, and iWencai Dragon-Tiger data. Compatible model services can support retrieval, summarization, and structured analysis.
+- **Simulated trading**: Track candidates, decisions, positions, P&L, equity curves, and trade logs without connecting to a brokerage or using real funds.
+- **Automation and notifications**: Schedule data collection, report generation, database ingestion, and monitoring. Simulated execution alerts can be sent to Feishu, DingTalk, WeCom, and Telegram.
+- **Local data management**: Configuration, databases, logs, and task output stay in a separate runtime directory. The settings page supports connection tests and update checks, but never installs updates automatically.
 
 Primary pages and dependencies:
 
@@ -133,11 +130,9 @@ Primary pages and dependencies:
 | `/x-monitor`, `/us-ratings` | Twitter/X watchlists and U.S. institutional ratings | Enable “NiuNiu U.S. Stocks” and configure the relevant model |
 | `/admin` | Configuration, connection tests, version, and runtime status | Administrator authentication is always required |
 
-The main README does not cover specific research methods or experimental strategies in detail. See the [Strategy Research Notes](docs/strategies/README_EN.md).
+See the [Strategy Research Guide](docs/strategies/README_EN.md) for methodology and the [app module architecture](docs/APP_ARCHITECTURE.md) for code structure and extension points.
 
-When contributing or extending the application, see the [app module architecture](docs/APP_ARCHITECTURE.md) for domain boundaries and compatibility-entrypoint conventions.
-
-The Dashboard has migrated to Vue 3 + Vite and FastAPI/Uvicorn while preserving its existing page layout. Same-origin incremental snapshots reduce public traffic, and trading, market requests, and record computation remain server-side. The public page, `/admin`, and every API share one production port. See [Dashboard Incremental Delivery and Deployment](docs/DASHBOARD_V2_EN.md) for architecture, caching, and CDN/cloud/Tunnel deployment guidance.
+The dashboard is built with Vue 3 + Vite and FastAPI/Uvicorn. Market requests, trading decisions, and record calculations run on the server, while the frontend receives same-origin incremental snapshots. See [Dashboard Incremental Delivery and Deployment](docs/DASHBOARD_V2_EN.md) for architecture, caching, and deployment details.
 
 ## System Requirements
 
