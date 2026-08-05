@@ -37,17 +37,17 @@ Each feature below has its own dark-theme, 1200-pixel-wide animation, using eith
   </a>
 </p>
 
-<p align="center"><sub>Keep the portfolio overview, positions, and logs in view while switching daily and cumulative returns and opening the trading calendar.</sub></p>
+<p align="center"><sub>Keep the portfolio overview, return chart, and current positions in view while switching daily and cumulative returns and opening the trading calendar.</sub></p>
 
 ### Theme Strength Radar
 
 <p align="center">
   <a href="https://niuone.cn/niuone-mainline">
-    <img width="1200" alt="Theme-strength interaction: compare cross-session and intraday themes, expand representative stocks, and filter confirmed themes" src="docs/assets/readme/theme-strength.gif" />
+    <img width="1200" alt="Theme-strength interaction: compare today's and structural rankings, expand leading and structural stocks, and inspect coverage gaps" src="docs/assets/readme/theme-strength.gif" />
   </a>
 </p>
 
-<p align="center"><sub>Compare confirmed cross-session and intraday themes, market state, and coverage, then expand representative stocks and filter confirmed themes.</sub></p>
+<p align="center"><sub>Compare today's top five with the cross-session structural top five, use Eastmoney's live rank, breadth, and leader as a cross-check, expand both sets of representative stocks, and inspect coverage gaps.</sub></p>
 
 ### Capital Inflows and Outflows
 
@@ -112,7 +112,7 @@ Each feature below has its own dark-theme, 1200-pixel-wide animation, using eith
 ## Feature Overview
 
 - **Unified dashboard**: View theme strength, indices, sectors, market sentiment, industry capital flows, Dragon-Tiger data, and historical news in one place.
-- **Theme-strength and strategy research**: Reuse the default 30-second full-market quote sample for intraday theme updates. Built-in suites cover Base, Z-ge, Li Daxiao, Sector Tide, and NiuOne; NiuOne includes a daily-interval V-shaped Probe, cross-session mainline confirmation, and Launch/Leading/Resumption paths.
+- **Theme-strength and strategy research**: Reuse the default 30-second full-market quote sample to update the “Today” ranking beside the structural ranking used for cross-session confirmation. Stocks are aggregated by theme-attribution weight; Eastmoney's live concept-gain ranking is only a cross-check and does not change NiuOne rankings or trading gates. Built-in suites cover Base, Z-ge, Li Daxiao, Sector Tide, and NiuOne; NiuOne includes a daily-interval V-shaped Probe, cross-session mainline confirmation, and Launch/Leading/Resumption paths.
 - **Information aggregation**: Organize A-share auction/midday/close reports, U.S. market summaries, institutional ratings, Twitter/X watchlists, and iWencai Dragon-Tiger data. Limit-up-streak and consecutively listed stocks can receive a structured news precheck.
 - **Intelligent summaries**: Connect compatible large-model services to summarize and structure information from multiple sources.
 - **Custom trading strategies**: Choose a built-in strategy or describe your own candidate-selection, buy, sell, position-sizing, and timing rules in natural language.
@@ -126,7 +126,7 @@ Primary pages and dependencies:
 | Page | Capability | Additional configuration |
 |---|---|---|
 | `/practice` | Simulated account, candidates, market summary, model decisions, equity curve, and trading calendar | Model decisions require `DASHBOARD_DECISION_*` |
-| `/niuone-mainline` | Full-market cross-session mainlines, intraday strength, intraday V-recovery observations, and representative stocks | Uses public market data; news-confirmation model is optional |
+| `/niuone-mainline` | Full-market today/structural theme rankings, cross-session mainlines, effective coverage, representative stocks, and an Eastmoney live cross-check | No key; market sources must be reachable |
 | `/indices`, `/industry-flow` | Indices, sectors, active stocks, industry main-fund flow, market sentiment, and turnover | No key; market sources must be reachable |
 | `/dragon-tiger` | Dated Dragon-Tiger seats, limit-up/consecutive-list signals, and news prechecks | Enable and configure iWencai; news-precheck model is optional |
 | `/market-monitor` | A-share auction/midday/close and overnight U.S. summaries | Keep the scheduler running; model enhancement is optional |

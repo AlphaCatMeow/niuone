@@ -5,7 +5,7 @@
 更新或重新录制动图时，参见 [README GIF 更新流程](GIF_WORKFLOW.md)。
 
 - `practice-trading.gif`：每日 / 累计收益切换与交易日历；
-- `theme-strength.gif`：查看题材强度摘要、展开代表股并筛选已确认题材；
+- `theme-strength.gif`：对照今日/结构题材排名，展开两类代表股并查看有效覆盖原因；
 - `capital-flow.gif`：A 股板块与活跃股票、主力净流入 / 净流出榜及行业资金流动画；
 - `market-breadth.gif`：沿日内曲线悬停查看涨跌停、炸板、红绿盘家数和量能指标；
 - `market-monitor.gif`：展开并滚动查看盘后监控详情；
