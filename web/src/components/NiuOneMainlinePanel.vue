@@ -11,7 +11,6 @@ const {
   refreshNiuOneMainline,
 } = useNiuOneMainlineData()
 
-const activeFilter = ref('all')
 const expandedTheme = ref('')
 const coveragePopoverOpen = ref(false)
 const coverageInfoRoot = ref(null)
@@ -31,10 +30,6 @@ const defensiveMarket = computed(() => (
   market.value.state === 'defensive'
   || market.value.raw_state === 'defensive'
 ))
-const confirmedCount = computed(() => themes.value.filter(theme => theme.mainline_confirmed).length)
-const intradayCount = computed(() => themes.value.filter(theme => (
-  theme.intraday_state === 'intraday_mainline' || theme.raw_state === 'intraday_mainline'
-)).length)
 const coveragePct = computed(() => {
   const coverage = Number(payload.value.data_quality?.coverage)
   return Number.isFinite(coverage) ? Math.round(coverage * 1000) / 10 : null
@@ -44,24 +39,18 @@ const coverageReasons = computed(() => (
     ? payload.value.data_quality.uncovered_reasons
     : []
 ))
-const filters = computed(() => [
-  { key: 'all', label: '结构前5', count: themes.value.length },
-  { key: 'today', label: '今日前5', count: todayThemes.value.length },
-  { key: 'confirmed', label: '已确认', count: confirmedCount.value },
-  { key: 'intraday', label: '待跨日', count: intradayCount.value },
-  { key: 'emerging', label: '酝酿中', count: themes.value.filter(theme => theme.state === 'emerging').length },
+const rankings = computed(() => [
+  {
+    key: 'today',
+    title: '今日排名',
+    themes: todayThemes.value,
+  },
+  {
+    key: 'structure',
+    title: '结构排名',
+    themes: themes.value,
+  },
 ])
-const filteredThemes = computed(() => {
-  if (activeFilter.value === 'today') return todayThemes.value
-  return themes.value.filter(theme => {
-    if (activeFilter.value === 'confirmed') return theme.mainline_confirmed === true
-    if (activeFilter.value === 'intraday') {
-      return theme.intraday_state === 'intraday_mainline' || theme.raw_state === 'intraday_mainline'
-    }
-    if (activeFilter.value === 'emerging') return theme.state === 'emerging'
-    return true
-  })
-})
 
 function numeric(value, digits = 1) {
   if (value == null || value === '') return '--'
@@ -99,49 +88,43 @@ function structuralLeaderStock(theme) {
   return Array.isArray(theme?.strong_stocks) ? theme.strong_stocks[0] || null : null
 }
 
-function leaderStock(theme) {
+function leaderStock(theme, rankingKey) {
   const structural = structuralLeaderStock(theme)
-  if (activeFilter.value !== 'today' && structural) return structural
+  if (rankingKey !== 'today' && structural) return structural
   if (theme?.today_leader_stock && typeof theme.today_leader_stock === 'object') return theme.today_leader_stock
   return Array.isArray(theme?.today_leaders) ? theme.today_leaders[0] || structural : structural
 }
 
-function leaderBadge(theme) {
-  return activeFilter.value === 'today' || !structuralLeaderStock(theme) ? '领涨' : '龙头'
+function leaderBadge(theme, rankingKey) {
+  return rankingKey === 'today' || !structuralLeaderStock(theme) ? '领涨' : '龙头'
 }
 
-function themeStocks(theme) {
+function themeStocks(theme, rankingKey) {
   const strongStocks = Array.isArray(theme?.strong_stocks) ? theme.strong_stocks : []
-  if (activeFilter.value !== 'today' && strongStocks.length) return strongStocks
+  if (rankingKey !== 'today' && strongStocks.length) return strongStocks
   return Array.isArray(theme?.today_leaders) ? theme.today_leaders : strongStocks
 }
 
-function displayedScore(theme) {
-  return activeFilter.value === 'today' ? theme.today_strength_score : theme.score
+function displayedScore(theme, rankingKey) {
+  return rankingKey === 'today' ? theme.today_strength_score : theme.score
 }
 
-function scoreDetail(theme) {
-  return activeFilter.value === 'today'
+function scoreDetail(theme, rankingKey) {
+  return rankingKey === 'today'
     ? `结构 ${numeric(theme.score)}`
     : `今日 ${numeric(theme.today_strength_score)}`
 }
 
-function displayedCount(theme) {
-  return activeFilter.value === 'today'
+function displayedCount(theme, rankingKey) {
+  return rankingKey === 'today'
     ? theme.today_attributed_up_count ?? theme.today_up_count
     : theme.attributed_strong_stock_count ?? theme.strong_stock_count
 }
 
-function displayedBreadth(theme) {
-  return activeFilter.value === 'today'
+function displayedBreadth(theme, rankingKey) {
+  return rankingKey === 'today'
     ? theme.today_adjusted_breadth_pct ?? theme.today_breadth_pct
     : theme.effective_breadth_pct
-}
-
-function breadthDetail(theme) {
-  return activeFilter.value === 'today'
-    ? `归因 ${numeric(theme.today_attributed_breadth_pct)}% · 原始 ${numeric(theme.today_breadth_pct)}%`
-    : `今日 ${numeric(theme.today_breadth_pct)}%`
 }
 
 function eastmoneyQuoteCount(theme) {
@@ -171,13 +154,16 @@ function stockChangeTone(value) {
   return number > 0 ? 'up' : 'down'
 }
 
-function themeStockPanelId(theme) {
-  const index = filteredThemes.value.indexOf(theme)
-  return `themeStocks${index >= 0 ? index : 0}`
+function expandedThemeKey(theme, rankingKey) {
+  return `${rankingKey}:${String(theme?.industry || '')}`
 }
 
-function toggleThemeStocks(theme) {
-  const key = String(theme?.industry || '')
+function themeStockPanelId(rankingKey, index) {
+  return `${rankingKey}ThemeStocks${index}`
+}
+
+function toggleThemeStocks(theme, rankingKey) {
+  const key = expandedThemeKey(theme, rankingKey)
   expandedTheme.value = expandedTheme.value === key ? '' : key
 }
 
@@ -251,8 +237,8 @@ function marketLabel(value) {
   }[value] || value || '待评估'
 }
 
-function stateLabel(theme) {
-  if (activeFilter.value === 'today') return `归因广度 ${numeric(theme.today_adjusted_breadth_pct ?? theme.today_breadth_pct)}%`
+function stateLabel(theme, rankingKey) {
+  if (rankingKey === 'today') return `归因广度 ${numeric(theme.today_adjusted_breadth_pct ?? theme.today_breadth_pct)}%`
   if (theme.mainline_confirmed) return theme.niuone_lifecycle_label
     ? `${theme.niuone_lifecycle_label} · 已确认`
     : '已确认主线'
@@ -263,8 +249,8 @@ function stateLabel(theme) {
   }[theme.state] || theme.state || '未成线'
 }
 
-function themeTone(theme) {
-  if (activeFilter.value === 'today') return 'intraday'
+function themeTone(theme, rankingKey) {
+  if (rankingKey === 'today') return 'intraday'
   if (theme.mainline_confirmed) return 'confirmed'
   if (theme.intraday_state === 'intraday_mainline' || theme.raw_state === 'intraday_mainline') return 'intraday'
   if (theme.state === 'emerging') return 'emerging'
@@ -388,119 +374,119 @@ onBeforeUnmount(() => {
             <h3>题材强度榜</h3>
             <p>结构榜用于跨日主线确认；今日榜只观察当日参与，东方财富概念涨幅榜仅作即时交叉验证，不改变排序、生命周期和交易门槛。</p>
           </div>
-          <div class="mainline-filters" role="group" aria-label="主线状态筛选">
-            <button
-              v-for="filter in filters"
-              :key="filter.key"
-              type="button"
-              :class="{ active: activeFilter === filter.key }"
-              :aria-pressed="activeFilter === filter.key"
-              @click="activeFilter = filter.key"
-            >{{ filter.label }} <span>{{ filter.count }}</span></button>
-          </div>
         </div>
 
-        <div v-if="!filteredThemes.length" class="mainline-empty compact">当前筛选条件下没有题材。</div>
-        <div v-else class="theme-table" role="table" aria-label="题材强度排名">
-          <div class="theme-table-head" role="row">
-            <span role="columnheader">题材</span>
-            <span class="theme-column-help" role="columnheader" tabindex="0" data-tooltip="结构分用于跨日主线确认；今日强度只观察当日题材参与。" aria-label="强度：结构分和今日强度分别服务于跨日结构与当日观察。">{{ activeFilter === 'today' ? '今日强度' : '结构分' }}</span>
-            <span role="columnheader">{{ activeFilter === 'today' ? '等效上涨' : '归因强股' }}</span>
-            <span class="theme-column-help" role="columnheader" tabindex="0" data-tooltip="结构广度按个股题材归因权重计算；今日广度还会按题材样本量向全市场广度收缩，原始广度保留在详情中。" aria-label="广度：使用题材归因和小样本收缩后的有效广度。">{{ activeFilter === 'today' ? '归因广度' : '结构广度' }}</span>
-            <span class="theme-column-help" role="columnheader" tabindex="0" data-tooltip="与上一相邻交易日重合的核心强势股数量及比例。" aria-label="核心延续：与上一相邻交易日重合的核心强势股数量及比例。">核心延续</span>
-            <span role="columnheader">{{ activeFilter === 'today' ? '日内领涨' : '结构龙头' }}</span>
-            <span class="theme-column-help" role="columnheader"
-              tabindex="0"
-              :data-tooltip="activeFilter === 'today' ? '东方财富概念板块涨幅榜前100的即时排名、广度与领涨股，仅作交叉验证，不参与今日强度排序。' : '展示是否形成跨日延续，以及行业主力资金净额或数据状态。'"
-              :aria-label="activeFilter === 'today' ? '东财交叉验证：展示东方财富概念涨幅榜即时数据，不参与今日强度排序。' : '延续与资金：展示是否形成跨日延续，以及行业主力资金净额或数据状态。'"
-            >{{ activeFilter === 'today' ? '东财交叉验证' : '延续与资金' }}</span>
-          </div>
-          <article
-            v-for="(theme, index) in filteredThemes"
-            :key="theme.industry"
-            class="theme-row"
-            :class="[themeTone(theme), { expanded: expandedTheme === theme.industry }]"
-            role="row"
+        <div class="theme-rankings">
+          <section
+            v-for="ranking in rankings"
+            :key="ranking.key"
+            class="theme-ranking-panel"
+            :class="ranking.key"
+            :aria-labelledby="`${ranking.key}RankingTitle`"
           >
-            <div class="theme-identity" role="cell">
-              <span class="theme-rank">{{ String(index + 1).padStart(2, '0') }}</span>
-              <div>
-                <h4>{{ theme.industry }}</h4>
-                <span class="theme-state">{{ stateLabel(theme) }}</span>
-                <span v-if="theme.related_themes?.length" class="theme-state">关联：{{ theme.related_themes.join('、') }}</span>
-              </div>
-            </div>
-            <div class="theme-score" role="cell">
-              <strong>{{ numeric(displayedScore(theme)) }}</strong>
-              <small>{{ scoreDetail(theme) }}</small>
-            </div>
-            <div class="theme-data-cell strong-count" :data-label="activeFilter === 'today' ? '等效上涨' : '归因强股'" role="cell"><strong>{{ numeric(displayedCount(theme)) }}</strong><small>只</small></div>
-            <div
-              class="theme-data-cell breadth"
-              :data-label="activeFilter === 'today' ? '归因广度' : '结构广度'"
-              role="cell"
-              :title="effectiveBreadthTitle(theme)"
-              :aria-label="effectiveBreadthTitle(theme)"
-            ><strong>{{ numeric(displayedBreadth(theme)) }}%</strong><small>{{ breadthDetail(theme) }}</small></div>
-            <div class="theme-data-cell continuity" data-label="核心延续" role="cell"><strong>{{ theme.core_overlap_count }}只</strong><small>{{ percent(theme.core_overlap_ratio) }}</small></div>
-            <div class="theme-stock-list" data-label="龙头股" role="cell">
-              <template v-if="leaderStock(theme)">
-                <button
-                  type="button"
-                  class="theme-leader-button"
-                  :aria-expanded="expandedTheme === theme.industry"
-                  :aria-controls="themeStockPanelId(theme)"
-                  :aria-label="`${theme.industry}${leaderBadge(theme)}股 ${leaderStock(theme).name || leaderStock(theme).code}，${expandedTheme === theme.industry ? '收起' : '展开'}代表股列表`"
-                  @click="toggleThemeStocks(theme)"
-                >
-                  <span class="theme-leader-identity">
-                    <span class="theme-leader-badge">{{ leaderBadge(theme) }}</span>
-                    <strong>{{ leaderStock(theme).name || leaderStock(theme).code }}</strong>
-                    <small>{{ leaderStock(theme).code }}<template v-if="leaderStock(theme).attribution_weight != null"> · 归因 {{ percent(leaderStock(theme).attribution_weight) }}</template></small>
-                  </span>
-                  <span class="theme-stock-change" :class="stockChangeTone(leaderStock(theme).change_pct)">{{ signed(leaderStock(theme).change_pct, '%') }}</span>
-                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"></path></svg>
-                </button>
-                <div
-                  v-if="expandedTheme === theme.industry"
-                  :id="themeStockPanelId(theme)"
-                  class="theme-stock-details"
-                  role="region"
-                  :aria-label="`${theme.industry}代表股列表`"
-                >
-                  <div class="theme-stock-details-head"><span>{{ activeFilter === 'today' ? '今日领涨列表' : '结构代表股' }}</span><span>当前涨跌幅</span></div>
-                  <div v-for="(stock, stockIndex) in themeStocks(theme)" :key="stock.code || stock.name" class="theme-stock-detail-row">
-                    <span class="theme-stock-detail-name">
-                      <b v-if="stockIndex === 0">{{ leaderBadge(theme) }}</b>
-                      <strong>{{ stock.name || stock.code }}</strong>
-                      <small>{{ stock.code }}<template v-if="stock.attribution_weight != null"> · 归因 {{ percent(stock.attribution_weight) }}</template></small>
-                    </span>
-                    <strong class="theme-stock-change" :class="stockChangeTone(stock.change_pct)">{{ signed(stock.change_pct, '%') }}</strong>
+            <header class="theme-ranking-head">
+              <h4 :id="`${ranking.key}RankingTitle`">{{ ranking.title }}</h4>
+              <span class="theme-ranking-count">{{ ranking.themes.length }} 个题材</span>
+            </header>
+
+            <div v-if="!ranking.themes.length" class="mainline-empty compact">当前暂无{{ ranking.title }}数据。</div>
+            <ol v-else class="theme-ranking-list">
+              <li
+                v-for="(theme, index) in ranking.themes"
+                :key="theme.industry"
+                class="theme-row"
+                :class="[
+                  themeTone(theme, ranking.key),
+                  { expanded: expandedTheme === expandedThemeKey(theme, ranking.key) },
+                ]"
+              >
+                <div class="theme-identity">
+                  <span class="theme-rank">{{ String(index + 1).padStart(2, '0') }}</span>
+                  <div>
+                    <h5>{{ theme.industry }}</h5>
+                    <span class="theme-state">{{ stateLabel(theme, ranking.key) }}</span>
+                    <span v-if="theme.related_themes?.length" class="theme-state">关联：{{ theme.related_themes.join('、') }}</span>
                   </div>
                 </div>
-              </template>
-              <span v-else>—</span>
-            </div>
-            <div class="theme-context" role="cell">
-              <template v-if="activeFilter === 'today'">
-                <template v-if="theme.eastmoney">
-                  <strong>东财 #{{ theme.eastmoney.rank }} · {{ signed(theme.eastmoney.change_pct, '%') }}</strong>
-                  <small>{{ eastmoneyLeaderDetail(theme) }}</small>
-                  <small v-if="eastmoneySignal.stale" class="risk-text">陈旧快照 · {{ eastmoneySignal.quote_generated_at || eastmoneySignal.captured_at }}</small>
-                </template>
-                <template v-else>
-                  <strong>{{ eastmoneySignal.available ? '东财未匹配' : '东财数据不可用' }}</strong>
-                  <small>{{ eastmoneyMissingDetail() }}</small>
-                </template>
-              </template>
-              <template v-else>
-                <strong>{{ theme.cross_day_persistent ? '连续出现' : '尚未跨日' }}</strong>
-                <small v-if="theme.single_stock_dominated" class="risk-text">单股主导</small>
-                <small v-else-if="theme.flow_net_yi != null">主力净额 {{ signed(theme.flow_net_yi, '亿') }}</small>
-                <small v-else>资金数据待补充</small>
-              </template>
-            </div>
-          </article>
+                <div class="theme-score">
+                  <span>{{ ranking.key === 'today' ? '今日强度' : '结构分' }}</span>
+                  <strong>{{ numeric(displayedScore(theme, ranking.key)) }}</strong>
+                  <small>{{ scoreDetail(theme, ranking.key) }}</small>
+                </div>
+                <div class="theme-metrics">
+                  <span>
+                    <small>{{ ranking.key === 'today' ? '等效上涨' : '归因强股' }}</small>
+                    <strong>{{ numeric(displayedCount(theme, ranking.key)) }}只</strong>
+                  </span>
+                  <span :title="effectiveBreadthTitle(theme)" :aria-label="effectiveBreadthTitle(theme)">
+                    <small>{{ ranking.key === 'today' ? '归因广度' : '结构广度' }}</small>
+                    <strong>{{ numeric(displayedBreadth(theme, ranking.key)) }}%</strong>
+                  </span>
+                  <span>
+                    <small>核心延续</small>
+                    <strong>{{ theme.core_overlap_count }}只 · {{ percent(theme.core_overlap_ratio) }}</strong>
+                  </span>
+                </div>
+                <div class="theme-stock-list">
+                  <template v-if="leaderStock(theme, ranking.key)">
+                    <button
+                      type="button"
+                      class="theme-leader-button"
+                      :aria-expanded="expandedTheme === expandedThemeKey(theme, ranking.key)"
+                      :aria-controls="themeStockPanelId(ranking.key, index)"
+                      :aria-label="`${theme.industry}${leaderBadge(theme, ranking.key)}股 ${leaderStock(theme, ranking.key).name || leaderStock(theme, ranking.key).code}，${expandedTheme === expandedThemeKey(theme, ranking.key) ? '收起' : '展开'}代表股列表`"
+                      @click="toggleThemeStocks(theme, ranking.key)"
+                    >
+                      <span class="theme-leader-identity">
+                        <span class="theme-leader-badge">{{ leaderBadge(theme, ranking.key) }}</span>
+                        <strong>{{ leaderStock(theme, ranking.key).name || leaderStock(theme, ranking.key).code }}</strong>
+                        <small>{{ leaderStock(theme, ranking.key).code }}<template v-if="leaderStock(theme, ranking.key).attribution_weight != null"> · 归因 {{ percent(leaderStock(theme, ranking.key).attribution_weight) }}</template></small>
+                      </span>
+                      <span class="theme-stock-change" :class="stockChangeTone(leaderStock(theme, ranking.key).change_pct)">{{ signed(leaderStock(theme, ranking.key).change_pct, '%') }}</span>
+                      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"></path></svg>
+                    </button>
+                    <div
+                      v-if="expandedTheme === expandedThemeKey(theme, ranking.key)"
+                      :id="themeStockPanelId(ranking.key, index)"
+                      class="theme-stock-details"
+                      role="region"
+                      :aria-label="`${theme.industry}代表股列表`"
+                    >
+                      <div class="theme-stock-details-head"><span>{{ ranking.key === 'today' ? '今日领涨列表' : '结构代表股' }}</span><span>当前涨跌幅</span></div>
+                      <div v-for="(stock, stockIndex) in themeStocks(theme, ranking.key)" :key="stock.code || stock.name" class="theme-stock-detail-row">
+                        <span class="theme-stock-detail-name">
+                          <b v-if="stockIndex === 0">{{ leaderBadge(theme, ranking.key) }}</b>
+                          <strong>{{ stock.name || stock.code }}</strong>
+                          <small>{{ stock.code }}<template v-if="stock.attribution_weight != null"> · 归因 {{ percent(stock.attribution_weight) }}</template></small>
+                        </span>
+                        <strong class="theme-stock-change" :class="stockChangeTone(stock.change_pct)">{{ signed(stock.change_pct, '%') }}</strong>
+                      </div>
+                    </div>
+                  </template>
+                  <span v-else>—</span>
+                </div>
+                <div class="theme-context">
+                  <template v-if="ranking.key === 'today'">
+                    <template v-if="theme.eastmoney">
+                      <strong>东财 #{{ theme.eastmoney.rank }} · {{ signed(theme.eastmoney.change_pct, '%') }}</strong>
+                      <small>{{ eastmoneyLeaderDetail(theme) }}</small>
+                      <small v-if="eastmoneySignal.stale" class="risk-text">陈旧快照 · {{ eastmoneySignal.quote_generated_at || eastmoneySignal.captured_at }}</small>
+                    </template>
+                    <template v-else>
+                      <strong>{{ eastmoneySignal.available ? '东财未匹配' : '东财数据不可用' }}</strong>
+                      <small>{{ eastmoneyMissingDetail() }}</small>
+                    </template>
+                  </template>
+                  <template v-else>
+                    <strong>{{ theme.cross_day_persistent ? '连续出现' : '尚未跨日' }}</strong>
+                    <small v-if="theme.single_stock_dominated" class="risk-text">单股主导</small>
+                    <small v-else-if="theme.flow_net_yi != null">主力净额 {{ signed(theme.flow_net_yi, '亿') }}</small>
+                    <small v-else>资金数据待补充</small>
+                  </template>
+                </div>
+              </li>
+            </ol>
+          </section>
         </div>
       </section>
 
@@ -547,9 +533,11 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.mainline-page { --mainline-row-surface:#fff; --mainline-row-border:#cfd8e3; --mainline-row-expanded-border:#9eafc4; --mainline-row-divider:#d8dee7; --mainline-row-subtle:#f5f7fa; --mainline-row-shadow:0 2px 5px rgba(16,24,40,.08); --mainline-row-expanded-shadow:0 10px 28px rgba(15,23,42,.14); display:grid; width:100%; min-width:0; gap:16px; color:var(--text); }
-:global(html[data-theme="dark"] .mainline-page) { --mainline-row-surface:#12171f; --mainline-row-border:#3a4657; --mainline-row-expanded-border:#5b6a80; --mainline-row-divider:#384454; --mainline-row-subtle:#181e28; --mainline-row-shadow:0 4px 14px rgba(0,0,0,.18),inset 0 1px 0 rgba(255,255,255,.03); --mainline-row-expanded-shadow:0 12px 30px rgba(0,0,0,.38),inset 0 1px 0 rgba(255,255,255,.04); }
-.mainline-hero,.mainline-section { min-width:0; border:1px solid var(--line); border-radius:12px; background:var(--panel); box-shadow:0 1px 2px rgba(16,24,40,.04); }
+.mainline-page { --mainline-line:#bcc5d1; display:grid; width:100%; min-width:0; gap:16px; color:var(--text); }
+:global(html[data-theme="dark"] .mainline-page) { --mainline-line:#46566c; }
+.mainline-hero { min-width:0; border:1px solid var(--mainline-line); border-radius:12px; background:var(--panel); box-shadow:0 1px 2px rgba(16,24,40,.04); }
+:global(html[data-theme="dark"] .mainline-hero),:global(html[data-theme="dark"] .theme-ranking-panel) { box-shadow:none; }
+.mainline-section { min-width:0; }
 .mainline-hero { padding:20px; }
 .mainline-heading,.mainline-section-head { display:flex; align-items:center; justify-content:space-between; gap:14px; }
 .mainline-heading { align-items:flex-start; }
@@ -557,12 +545,12 @@ onBeforeUnmount(() => {
 .mainline-heading p,.mainline-section-head p { margin:0; color:var(--muted); font-size:13px; line-height:1.65; }
 .mainline-actions { display:flex; align-items:center; gap:10px; flex-shrink:0; }
 .mainline-time { color:var(--muted); font-size:12px; white-space:nowrap; }
-.mainline-actions button,.mainline-filters button { border:1px solid var(--line); border-radius:10px; background:var(--panel2); color:var(--text); font:inherit; cursor:pointer; }
+.mainline-actions button { border:1px solid var(--mainline-line); border-radius:10px; background:var(--panel2); color:var(--text); font:inherit; cursor:pointer; }
 .mainline-actions button { min-height:36px; padding:0 13px; font-size:13px; font-weight:750; }
-.mainline-actions button:hover,.mainline-filters button:hover { border-color:var(--accent-border); background:var(--accent-soft); }
+.mainline-actions button:hover { border-color:var(--accent-border); background:var(--accent-soft); }
 .mainline-actions button:disabled { cursor:wait; opacity:.65; }
 .mainline-summary-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin-top:18px; }
-.mainline-summary-card { min-width:0; padding:15px; border:1px solid var(--line); border-radius:14px; background:var(--panel2); }
+.mainline-summary-card { min-width:0; padding:15px; border:1px solid var(--mainline-line); border-radius:14px; background:var(--panel2); }
 .mainline-summary-card > span { display:block; color:var(--muted); font-size:12px; }
 .mainline-summary-card strong { display:block; overflow:hidden; margin:7px 0 4px; font-size:18px; line-height:1.25; text-overflow:ellipsis; white-space:nowrap; }
 .mainline-summary-card small { display:block; color:var(--muted); font-size:11px; line-height:1.45; }
@@ -582,7 +570,7 @@ onBeforeUnmount(() => {
   .coverage-info:hover .coverage-popover { display:block; }
 }
 .coverage-popover-title { display:block; margin-bottom:8px; color:var(--text); font-size:12px; }
-.coverage-popover-row { display:grid; grid-template-columns:1fr auto; gap:2px 10px; padding:7px 0; border-top:1px solid var(--line); }
+.coverage-popover-row { display:grid; grid-template-columns:1fr auto; gap:2px 10px; padding:7px 0; border-top:1px solid var(--mainline-line); }
 .coverage-popover-row > span { color:var(--text); font-size:11px; }
 .coverage-popover-row > b { color:var(--accent-text); font-size:11px; font-variant-numeric:tabular-nums; }
 .coverage-popover-row > small { grid-column:1 / -1; color:var(--muted); font-size:9px; line-height:1.45; }
@@ -593,31 +581,22 @@ onBeforeUnmount(() => {
 .mainline-loading,.mainline-empty { display:flex; min-height:150px; align-items:center; justify-content:center; flex-direction:column; gap:7px; color:var(--muted); text-align:center; }
 .mainline-empty strong { color:var(--text); font-size:17px; }
 .mainline-empty.compact { min-height:80px; }
-.mainline-section { padding:18px; }
-.mainline-section-head { align-items:flex-end; margin-bottom:14px; }
+.mainline-section-head { align-items:flex-start; margin-bottom:14px; }
 .mainline-section-head h3 { margin:0 0 3px; font-size:18px; }
-.mainline-filters { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:6px; }
-.mainline-filters button { padding:7px 10px; color:var(--muted); font-size:12px; }
-.mainline-filters button span { margin-left:3px; font-variant-numeric:tabular-nums; }
-.mainline-filters button.active { border-color:var(--accent-border); background:var(--accent-soft); color:var(--accent-text); font-weight:750; }
-.theme-table { display:grid; gap:8px; overflow:visible; padding:8px; border:1px solid var(--mainline-row-border); border-radius:12px; background:var(--mainline-row-subtle); }
-.theme-table-head,.theme-row { display:grid; grid-template-columns:minmax(200px,260px) 74px 68px 82px 88px minmax(300px,380px) minmax(150px,1fr); align-items:center; column-gap:clamp(12px,1.2vw,22px); }
-.theme-table-head { position:relative; z-index:2; padding:7px 12px; color:var(--muted); font-size:10px; font-weight:700; letter-spacing:.02em; }
-.theme-table-head > :nth-child(n+2):nth-child(-n+5) { justify-self:center; text-align:center; }
-.theme-table-head > :last-child { justify-self:end; text-align:right; }
-.theme-column-help { position:relative; width:max-content; max-width:100%; cursor:help; outline:none; }
-.theme-column-help::after { content:attr(data-tooltip); position:absolute; z-index:5; top:calc(100% + 9px); left:0; width:max-content; max-width:250px; padding:8px 10px; border:1px solid var(--line); border-radius:6px; background:var(--text); color:var(--panel); box-shadow:0 8px 18px rgba(15,23,42,.16); font-size:11px; font-weight:500; letter-spacing:0; line-height:1.5; white-space:normal; opacity:0; pointer-events:none; transform:translateY(-3px); transition:opacity .12s ease,transform .12s ease; }
-.theme-column-help:hover::after,.theme-column-help:focus::after { opacity:1; transform:translateY(0); }
-.theme-column-help:focus-visible { color:var(--accent-text); }
-.theme-column-help:nth-last-child(-n+2)::after { right:0; left:auto; }
-.theme-row { min-height:72px; padding:11px 12px; border:1px solid var(--mainline-row-border); border-radius:10px; background:var(--mainline-row-surface); box-shadow:var(--mainline-row-shadow); transition:border-color .16s ease,background-color .16s ease,box-shadow .16s ease; }
-.theme-row.expanded { position:relative; z-index:4; border-color:var(--mainline-row-expanded-border); box-shadow:var(--mainline-row-expanded-shadow); }
-.theme-row:last-child { border-radius:10px; }
-.theme-row:hover { border-color:var(--mainline-row-expanded-border); background:var(--mainline-row-surface); box-shadow:var(--mainline-row-expanded-shadow); }
-.theme-identity { display:flex; min-width:0; align-items:center; gap:10px; }
+.theme-rankings { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); align-items:start; gap:12px; }
+.theme-ranking-panel { min-width:0; overflow:visible; border:1px solid var(--mainline-line); border-radius:12px; background:var(--panel); box-shadow:0 1px 2px rgba(16,24,40,.04); }
+.theme-ranking-head { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:13px 15px; border-bottom:1px solid var(--mainline-line); }
+.theme-ranking-head h4 { margin:0; font-size:16px; line-height:1.25; }
+.theme-ranking-count { flex-shrink:0; color:var(--muted); font-size:11px; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.theme-ranking-list { margin:0; padding:0; list-style:none; }
+.theme-row { display:grid; grid-template-columns:minmax(0,1fr) auto; grid-template-areas:"identity score" "metrics metrics" "stocks stocks" "context context"; gap:0 12px; min-width:0; padding:13px 15px; border-bottom:1px solid var(--mainline-line); background:transparent; transition:background-color .16s ease; }
+.theme-row:last-child { border-bottom:0; }
+.theme-row.expanded { position:relative; z-index:4; }
+.theme-row:hover { background:var(--panel2); }
+.theme-identity { display:flex; grid-area:identity; min-width:0; align-items:center; gap:10px; }
 .theme-identity > div { min-width:0; }
 .theme-rank { width:22px; flex:0 0 22px; color:var(--muted); font-size:11px; font-variant-numeric:tabular-nums; }
-.theme-identity h4 { overflow:hidden; margin:0 0 4px; font-size:14px; line-height:1.2; text-overflow:ellipsis; white-space:nowrap; }
+.theme-identity h5 { overflow:hidden; margin:0 0 4px; font-size:14px; line-height:1.2; text-overflow:ellipsis; white-space:nowrap; }
 .theme-state { display:flex; align-items:center; gap:5px; color:var(--muted); font-size:10px; white-space:nowrap; }
 .theme-state::before { content:""; width:6px; height:6px; flex:0 0 6px; border-radius:50%; background:var(--muted); opacity:.7; }
 .theme-row.confirmed .theme-state { color:var(--red-text); }
@@ -626,14 +605,19 @@ onBeforeUnmount(() => {
 .theme-row.intraday .theme-state::before { background:var(--yellow); opacity:1; }
 .theme-row.emerging .theme-state { color:var(--accent-text); }
 .theme-row.emerging .theme-state::before { background:var(--accent); opacity:1; }
-.theme-score,.theme-data-cell,.theme-context { min-width:0; }
-.theme-score,.theme-data-cell { text-align:center; }
+.theme-score,.theme-context { min-width:0; }
+.theme-score { grid-area:score; text-align:right; }
+.theme-score > span { display:block; margin-bottom:3px; color:var(--muted); font-size:9px; line-height:1.2; }
 .theme-score strong { display:block; font-size:18px; line-height:1.1; font-variant-numeric:tabular-nums; }
-.theme-score small,.theme-data-cell small,.theme-context small { display:block; margin-top:4px; color:var(--muted); font-size:9px; line-height:1.3; }
-.theme-data-cell strong { font-size:13px; font-variant-numeric:tabular-nums; }
-.theme-stock-list { position:relative; overflow:visible; min-width:0; color:var(--text); font-size:11px; line-height:1.55; }
-.theme-leader-button { display:grid; width:min(100%,380px); min-width:0; grid-template-columns:minmax(0,1fr) auto 14px; align-items:center; gap:7px; padding:7px 9px; border:1px solid var(--mainline-row-border); border-radius:7px; background:var(--mainline-row-subtle); color:var(--text); font:inherit; text-align:left; cursor:pointer; }
-.theme-leader-button:hover { border-color:var(--mainline-row-expanded-border); background:var(--mainline-row-subtle); }
+.theme-score small,.theme-context small { display:block; margin-top:3px; color:var(--muted); font-size:9px; line-height:1.3; }
+.theme-metrics { display:grid; grid-area:metrics; grid-template-columns:repeat(3,minmax(0,1fr)); margin:10px 0 3px 32px; }
+.theme-metrics > span { display:grid; min-width:0; gap:2px; }
+.theme-metrics > span + span { padding-left:12px; border-left:1px solid var(--mainline-line); }
+.theme-metrics small { overflow:hidden; color:var(--muted); font-size:9px; line-height:1.3; text-overflow:ellipsis; white-space:nowrap; }
+.theme-metrics strong { overflow:hidden; color:var(--text); font-size:12px; line-height:1.35; font-variant-numeric:tabular-nums; text-overflow:ellipsis; white-space:nowrap; }
+.theme-stock-list { position:relative; grid-area:stocks; overflow:visible; min-width:0; margin:6px 0 0 32px; color:var(--text); font-size:11px; line-height:1.55; }
+.theme-leader-button { display:grid; width:100%; min-width:0; grid-template-columns:minmax(0,1fr) auto 14px; align-items:center; gap:7px; padding:5px 7px; border:0; border-radius:6px; background:transparent; color:var(--text); font:inherit; text-align:left; cursor:pointer; }
+.theme-leader-button:hover { background:var(--panel2); }
 .theme-leader-button:focus-visible { border-color:var(--accent-border); outline:2px solid var(--accent-border); outline-offset:1px; }
 .theme-leader-identity { display:flex; min-width:0; align-items:baseline; gap:5px; overflow:hidden; }
 .theme-leader-identity strong { overflow:hidden; font-size:11px; text-overflow:ellipsis; white-space:nowrap; }
@@ -644,29 +628,24 @@ onBeforeUnmount(() => {
 .theme-stock-change.down { color:var(--green-text); }
 .theme-leader-button svg { width:14px; height:14px; fill:none; stroke:currentColor; stroke-width:1.6; transition:transform .15s ease; }
 .theme-leader-button[aria-expanded="true"] svg { transform:rotate(180deg); }
-.theme-stock-details { position:absolute; z-index:10; top:calc(100% + 5px); left:0; width:min(100%,380px); overflow:hidden; padding:7px; border:1px solid var(--mainline-row-expanded-border); border-radius:9px; background:var(--mainline-row-surface); box-shadow:var(--mainline-row-expanded-shadow); }
+.theme-stock-details { position:absolute; z-index:10; top:calc(100% + 3px); right:0; left:0; width:auto; max-height:min(320px,60vh); overflow-y:auto; padding:7px; border:1px solid var(--mainline-line); border-radius:8px; background:var(--panel); box-shadow:0 12px 28px rgba(15,23,42,.18); }
 .theme-stock-details-head,.theme-stock-detail-row { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:8px; }
 .theme-stock-details-head { padding:2px 3px 7px; color:var(--muted); font-size:9px; }
-.theme-stock-detail-row { padding:7px 8px; border:1px solid var(--mainline-row-border); border-radius:7px; background:var(--mainline-row-subtle); }
+.theme-stock-detail-row { padding:7px 8px; border-radius:6px; background:var(--panel2); }
 .theme-stock-detail-row + .theme-stock-detail-row { margin-top:5px; }
 .theme-stock-detail-name { display:flex; min-width:0; align-items:baseline; gap:5px; }
 .theme-stock-detail-name strong { overflow:hidden; font-size:10px; text-overflow:ellipsis; white-space:nowrap; }
 .theme-stock-detail-name small { color:var(--muted); font-size:9px; font-variant-numeric:tabular-nums; }
-.theme-context { text-align:right; }
+.theme-context { display:flex; grid-area:context; align-items:baseline; justify-content:space-between; gap:6px 10px; margin-left:32px; padding:3px 7px 0; text-align:left; }
 .theme-context strong { display:block; font-size:11px; font-weight:650; }
+.theme-context small { margin:0; text-align:right; }
 .theme-context .risk-text { color:var(--red-text); }
 @media (max-width:1450px) {
   .mainline-summary-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
-  .theme-table-head,.theme-row { grid-template-columns:minmax(150px,1fr) 62px 56px 72px 78px minmax(210px,1.1fr) minmax(108px,.7fr); column-gap:9px; }
-}
-@media (max-width:1000px) and (min-width:841px) {
-  .theme-table-head,.theme-row { grid-template-columns:minmax(118px,1fr) 52px 48px 62px 66px minmax(150px,1.1fr) minmax(84px,.65fr); column-gap:6px; }
-  .theme-leader-button { gap:4px; padding-right:3px; padding-left:3px; }
-  .theme-leader-identity small { display:none; }
 }
 @media (max-width:840px) {
   .mainline-page { gap:10px; }
-  .mainline-hero,.mainline-section { padding:13px; border-radius:10px; box-shadow:0 1px 2px rgba(16,24,40,.04); }
+  .mainline-hero { padding:13px; border-radius:10px; box-shadow:0 1px 2px rgba(16,24,40,.04); }
   .mainline-heading,.mainline-section-head { align-items:stretch; flex-direction:column; }
   .mainline-heading { gap:12px; }
   .mainline-heading h2 { margin-bottom:4px; font-size:22px; }
@@ -683,38 +662,19 @@ onBeforeUnmount(() => {
   .coverage-info svg { width:17px; height:17px; }
   .coverage-popover { top:31px; right:0; left:auto; width:calc(200% + 8px); max-width:calc(100vw - 44px); }
   .mainline-notice { gap:4px; margin-top:10px; padding:9px 10px; font-size:11px; }
-  .mainline-section { padding-bottom:13px; }
   .mainline-section-head { gap:10px; margin-bottom:10px; }
   .mainline-section-head h3 { font-size:17px; }
-  .mainline-filters { justify-content:flex-start; overflow:auto; flex-wrap:nowrap; margin:0; padding:3px; border:1px solid var(--mainline-row-border); border-radius:10px; background:var(--mainline-row-subtle); scrollbar-width:none; -webkit-overflow-scrolling:touch; }
-  .mainline-filters::-webkit-scrollbar { display:none; }
-  .mainline-filters button { flex-shrink:0; border:0; border-radius:7px; background:transparent; }
-  .mainline-filters button.active { background:var(--mainline-row-surface); box-shadow:0 1px 2px rgba(16,24,40,.08); }
-  .theme-table { gap:10px; overflow:visible; padding:0; border:0; border-radius:0; background:transparent; }
-  .theme-table-head { display:none; }
-  .theme-row { grid-template-columns:repeat(3,minmax(0,1fr)); grid-template-areas:"identity identity score" "strong breadth continuity" "stocks stocks stocks" "context context context"; gap:0 8px; min-height:0; padding:12px; border:1px solid var(--mainline-row-border); border-radius:10px; }
-  .theme-identity { grid-area:identity; }
+  .theme-rankings { grid-template-columns:minmax(0,1fr); gap:10px; }
+  .theme-ranking-panel { border-radius:10px; }
+  .theme-ranking-head { padding:12px 13px; }
+  .theme-row { padding:12px 13px; }
   .theme-rank { width:20px; flex-basis:20px; }
-  .theme-identity h4 { font-size:14px; }
-  .theme-score { grid-area:score; text-align:right; }
-  .theme-score strong { font-size:19px; }
-  .theme-data-cell { display:block; min-width:0; margin-top:9px; padding:8px; border:1px solid var(--mainline-row-border); border-radius:7px; background:var(--mainline-row-subtle); }
-  .theme-data-cell.strong-count { grid-area:strong; text-align:left; }
-  .theme-data-cell.breadth { grid-area:breadth; text-align:center; }
-  .theme-data-cell.continuity { grid-area:continuity; text-align:right; }
-  .theme-data-cell::before { content:attr(data-label); display:block; margin-bottom:3px; color:var(--muted); font-size:9px; }
-  .theme-data-cell strong { font-size:14px; }
-  .theme-data-cell small { display:inline; margin:0 0 0 2px; }
-  .theme-stock-list { grid-area:stocks; padding:8px 0; line-height:1.65; }
-  .theme-stock-list::before { content:none; }
-  .theme-leader-button { width:100%; padding:8px 9px; border-width:1px; border-radius:7px; background:var(--mainline-row-subtle); }
-  .theme-leader-button:hover { background:var(--mainline-row-subtle); }
+  .theme-identity h5 { font-size:14px; }
+  .theme-metrics,.theme-stock-list,.theme-context { margin-left:30px; }
+  .theme-leader-button:hover { background:var(--panel2); }
   .theme-leader-identity strong { font-size:11px; }
   .theme-leader-identity small { display:inline; }
-  .theme-stock-details { top:calc(100% + 3px); right:0; left:0; width:auto; max-height:min(320px,60vh); overflow-y:auto; }
   .theme-stock-details-head { padding:2px 3px 7px; }
   .theme-stock-detail-row { padding:7px 8px; }
-  .theme-context { display:flex; grid-area:context; justify-content:space-between; gap:10px; padding-top:7px; border-top:1px dashed var(--mainline-row-divider); text-align:left; }
-  .theme-context small { margin:0; }
 }
 </style>
