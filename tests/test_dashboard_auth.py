@@ -3594,6 +3594,37 @@ console.log(JSON.stringify([
             stylesheet,
         )
 
+    def test_practice_trade_marker_tooltip_uses_high_contrast_light_theme_colors(self):
+        stylesheet = (ROOT / 'frontend' / 'dashboard.css').read_text(encoding='utf-8')
+
+        self.assertIn(
+            'html:not([data-theme="dark"]) .practice-trade-marker-line.buy '
+            '.practice-trade-marker-side {',
+            stylesheet,
+        )
+        self.assertIn(
+            'html:not([data-theme="dark"]) .practice-trade-marker-line.sell '
+            '.practice-trade-marker-side {',
+            stylesheet,
+        )
+        self.assertIn(
+            'html:not([data-theme="dark"]) .practice-trade-marker-fill '
+            '{ color:var(--accent-text); }',
+            stylesheet,
+        )
+        self.assertIn(
+            'html:not([data-theme="dark"]) .practice-trade-marker-pnl.up '
+            '{ color:var(--red-text); }',
+            stylesheet,
+        )
+        self.assertIn(
+            'html:not([data-theme="dark"]) .practice-trade-marker-pnl.down '
+            '{ color:var(--green-text); }',
+            stylesheet,
+        )
+        self.assertIn('color:var(--accent-text);\n      background:var(--accent-soft);', stylesheet)
+        self.assertIn('color:var(--yellow-text);\n      background:var(--yellow-soft);', stylesheet)
+
     def test_compliance_dialog_stays_compact_and_visible_in_dark_mode(self):
         compliance_source = (
             ROOT / 'web' / 'src' / 'components' / 'ComplianceDialog.vue'

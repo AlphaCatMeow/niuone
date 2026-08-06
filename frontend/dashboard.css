@@ -2031,6 +2031,19 @@
     html:not([data-theme="dark"]) .practice-trade-marker-stock { color:var(--text); }
     html:not([data-theme="dark"]) .practice-hover-tooltip-row,
     html:not([data-theme="dark"]) .practice-trade-marker-time { color:var(--muted); }
+    html:not([data-theme="dark"]) .practice-trade-marker-line.buy .practice-trade-marker-side {
+      color:var(--accent-text);
+      background:var(--accent-soft);
+      box-shadow:inset 0 0 0 1px var(--accent-border);
+    }
+    html:not([data-theme="dark"]) .practice-trade-marker-line.sell .practice-trade-marker-side {
+      color:var(--yellow-text);
+      background:var(--yellow-soft);
+      box-shadow:inset 0 0 0 1px var(--yellow-border);
+    }
+    html:not([data-theme="dark"]) .practice-trade-marker-fill { color:var(--accent-text); }
+    html:not([data-theme="dark"]) .practice-trade-marker-pnl.up { color:var(--red-text); }
+    html:not([data-theme="dark"]) .practice-trade-marker-pnl.down { color:var(--green-text); }
 
     html:not([data-theme="dark"]) .practice-log-scroll,
     html:not([data-theme="dark"]) .practice-log-detail-body,
