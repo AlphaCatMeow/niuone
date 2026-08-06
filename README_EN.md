@@ -238,7 +238,7 @@ docker compose down
 Deploy a specific version from Docker Hub:
 
 ```bash
-export NIUONE_IMAGE=kunkundi/niuone:v0.0.6
+export NIUONE_IMAGE=kunkundi/niuone:v0.0.7
 docker compose pull
 docker compose up -d --no-build
 ```
