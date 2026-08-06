@@ -39,8 +39,8 @@ const exitRuleLabels = computed(() => {
   )
 })
 const afterColor = computed(() => Number.isFinite(afterPnl.value)
-  ? (afterPnl.value > 0 ? '#f59e0b' : afterPnl.value < 0 ? '#34d399' : '#94a3b8')
-  : '#94a3b8')
+  ? (afterPnl.value > 0 ? 'var(--yellow-text)' : afterPnl.value < 0 ? 'var(--green-text)' : 'var(--muted)')
+  : 'var(--muted)')
 </script>
 
 <template>
@@ -57,7 +57,7 @@ const afterColor = computed(() => Number.isFinite(afterPnl.value)
       <div class="position-metric"><div class="position-label">实时涨幅</div><div class="position-value strong" :style="`color:${practiceValueColor(currentPct)}`">{{ Number.isFinite(currentPct) ? signedPracticeNumber(currentPct) : '--' }}</div></div>
       <div class="position-metric"><div class="position-label">卖出金额</div><div class="position-value">{{ formatPracticeAmount(sold.sell_amount) }}</div></div>
       <div class="position-metric"><div class="position-label">到账金额</div><div class="position-value">{{ formatPracticeAmount(sold.net_proceeds) }}</div></div>
-      <div class="position-metric"><div class="position-label">费用</div><div class="position-value" style="color:#94a3b8">{{ formatPracticeAmount(sold.fee) }}</div></div>
+      <div class="position-metric"><div class="position-label">费用</div><div class="position-value secondary">{{ formatPracticeAmount(sold.fee) }}</div></div>
     </div>
     <div v-if="exitRuleLabels.length || reasonText" class="position-reason-block">
       <div v-if="exitRuleLabels.length" class="position-reason-row"><span class="position-reason-label">卖出归因</span><span class="position-reason-text"><span class="position-reason-badges"><span v-for="label in exitRuleLabels" :key="label" class="position-reason-badge">{{ label }}</span></span></span></div>

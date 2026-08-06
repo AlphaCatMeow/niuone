@@ -62,11 +62,11 @@ const buyReasonText = computed(() => String(props.position.entry_reason || props
       <div class="position-metric"><div class="position-label">成本/现价</div><div class="position-value combo">{{ formatPracticeNumber(position.avg_cost) }} / {{ formatPracticeNumber(position.last_price) }}</div></div>
       <div class="position-metric"><div class="position-label">盈亏</div><div class="position-value strong combo" :style="`color:${practiceValueColor(pnlValue)}`">{{ pnlText }}</div></div>
       <div class="position-metric"><div class="position-label">实时涨幅</div><div class="position-value strong" :style="`color:${practiceValueColor(changePct)}`">{{ Number.isFinite(changePct) ? signedPracticeNumber(changePct) : '--' }}</div></div>
-      <div class="position-metric"><div class="position-label">最低/最高</div><div class="position-value strong combo"><span :style="`color:${practiceValueColor(lowPct)}`">{{ Number.isFinite(lowPct) ? signedPracticeNumber(lowPct) : '--' }}</span><span style="color:#64748b">/</span><span :style="`color:${practiceValueColor(highPct)}`">{{ Number.isFinite(highPct) ? signedPracticeNumber(highPct) : '--' }}</span></div></div>
+      <div class="position-metric"><div class="position-label">最低/最高</div><div class="position-value strong combo"><span :style="`color:${practiceValueColor(lowPct)}`">{{ Number.isFinite(lowPct) ? signedPracticeNumber(lowPct) : '--' }}</span><span class="position-value-separator">/</span><span :style="`color:${practiceValueColor(highPct)}`">{{ Number.isFinite(highPct) ? signedPracticeNumber(highPct) : '--' }}</span></div></div>
       <div class="position-metric"><div class="position-label">今日收益</div><div class="position-value strong" :style="`color:${practiceValueColor(todayPnl)}`">{{ todayText }}</div></div>
       <div class="position-metric"><div class="position-label">市值</div><div class="position-value">{{ formatPracticeAmount(position.market_value) }}</div></div>
       <div class="position-metric"><div class="position-label">仓位占比</div><div class="position-value">{{ positionText }}</div></div>
-      <div class="position-metric"><div class="position-label">可卖/持有</div><div class="position-value" style="color:#94a3b8">{{ position.available_qty ?? 0 }} / {{ position.qty ?? 0 }}</div></div>
+      <div class="position-metric"><div class="position-label">可卖/持有</div><div class="position-value secondary">{{ position.available_qty ?? 0 }} / {{ position.qty ?? 0 }}</div></div>
     </div>
     <div v-if="position.entry_theme || position.active_theme" class="position-reason-block">
       <div class="position-reason-row">

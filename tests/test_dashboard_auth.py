@@ -3572,6 +3572,28 @@ console.log(JSON.stringify([
         self.assertIn('allowInfoPopoverClick', ADMIN_FRONTEND)
         self.assertIn('event?.detail === 0', DASHBOARD_FRONTEND)
 
+    def test_practice_position_text_uses_theme_aware_high_contrast_colors(self):
+        stylesheet = (ROOT / 'frontend' / 'dashboard.css').read_text(encoding='utf-8')
+        display_utils = (
+            ROOT / 'web' / 'src' / 'utils' / 'practiceDisplay.js'
+        ).read_text(encoding='utf-8')
+
+        self.assertIn("return 'var(--muted)'", display_utils)
+        self.assertIn(
+            "return number >= 0 ? 'var(--red-text)' : 'var(--green-text)'",
+            display_utils,
+        )
+        self.assertNotIn('style="color:#94a3b8"', PRACTICE_COMPONENTS)
+        self.assertIn('class="position-value secondary"', PRACTICE_COMPONENTS)
+        self.assertIn(
+            'html:not([data-theme="dark"]) .position-reason-text { color:#344054; }',
+            stylesheet,
+        )
+        self.assertIn(
+            'html:not([data-theme="dark"]) .position-value-separator { color:#475467; }',
+            stylesheet,
+        )
+
     def test_compliance_dialog_stays_compact_and_visible_in_dark_mode(self):
         compliance_source = (
             ROOT / 'web' / 'src' / 'components' / 'ComplianceDialog.vue'

@@ -490,6 +490,7 @@
     .position-metric { min-width:0; }
     .position-label { font-size:11px; color:#64748b; line-height:1.2; white-space:nowrap; }
     .position-value { margin-top:3px; font-size:13px; line-height:1.28; color:#e2e8f0; font-variant-numeric:tabular-nums; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .position-value.secondary, .position-value-separator { color:var(--muted); }
     .position-value.combo { font-size:12.5px; }
     .position-value.strong { font-weight:800; }
     .position-brief-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(138px, 1fr)); gap:8px; margin:0 0 12px; }
@@ -1727,6 +1728,12 @@
     html:not([data-theme="dark"]) .dragon-tiger-detail-values small,
     html:not([data-theme="dark"]) .dragon-tiger-seat-values small,
     html:not([data-theme="dark"]) .dragon-tiger-foot { color:var(--muted); }
+    html:not([data-theme="dark"]) .position-label,
+    html:not([data-theme="dark"]) .position-brief-item,
+    html:not([data-theme="dark"]) .position-reason-label,
+    html:not([data-theme="dark"]) .position-value.secondary,
+    html:not([data-theme="dark"]) .position-value-separator { color:#475467; }
+    html:not([data-theme="dark"]) .position-reason-text { color:#344054; }
 
     html:not([data-theme="dark"]) .practice-market-summary-dialog {
       border-color:#d7dfec;

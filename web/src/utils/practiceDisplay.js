@@ -63,8 +63,8 @@ export function signedPracticeAmount(value) {
 
 export function practiceValueColor(value) {
   const number = Number(value)
-  if (!Number.isFinite(number)) return '#94a3b8'
-  return number >= 0 ? '#ff4d4f' : '#39d98a'
+  if (!Number.isFinite(number)) return 'var(--muted)'
+  return number >= 0 ? 'var(--red-text)' : 'var(--green-text)'
 }
 
 export function splitPracticeTags(value) {
